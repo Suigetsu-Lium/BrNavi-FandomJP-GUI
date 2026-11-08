@@ -60,6 +60,44 @@ class OnlineWikiGuiTests(unittest.TestCase):
         self.assertEqual(result["status"], "error")
         self.assertIn("オンラインWiki検索", result["message"])
 
+    def test_wiki_has_its_own_tab_and_gui_execution_log_is_removed(self):
+        self.assertIn('id="view-wiki"', gui_app.HTML_TEMPLATE)
+        self.assertIn("switchTab('wiki')", gui_app.HTML_TEMPLATE)
+        self.assertIn('id="view-maintenance"', gui_app.HTML_TEMPLATE)
+        self.assertNotIn('id="task-log"', gui_app.HTML_TEMPLATE)
+        self.assertNotIn("function appendLog", gui_app.HTML_TEMPLATE)
+
+    @patch.object(gui_app.BackroomsAPI, "_notify_maintenance_task_completed")
+    @patch("gui_app.run_update_database")
+    def test_maintenance_task_reports_status_without_gui_log_stream(
+        self, update_database, notify
+    ):
+        self.api._maintenance_lock.acquire()
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            self.api._execute_task("update_master")
+
+        self.assertIn("既存データベース更新", output.getvalue())
+        notify.assert_called_once_with(True, "既存データベース更新が完了しました。")
+        self.assertFalse(self.api._maintenance_lock.locked())
+        update_database.assert_called_once_with()
+
+    @patch.object(gui_app.BackroomsAPI, "_notify_maintenance_task_completed")
+    @patch("gui_app.run_update_database", side_effect=RuntimeError("test failure"))
+    def test_maintenance_task_reports_failures(self, update_database, notify):
+        self.api._maintenance_lock.acquire()
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            self.api._execute_task("update_master")
+
+        self.assertIn("test failure", output.getvalue())
+        notify.assert_called_once_with(
+            False, "既存データベース更新に失敗しました: test failure"
+        )
+        self.assertFalse(self.api._maintenance_lock.locked())
+
     @patch("gui_app.webview.create_window")
     def test_open_online_wiki_browser_rejects_non_wiki_urls(self, create_window):
         result = self.api.open_online_wiki_browser("https://example.com/")
@@ -140,8 +178,7 @@ class OnlineWikiGuiTests(unittest.TestCase):
         })
 
     @patch("gui_app.save_online_wiki_page")
-    @patch("gui_app.webview.windows", new_callable=list)
-    def test_save_task_logs_and_reports_completion(self, windows, save_page):
+    def test_save_task_reports_completion(self, save_page):
         page = {
             "title": "Level 0",
             "url": "https://backrooms.fandom.com/ja/wiki/Level_0",
@@ -154,7 +191,7 @@ class OnlineWikiGuiTests(unittest.TestCase):
             "images_failed": 0,
         }
         window = unittest.mock.Mock()
-        windows.append(window)
+        self.api._main_window = window
         self.api._maintenance_lock.acquire()
         output = io.StringIO()
 

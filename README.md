@@ -30,6 +30,26 @@ Backrooms Fandom JP のデータをローカルに構築し、Level検索・接�
 - **超高速ルート検索 (`[3]`, `[8]`)**：1万件以上のエッジから目的地までの最短経路を瞬時に探索。
 - **インテリジェント検索・閲覧 (`[1]`, `[2]`, `[4]`)**：キーワードによるLevel検索とテキスト閲覧。
 - **画像抽出・オフラインビューアー (`[5]`, `[6]`)**：HTMLから画像のみを抽出し、ローカルで表示。
+- **BrNavi AI Assistant**：Groq APIとローカルWiki資料を利用したMarkdownチャット。会話はローカルSQLiteに保存されます。
+
+## 🧑‍💻 ソースからの起動
+Python 3.10以降を用意し、リポジトリのルートで依存パッケージをインストールします。
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python gui_app.py
+```
+
+GUI版は `gui_app.py`、コンソール版は `BackroomsNavigationSystem_FandomJP.py` から起動します。AI Assistantを利用するには、GroqのAPIキーを `GROQ_API_KEY` 環境変数に設定してください。キーが未設定の場合、AI機能は利用できません。
+
+会話データと設定は `database/ai/` に保存されます。SQLiteスキーマの更新前にはSQLite Backup APIを使って同じフォルダにバックアップを作成します。アプリ内で会話を削除すると、関連するメッセージと回答バージョンも削除されます。
+
+## 🧪 テスト
+```powershell
+python -m unittest discover -s tests -v
+```
 
 ## ⚠️ 権利・ライセンスに関する免責事項
 - **データの非同梱**：本ソフトにHTML、本文、画像データは同梱されていません。データは利用者が自身の責任で取得・管理してください。

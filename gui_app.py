@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import asyncio
 import sys
 import os
 import json
@@ -29,9 +30,12 @@ from modules.update_database import main as run_update_database
 # AI Assistant（Groq / ローカルWiki検索）
 try:
     from modules.ai.assistant import AIAssistant
+    from modules.ai.markdown_renderer import render_markdown, syntax_highlight_css
     AI_AVAILABLE = True
 except Exception as e:
     AIAssistant = None
+    render_markdown = None
+    syntax_highlight_css = None
     AI_AVAILABLE = False
     print(f"[AI] モジュールを読み込めません: {e}")
 
@@ -56,6 +60,8 @@ class BackroomsAPI:
         self.current_info = None
         self.ai = None
         self.ai_error = None
+        self._ai_jobs = {}
+        self._ai_jobs_lock = threading.Lock()
         if AI_AVAILABLE:
             try:
                 self.ai = AIAssistant(
@@ -82,11 +88,20 @@ class BackroomsAPI:
     def ai_get_history(self, conversation_id):
         if not self.ai or not conversation_id:
             return []
-        try:
-            return self.ai.get_history(str(conversation_id))
-        except Exception as e:
-            print(f"[AI] 履歴取得エラー: {e}")
-            return []
+        history = self.ai.get_history(str(conversation_id))
+        for item in history:
+            if item["role"] == "assistant":
+                for version in item.get("versions", []):
+                    version["html"] = render_markdown(version["content"])
+                current = next(
+                    (
+                        version for version in item.get("versions", [])
+                        if version["version_number"] == item["current_version_number"]
+                    ),
+                    None,
+                )
+                item["html"] = current["html"] if current else render_markdown(item["content"])
+        return history
 
     def ai_list_conversations(self):
         return self.ai.list_conversations() if self.ai else []
@@ -102,44 +117,208 @@ class BackroomsAPI:
         except Exception as e:
             return {"error": str(e)}
 
-    def ai_regenerate(self, conversation_id):
+    def ai_render_markdown(self, content):
+        if not render_markdown:
+            return {"error": "Markdownレンダラーを読み込めません。"}
+        return {"html": render_markdown(content)}
+
+    def ai_get_active_request(self, conversation_id):
+        return self.ai.store.get_active_request(str(conversation_id)) if self.ai else None
+
+    def ai_set_current_version(self, message_id, version_number):
         if not self.ai:
-            self._send_ai_result({"ok": False, "error": self.ai_error or "AIが利用できません。", "conversation_id": conversation_id, "regenerate": True})
-            return False
-        def worker():
-            try:
-                result = self.ai.chat("", conversation_id, regenerate=True)
-                self._send_ai_result({"ok": True, **result, "regenerate": True})
-            except Exception as e:
-                self._send_ai_result({"ok": False, "error": str(e), "conversation_id": conversation_id, "regenerate": True})
-        threading.Thread(target=worker, daemon=True).start()
-        return True
+            return {"error": self.ai_error or "AIが利用できません。"}
+        if not self.ai.store.set_current_version(int(message_id), int(version_number)):
+            return {"error": "回答バージョンを切り替えられません。"}
+        return {"ok": True}
 
-    def ai_send_message(self, message, conversation_id=None):
+    def ai_set_rating(self, message_id, version_number, rating):
         if not self.ai:
-            self._send_ai_result({"ok": False, "error": self.ai_error or "AIが利用できません。",
-                                  "conversation_id": conversation_id})
-            return False
+            return {"error": self.ai_error or "AIが利用できません。"}
+        rating = rating or None
+        if not self.ai.store.set_rating(int(message_id), int(version_number), rating):
+            return {"error": "回答バージョンが見つかりません。"}
+        return {"ok": True}
+
+    def ai_rename_conversation(self, conversation_id, title):
+        if not self.ai:
+            return {"error": self.ai_error or "AIが利用できません。"}
+        try:
+            if not self.ai.store.rename_conversation(str(conversation_id), title):
+                return {"error": "会話が見つかりません。"}
+            return {"ok": True}
+        except ValueError as e:
+            return {"error": str(e)}
+
+    def ai_delete_conversation(self, conversation_id):
+        if not self.ai:
+            return {"error": self.ai_error or "AIが利用できません。"}
+        cid = str(conversation_id)
+        active = self.ai.store.get_active_request(cid)
+        if active:
+            self.ai_cancel_generation(active["request_id"])
+        return {"ok": self.ai.store.delete_conversation(cid)}
+
+    def ai_regenerate(self, conversation_id, message_id, request_id):
+        if not self.ai:
+            return {"accepted": False, "error": self.ai_error or "AIが利用できません。"}
+        return self._start_ai_generation(
+            str(conversation_id), "", "regenerate", int(message_id), str(request_id)
+        )
+
+    def ai_send_message(self, message, conversation_id=None, request_id=None):
+        if not self.ai:
+            return {"accepted": False, "error": self.ai_error or "AIが利用できません。"}
+        message = str(message or "").strip()
+        if not message or len(message) > 12000:
+            return {"accepted": False, "error": "メッセージは1～12,000文字で入力してください。"}
+        return self._start_ai_generation(
+            str(conversation_id or ""),
+            message,
+            "send",
+            None,
+            str(request_id or ""),
+        )
+
+    def _start_ai_generation(self, conversation_id, message, operation, message_id, request_id):
+        try:
+            generation = self.ai.store.begin_generation(
+                conversation_id,
+                message,
+                operation=operation,
+                message_id=message_id,
+                request_id=request_id or None,
+            )
+        except Exception as e:
+            return {"accepted": False, "error": str(e)}
+
+        request_id = generation["request_id"]
+        job = {"loop": None, "task": None, "cancel_requested": False}
+        with self._ai_jobs_lock:
+            self._ai_jobs[request_id] = job
 
         def worker():
+            async def run():
+                loop = asyncio.get_running_loop()
+                task = asyncio.current_task()
+                with self._ai_jobs_lock:
+                    job["loop"] = loop
+                    job["task"] = task
+                    should_cancel = job["cancel_requested"]
+                if should_cancel:
+                    task.cancel()
+                try:
+                    result = await self.ai.chat(
+                        generation,
+                        on_delta=lambda text: self._send_ai_stream(
+                            {
+                                "conversation_id": generation["conversation_id"],
+                                "request_id": request_id,
+                                "text": text,
+                            }
+                        ),
+                    )
+                    if result.get("cancelled"):
+                        self.ai.store.finish_generation_error(request_id, cancelled=True)
+                        self._send_ai_result(
+                            {
+                                "ok": False,
+                                "cancelled": True,
+                                "conversation_id": generation["conversation_id"],
+                                "request_id": request_id,
+                                "operation": operation,
+                            }
+                        )
+                        return
+                    result["rendered_html"] = render_markdown(result["response"])
+                    self._send_ai_result({"ok": True, **result})
+                    if generation["should_generate_title"]:
+                        await self.ai.generate_title(
+                            generation["conversation_id"], generation["prompt"]
+                        )
+                        self._send_ai_title_update(generation["conversation_id"])
+                except asyncio.CancelledError:
+                    self.ai.store.finish_generation_error(request_id, cancelled=True)
+                    self._send_ai_result(
+                        {
+                            "ok": False,
+                            "cancelled": True,
+                            "conversation_id": generation["conversation_id"],
+                            "request_id": request_id,
+                            "operation": operation,
+                        }
+                    )
+                except Exception as e:
+                    self.ai.store.finish_generation_error(request_id)
+                    self._send_ai_result(
+                        {
+                            "ok": False,
+                            "error": str(e),
+                            "conversation_id": generation["conversation_id"],
+                            "request_id": request_id,
+                            "operation": operation,
+                        }
+                    )
+
             try:
-                result = self.ai.chat(str(message), conversation_id)
-                payload = {"ok": True, **result}
-            except Exception as e:
-                payload = {"ok": False, "error": str(e), "conversation_id": conversation_id}
-            self._send_ai_result(payload)
+                asyncio.run(run())
+            finally:
+                with self._ai_jobs_lock:
+                    self._ai_jobs.pop(request_id, None)
 
         threading.Thread(target=worker, daemon=True).start()
-        return True
+        return {
+            "accepted": True,
+            "conversation_id": generation["conversation_id"],
+            "request_id": request_id,
+            "operation": operation,
+        }
+
+    def ai_cancel_generation(self, request_id):
+        if not self.ai:
+            return {"accepted": False, "error": self.ai_error or "AIが利用できません。"}
+        request_id = str(request_id)
+        if not self.ai.store.mark_cancel_requested(request_id):
+            return {"accepted": False, "error": "生成はすでに終了しています。"}
+        with self._ai_jobs_lock:
+            job = self._ai_jobs.get(request_id)
+            if job:
+                job["cancel_requested"] = True
+                loop, task = job["loop"], job["task"]
+            else:
+                loop, task = None, None
+        if loop and task:
+            loop.call_soon_threadsafe(task.cancel)
+        else:
+            self.ai.store.finish_generation_error(request_id, cancelled=True)
+        return {"accepted": True, "request_id": request_id}
 
     @staticmethod
     def _send_ai_result(payload):
         try:
-            encoded = json.dumps(payload, ensure_ascii=False)
+            encoded = json.dumps(payload, ensure_ascii=True)
             if webview.windows:
-                webview.windows[0].evaluate_js(f"onAIResponse({json.dumps(encoded)});")
+                webview.windows[0].evaluate_js(f"onAIResponse({encoded});")
         except Exception as e:
             print(f"[AI] GUIへの応答送信に失敗: {e}")
+
+    @staticmethod
+    def _send_ai_stream(payload):
+        try:
+            encoded = json.dumps(payload, ensure_ascii=True)
+            if webview.windows:
+                webview.windows[0].evaluate_js(f"onAIStream({encoded});")
+        except Exception as e:
+            print(f"[AI] ストリーミング表示に失敗: {e}")
+
+    @staticmethod
+    def _send_ai_title_update(conversation_id):
+        try:
+            encoded = json.dumps(conversation_id, ensure_ascii=True)
+            if webview.windows:
+                webview.windows[0].evaluate_js(f"onAITitleUpdated({encoded});")
+        except Exception as e:
+            print(f"[AI] 会話名の更新表示に失敗: {e}")
 
     def _get_sort_key(self, item):
         """指定カテゴリ優先順 ＋ 自然な数値昇順 (Level 0, 1, 2... 10) でソート"""
@@ -487,6 +666,36 @@ HTML_TEMPLATE = r"""
       align-items: center;
       justify-content: space-between;
     }
+    .ai-table-scroll {
+      max-width: 100%;
+      overflow-x: auto;
+      margin: 0.75rem 0;
+    }
+    .ai-answer-content table {
+      border-collapse: collapse;
+      min-width: max-content;
+    }
+    .ai-answer-content th, .ai-answer-content td {
+      border: 1px solid #e2d8b5;
+      padding: 0.4rem 0.6rem;
+      text-align: left;
+    }
+    .ai-answer-content th { background: #f7f0d4; }
+    .ai-answer-content pre {
+      max-width: 100%;
+      overflow-x: auto;
+      padding: 0.75rem;
+      background: #1a1714;
+      color: #f8f6ef;
+      border-radius: 0.375rem;
+    }
+    .ai-answer-content p { margin: 0.5rem 0; }
+    .ai-answer-content blockquote {
+      border-left: 3px solid #b45309;
+      padding-left: 0.75rem;
+      color: #57534e;
+    }
+    .ai-answer-content a { color: #92400e; text-decoration: underline; }
   </style>
 </head>
 <body class="flex flex-col h-screen overflow-hidden select-text">
@@ -640,7 +849,7 @@ HTML_TEMPLATE = r"""
         </div>
       </div>
       <div class="flex flex-1 min-h-0">
-        <aside class="w-56 shrink-0 border-r border-[#e2d8b5] bg-[#f7f0d4] flex flex-col">
+        <aside class="w-64 shrink-0 border-r border-[#e2d8b5] bg-[#f7f0d4] flex flex-col">
           <div class="px-3 py-2 text-[11px] font-bold text-gray-600 border-b border-[#e2d8b5]">会話履歴</div>
           <div id="ai-conversation-list" class="flex-1 overflow-y-auto p-2 space-y-1 text-xs">
             <div class="text-gray-400 p-2">履歴はありません</div>
@@ -670,7 +879,7 @@ HTML_TEMPLATE = r"""
                   placeholder="メッセージを入力...（Enterで送信 / Shift+Enterで改行）"
                   onkeydown="handleAIKeydown(event)"
                   class="flex-1 resize-y min-h-[48px] max-h-40 px-3 py-2 bg-white border border-[#d6c79a] rounded text-sm focus:outline-none focus:border-[#b45309]"></textarea>
-                <button id="ai-send-button" onclick="sendAIMessage()"
+                <button id="ai-send-button" onclick="aiSendOrCancel()"
                   class="px-5 py-3 bg-[#b45309] hover:bg-[#92400e] text-white rounded text-xs font-bold disabled:opacity-50">送信</button>
               </div>
               <p class="text-[10px] text-gray-500 mt-1.5">AIの回答は生成情報です。Wikiの記述・外部情報・考察を区別して確認してください。</p>
@@ -848,6 +1057,9 @@ HTML_TEMPLATE = r"""
     let aiConversationId = null;
     let aiBusy = false;
     let aiInitialized = false;
+    let aiViewToken = 0;
+    const aiActiveRequests = new Map();
+    const aiPendingMessages = new Map();
 
     function aiSetStatus(message, isError = false) {
       const el = document.getElementById('ai-status');
@@ -877,11 +1089,26 @@ HTML_TEMPLATE = r"""
       container.scrollTop = container.scrollHeight;
     }
 
-    function aiSetBusy(value) {
-      aiBusy = value;
-      document.getElementById('ai-send-button').disabled = value;
-      document.getElementById('ai-message-input').disabled = value;
-      document.getElementById('ai-send-button').textContent = value ? "送信中..." : "送信";
+    function aiRefreshBusy() {
+      const request = aiConversationId && aiActiveRequests.get(aiConversationId);
+      aiBusy = !!request;
+      document.getElementById('ai-message-input').disabled = aiBusy;
+      const button = document.getElementById('ai-send-button');
+      button.disabled = false;
+      button.textContent = aiBusy ? "停止" : "送信";
+      button.classList.toggle('bg-red-700', aiBusy);
+      button.classList.toggle('hover:bg-red-800', aiBusy);
+    }
+
+    function aiRequestId() {
+      if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+      return Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
+    }
+
+    function aiSetActiveRequest(conversationId, request) {
+      if (request) aiActiveRequests.set(conversationId, request);
+      else aiActiveRequests.delete(conversationId);
+      if (conversationId === aiConversationId) aiRefreshBusy();
     }
 
     async function initializeAI() {
@@ -910,6 +1137,8 @@ HTML_TEMPLATE = r"""
           return;
         }
         aiConversationId = result.conversation_id;
+        aiViewToken++;
+        aiRefreshBusy();
         const container = document.getElementById('ai-chat-messages');
         container.innerHTML = '';
         const welcome = document.createElement('div');
@@ -935,22 +1164,39 @@ HTML_TEMPLATE = r"""
           return;
         }
         list.forEach(item => {
+          const row = document.createElement('div');
+          row.className = "flex items-center gap-1";
           const button = document.createElement('button');
-          button.className = "w-full text-left p-2 rounded border border-transparent hover:bg-white hover:border-[#dfd3a8] truncate";
+          button.className = "flex-1 min-w-0 text-left p-2 rounded border border-transparent hover:bg-white hover:border-[#dfd3a8] truncate";
           button.textContent = item.title || "新しい会話";
           button.title = item.title || "";
           if (item.id === aiConversationId) button.classList.add('bg-white', 'border-[#dfd3a8]');
           button.onclick = () => aiOpenConversation(item.id);
-          host.appendChild(button);
+          const rename = document.createElement('button');
+          rename.className = "px-1 text-gray-500 hover:text-amber-800";
+          rename.textContent = "✎";
+          rename.title = "会話名を変更";
+          rename.onclick = event => { event.stopPropagation(); aiRenameConversation(item); };
+          const remove = document.createElement('button');
+          remove.className = "px-1 text-gray-500 hover:text-red-700";
+          remove.textContent = "×";
+          remove.title = "会話を削除";
+          remove.onclick = event => { event.stopPropagation(); aiDeleteConversation(item); };
+          row.append(button, rename, remove);
+          host.appendChild(row);
         });
       } catch (e) { console.error("AI履歴一覧エラー", e); }
     }
 
     async function aiOpenConversation(cid) {
+      const token = ++aiViewToken;
+      aiConversationId = cid;
+      aiRefreshBusy();
+      const container = document.getElementById('ai-chat-messages');
+      container.innerHTML = '<div class="text-center text-xs text-gray-500 py-12">履歴を読み込み中...</div>';
       try {
         const history = await pywebview.api.ai_get_history(cid);
-        aiConversationId = cid;
-        const container = document.getElementById('ai-chat-messages');
+        if (token !== aiViewToken || cid !== aiConversationId) return;
         container.innerHTML = '';
         if (!history || !history.length) {
           const empty = document.createElement('div');
@@ -958,37 +1204,148 @@ HTML_TEMPLATE = r"""
           empty.textContent = "この会話にはまだメッセージがありません。";
           container.appendChild(empty);
         } else {
-          history.forEach(item => aiAppendHistoryMessage(item.role, item.content));
+          history.forEach(item => aiAppendHistoryMessage(item));
         }
         await aiLoadConversationList();
+        const active = await pywebview.api.ai_get_active_request(cid);
+        if (token === aiViewToken && cid === aiConversationId) {
+          aiSetActiveRequest(cid, active);
+          if (active) aiSetStatus(active.status === 'cancel_requested' ? "生成を停止中..." : "回答を生成中...");
+        }
       } catch (e) { aiSetStatus("履歴読み込みエラー: " + e, true); }
     }
 
-    function aiAppendHistoryMessage(role, content) {
+    function aiAppendHistoryMessage(item) {
+      const role = item.role;
+      const content = item.content;
       const container = document.getElementById('ai-chat-messages');
       const wrap = document.createElement('div');
       wrap.className = "ai-message max-w-4xl mx-auto flex " + (role === 'user' ? "justify-end" : "justify-start");
+      if (role === 'assistant' && item.id !== undefined) wrap.dataset.messageId = String(item.id);
       const column = document.createElement('div');
       column.className = "max-w-[92%]";
       const bubble = document.createElement('div');
       bubble.className = role === 'user'
         ? "rounded-lg bg-[#ead9ad] border border-[#d6c79a] px-4 py-3 text-sm whitespace-pre-wrap break-words"
-        : "ai-answer-content rounded-lg bg-white border border-[#e2d8b5] px-4 py-3 text-sm whitespace-pre-wrap break-words select-text";
-      if (role === 'assistant') bubble.tabIndex = 0;
-      bubble.textContent = content;
+        : "ai-answer-content rounded-lg bg-white border border-[#e2d8b5] px-4 py-3 text-sm break-words select-text";
+      if (role === 'assistant') {
+        bubble.tabIndex = 0;
+        const version = (item.versions || []).find(v => v.version_number === item.current_version_number);
+        aiSetRenderedContent(bubble, version ? version.html : item.html);
+      } else {
+        bubble.textContent = content;
+      }
       column.appendChild(bubble);
       if (role === 'assistant') {
         const actions = document.createElement('div');
-        actions.className = "flex gap-2 mt-1 text-[10px] text-gray-500";
-        const copy = document.createElement('button'); copy.textContent = "コピー"; copy.className = "hover:text-amber-800";
-        copy.onclick = () => aiCopyText(content, copy);
-        const regen = document.createElement('button'); regen.textContent = "再生成"; regen.className = "hover:text-amber-800";
-        regen.onclick = () => aiRegenerateAnswer(wrap);
-        actions.append(copy, regen); column.appendChild(actions);
-        bubble.addEventListener('contextmenu', event => { event.preventDefault(); aiShowContextMenu(event.clientX, event.clientY, content, wrap); });
+        actions.className = "flex flex-wrap items-center gap-2 mt-1 text-[10px] text-gray-500";
+        const versions = item.versions || [];
+        let currentIndex = versions.findIndex(v => v.version_number === item.current_version_number);
+        if (currentIndex < 0 && versions.length) currentIndex = versions.length - 1;
+        const versionLabel = document.createElement('span');
+        const previous = document.createElement('button');
+        previous.textContent = "‹";
+        previous.title = "前の回答";
+        previous.className = "hover:text-amber-800 disabled:opacity-40";
+        const next = document.createElement('button');
+        next.textContent = "›";
+        next.title = "次の回答";
+        next.className = "hover:text-amber-800 disabled:opacity-40";
+        const updateVersionButtons = () => {
+          versionLabel.textContent = versions.length ? `${currentIndex + 1} / ${versions.length}` : "";
+          previous.disabled = currentIndex <= 0;
+          next.disabled = currentIndex < 0 || currentIndex >= versions.length - 1;
+        };
+        const renderRating = version => {
+          good.classList.toggle('font-bold', version && version.rating === 'good');
+          bad.classList.toggle('font-bold', version && version.rating === 'bad');
+        };
+        const renderSources = version => {
+          const names = version && version.sources ? version.sources.map(source => source.name) : [];
+          sources.textContent = names.length ? "📚 参照したローカルWiki資料: " + names.join(" / ") : "";
+        };
+        const switchVersion = async direction => {
+          const index = currentIndex + direction;
+          if (index < 0 || index >= versions.length) return;
+          const selected = versions[index];
+          const result = await pywebview.api.ai_set_current_version(item.id, selected.version_number);
+          if (result.error) { aiSetStatus(result.error, true); return; }
+          currentIndex = index;
+          item.current_version_number = selected.version_number;
+          item.content = selected.content;
+          aiSetRenderedContent(bubble, selected.html);
+          renderRating(selected);
+          renderSources(selected);
+          updateVersionButtons();
+        };
+        previous.onclick = () => switchVersion(-1);
+        next.onclick = () => switchVersion(1);
+        actions.append(previous, versionLabel, next);
+        const copy = document.createElement('button');
+        copy.textContent = "回答をコピー";
+        copy.className = "hover:text-amber-800";
+        copy.onclick = () => aiCopyText(item.content, copy);
+        actions.appendChild(copy);
+        const regenerate = document.createElement('button');
+        regenerate.textContent = "再生成";
+        regenerate.className = "hover:text-amber-800";
+        regenerate.onclick = () => aiRegenerateAnswer(item);
+        actions.appendChild(regenerate);
+        const good = document.createElement('button');
+        good.textContent = "Good";
+        good.className = "hover:text-green-700";
+        good.onclick = () => aiRateAnswer(item, versions[currentIndex], 'good', renderRating);
+        const bad = document.createElement('button');
+        bad.textContent = "Bad";
+        bad.className = "hover:text-red-700";
+        bad.onclick = () => aiRateAnswer(item, versions[currentIndex], 'bad', renderRating);
+        actions.append(good, bad);
+        const sources = document.createElement('div');
+        sources.className = "text-[10px] text-gray-500 mt-1";
+        const selectedVersion = versions[currentIndex];
+        renderRating(selectedVersion);
+        renderSources(selectedVersion);
+        updateVersionButtons();
+        column.append(actions, sources);
       }
       wrap.appendChild(column); container.appendChild(wrap); container.scrollTop = container.scrollHeight;
       return wrap;
+    }
+
+    function aiSetRenderedContent(bubble, html) {
+      bubble.innerHTML = html || "";
+      bubble.querySelectorAll('pre').forEach(pre => {
+        const copy = document.createElement('button');
+        copy.textContent = "コードをコピー";
+        copy.className = "ai-code-copy px-2 py-1 text-[10px] bg-gray-700 text-white rounded hover:bg-gray-600";
+        copy.onclick = () => aiCopyText(pre.innerText, copy);
+        pre.parentNode.insertBefore(copy, pre);
+      });
+    }
+
+    async function aiRateAnswer(item, version, rating, renderRating) {
+      if (!version) return;
+      const result = await pywebview.api.ai_set_rating(item.id, version.version_number, rating);
+      if (result.error) { aiSetStatus(result.error, true); return; }
+      version.rating = rating;
+      renderRating(version);
+    }
+
+    async function aiRenameConversation(item) {
+      const title = window.prompt("新しい会話名（1～80文字）", item.title || "");
+      if (title === null) return;
+      const result = await pywebview.api.ai_rename_conversation(item.id, title);
+      if (result.error) { aiSetStatus(result.error, true); return; }
+      await aiLoadConversationList();
+    }
+
+    async function aiDeleteConversation(item) {
+      if (!window.confirm(`「${item.title || '新しい会話'}」と関連する履歴を削除しますか？`)) return;
+      const result = await pywebview.api.ai_delete_conversation(item.id);
+      if (!result.ok) { aiSetStatus(result.error || "会話を削除できませんでした。", true); return; }
+      aiActiveRequests.delete(item.id);
+      if (aiConversationId === item.id) await aiNewConversation();
+      await aiLoadConversationList();
     }
 
     async function aiCopyText(text, button) {
@@ -1001,33 +1358,28 @@ HTML_TEMPLATE = r"""
       }
     }
 
-    let aiContextMenu = null;
-    let aiPendingRegenerateWrap = null;
-    function aiShowContextMenu(x, y, content, messageWrap) {
-      if (aiContextMenu) aiContextMenu.remove();
-      const menu = document.createElement('div'); aiContextMenu = menu;
-      menu.className = "fixed z-[9999] bg-white border border-gray-300 shadow-lg rounded py-1 text-xs";
-      menu.style.left = Math.min(x, window.innerWidth - 150) + "px";
-      menu.style.top = Math.min(y, window.innerHeight - 90) + "px";
-      const copy = document.createElement('button'); copy.className = "block w-full text-left px-4 py-2 hover:bg-amber-50"; copy.textContent = "回答をコピー";
-      copy.onclick = () => { aiCopyText(content); menu.remove(); };
-      const regen = document.createElement('button'); regen.className = "block w-full text-left px-4 py-2 hover:bg-amber-50"; regen.textContent = "この回答を再生成";
-      regen.onclick = () => { menu.remove(); aiRegenerateAnswer(messageWrap); };
-      menu.append(copy, regen); document.body.appendChild(menu);
-      setTimeout(() => document.addEventListener('click', () => menu.remove(), {once:true}), 0);
-    }
-
-    async function aiRegenerateAnswer(messageWrap) {
-      if (aiBusy || !aiConversationId) return;
-      // 現在表示中の末尾の回答のみを差し替える
-      const lastAssistant = [...document.querySelectorAll('#ai-chat-messages .ai-message')].reverse().find(el => el.querySelector('.ai-answer-content'));
-      if (messageWrap && lastAssistant !== messageWrap) { aiSetStatus("再生成は会話の最新の回答に対してのみ実行できます。", true); return; }
-      aiPendingRegenerateWrap = lastAssistant;
-      aiSetBusy(true); aiSetStatus("回答を再生成中...");
+    async function aiRegenerateAnswer(item) {
+      if (!aiConversationId || !item.id || aiActiveRequests.has(aiConversationId)) return;
+      const lastAssistant = [...document.querySelectorAll('#ai-chat-messages .ai-message')]
+        .reverse().find(el => el.dataset.messageId);
+      if (!lastAssistant || lastAssistant.dataset.messageId !== String(item.id)) {
+        aiSetStatus("再生成は会話の最新の回答に対してのみ実行できます。", true);
+        return;
+      }
+      const cid = aiConversationId;
+      const requestId = aiRequestId();
+      aiSetActiveRequest(cid, {request_id: requestId, operation: "regenerate"});
+      aiSetStatus("回答を再生成中...");
       try {
-        const accepted = await pywebview.api.ai_regenerate(aiConversationId);
-        if (!accepted) { aiSetBusy(false); aiSetStatus("再生成を開始できませんでした。", true); }
-      } catch (e) { aiSetBusy(false); aiSetStatus("再生成エラー: " + e, true); }
+        const result = await pywebview.api.ai_regenerate(cid, item.id, requestId);
+        if (!result.accepted) {
+          aiSetActiveRequest(cid, null);
+          aiSetStatus("再生成を開始できません: " + (result.error || "不明なエラー"), true);
+        }
+      } catch (e) {
+        aiSetActiveRequest(cid, null);
+        aiSetStatus("再生成エラー: " + e, true);
+      }
     }
 
     async function aiToggleProperties() {
@@ -1064,6 +1416,33 @@ HTML_TEMPLATE = r"""
       }
     });
 
+    function aiAppendPending(requestId, operation) {
+      if (operation === "regenerate") return;
+      const wrap = document.createElement('div');
+      wrap.className = "ai-message max-w-4xl mx-auto flex justify-start";
+      const bubble = document.createElement('div');
+      bubble.className = "ai-pending-answer max-w-[90%] rounded-lg bg-white border border-[#e2d8b5] shadow-sm px-4 py-3 text-sm whitespace-pre-wrap break-words";
+      bubble.textContent = "回答を生成中...";
+      wrap.appendChild(bubble);
+      document.getElementById('ai-chat-messages').appendChild(wrap);
+      aiPendingMessages.set(requestId, wrap);
+      document.getElementById('ai-chat-messages').scrollTop =
+        document.getElementById('ai-chat-messages').scrollHeight;
+    }
+
+    function aiRemovePending(requestId) {
+      const pending = aiPendingMessages.get(requestId);
+      if (pending) pending.remove();
+      aiPendingMessages.delete(requestId);
+    }
+
+    function aiAppendError(message) {
+      const wrap = document.createElement('div');
+      wrap.className = "max-w-4xl mx-auto text-sm text-red-700 bg-red-50 border border-red-200 rounded px-3 py-2";
+      wrap.textContent = message;
+      document.getElementById('ai-chat-messages').appendChild(wrap);
+    }
+
     async function sendAIMessage() {
       if (aiBusy) return;
       const input = document.getElementById('ai-message-input');
@@ -1073,52 +1452,108 @@ HTML_TEMPLATE = r"""
         await aiNewConversation();
         if (!aiConversationId) return;
       }
-      aiAppendHistoryMessage('user', message);
+      const cid = aiConversationId;
+      const requestId = aiRequestId();
+      aiAppendHistoryMessage({role: 'user', content: message});
+      aiAppendPending(requestId, "send");
       input.value = '';
-      aiSetBusy(true);
+      aiSetActiveRequest(cid, {request_id: requestId, operation: "send"});
+      aiSetStatus("回答を生成中...");
       try {
-        const accepted = await pywebview.api.ai_send_message(message, aiConversationId);
-        if (!accepted) {
-          aiSetBusy(false);
-          aiAppendHistoryMessage('assistant', "送信を開始できませんでした。設定を確認してください。");
+        const result = await pywebview.api.ai_send_message(message, cid, requestId);
+        if (!result.accepted) {
+          aiSetActiveRequest(cid, null);
+          aiRemovePending(requestId);
+          aiSetStatus("送信を開始できません: " + (result.error || "不明なエラー"), true);
+          if (cid === aiConversationId) aiAppendError(result.error || "送信を開始できませんでした。");
         }
       } catch (e) {
-        aiSetBusy(false);
-        aiAppendHistoryMessage('assistant', "送信エラー: " + e);
+        aiSetActiveRequest(cid, null);
+        aiRemovePending(requestId);
+        if (cid === aiConversationId) {
+          aiSetStatus("送信エラー: " + e, true);
+          aiAppendError("送信エラー: " + e);
+        }
       }
+    }
+
+    async function aiSendOrCancel() {
+      const active = aiConversationId && aiActiveRequests.get(aiConversationId);
+      if (!active) return sendAIMessage();
+      aiSetStatus("生成を停止しています...");
+      try {
+        const result = await pywebview.api.ai_cancel_generation(active.request_id);
+        if (!result.accepted) aiSetStatus(result.error || "生成を停止できませんでした。", true);
+      } catch (e) { aiSetStatus("キャンセルエラー: " + e, true); }
+    }
+
+    function onAIStream(payload) {
+      const data = typeof payload === 'string' ? JSON.parse(payload) : payload;
+      if (data.conversation_id !== aiConversationId) return;
+      const active = aiActiveRequests.get(data.conversation_id);
+      if (!active || active.request_id !== data.request_id || active.operation !== "send") return;
+      const pending = aiPendingMessages.get(data.request_id);
+      if (!pending) return;
+      const bubble = pending.querySelector('.ai-pending-answer');
+      if (bubble.textContent === "回答を生成中...") bubble.textContent = "";
+      bubble.textContent += data.text;
+      const container = document.getElementById('ai-chat-messages');
+      container.scrollTop = container.scrollHeight;
+    }
+
+    function onAITitleUpdated() {
+      aiLoadConversationList();
     }
 
     function onAIResponse(payload) {
       try {
         const data = typeof payload === 'string' ? JSON.parse(payload) : payload;
-        if (data.conversation_id) aiConversationId = data.conversation_id;
-        if (data.ok) {
-          if (data.regenerate && aiPendingRegenerateWrap) aiPendingRegenerateWrap.remove();
-          aiPendingRegenerateWrap = null;
-          aiAppendHistoryMessage('assistant', data.response || "(空の応答)");
-          if (data.sources && data.sources.length) {
-            const sourceLine = document.createElement('div');
-            sourceLine.className = "max-w-4xl mx-auto text-[10px] text-gray-500";
-            sourceLine.textContent = "📚 参照したローカルWiki資料: " + data.sources.map(s => s.name).join(" / ");
-            document.getElementById('ai-chat-messages').appendChild(sourceLine);
-          }
-          aiSetStatus("接続中: Groq / " + (data.model || "モデル不明") + (data.finish_reason === "length" ? " / 出力上限に到達" : ""));
-          aiLoadConversationList();
-        } else {
-          aiPendingRegenerateWrap = null;
-          aiSetStatus("APIエラー: " + (data.error || "不明なエラー"), true);
+        const cid = data.conversation_id;
+        const active = cid && aiActiveRequests.get(cid);
+        if (!active || active.request_id === data.request_id) {
+          aiSetActiveRequest(cid, null);
         }
+        aiRemovePending(data.request_id);
+        if (cid === aiConversationId) {
+          if (data.ok) {
+            if (data.operation === "regenerate") {
+              aiOpenConversation(cid);
+            } else {
+              aiAppendHistoryMessage({
+                id: data.message_id,
+                role: 'assistant',
+                content: data.response || "",
+                current_version_number: data.version_number,
+                html: data.rendered_html,
+                versions: [{
+                  version_number: data.version_number,
+                  content: data.response || "",
+                  html: data.rendered_html,
+                  rating: null,
+                  sources: data.sources || [],
+                }],
+              });
+            }
+            aiSetStatus("接続中: Groq / " + (data.model || "モデル不明")
+              + (data.finish_reason === "length" ? " / 出力上限に到達（回答が途中の可能性があります）" : ""));
+          } else if (!data.cancelled) {
+            aiSetStatus("APIエラー: " + (data.error || "不明なエラー"), true);
+            aiAppendError("回答を生成できませんでした: " + (data.error || "不明なエラー"));
+          } else {
+            aiSetStatus("生成を停止しました。以前の回答は保持されています。");
+          }
+          aiRefreshBusy();
+        }
+        aiLoadConversationList();
       } catch (e) {
-        aiAppendHistoryMessage('assistant', "応答処理エラー: " + e);
-      } finally {
-        aiSetBusy(false);
+        aiSetStatus("応答処理エラー: " + e, true);
       }
     }
 
     function handleAIKeydown(event) {
       if (event.key === 'Enter' && !event.shiftKey) {
         event.preventDefault();
-        sendAIMessage();
+        aiSendOrCancel();
       }
     }
 
@@ -1134,9 +1569,16 @@ HTML_TEMPLATE = r"""
 
 def main():
     api = BackroomsAPI()
+    html = HTML_TEMPLATE
+    if syntax_highlight_css:
+        html = html.replace(
+            "</style>",
+            syntax_highlight_css() + "\n</style>",
+            1,
+        )
     webview.create_window(
         title="Backrooms Navigation System - Fandom JP (Wiki Explorer)",
-        html=HTML_TEMPLATE,
+        html=html,
         js_api=api,
         width=1320,
         height=850,

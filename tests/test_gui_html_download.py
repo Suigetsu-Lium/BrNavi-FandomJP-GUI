@@ -67,6 +67,17 @@ class OnlineWikiGuiTests(unittest.TestCase):
         self.assertNotIn('id="task-log"', gui_app.HTML_TEMPLATE)
         self.assertNotIn("function appendLog", gui_app.HTML_TEMPLATE)
 
+    def test_wiki_tab_opens_default_homepage_for_free_browsing(self):
+        default_url = "https://backrooms.fandom.com/ja/wiki/Backrooms_Wiki"
+
+        self.assertIn(f'value="{default_url}"', gui_app.HTML_TEMPLATE)
+        self.assertIn("if (tab === 'wiki' && !onlineWikiDefaultOpened)", gui_app.HTML_TEMPLATE)
+        self.assertIn("openDirectWikiUrl();", gui_app.HTML_TEMPLATE)
+        self.assertIn(
+            "document.getElementById('online-wiki-url').value = onlineWikiCurrentUrl;",
+            gui_app.HTML_TEMPLATE,
+        )
+
     @patch.object(gui_app.BackroomsAPI, "_notify_maintenance_task_completed")
     @patch("gui_app.run_update_database")
     def test_maintenance_task_reports_status_without_gui_log_stream(

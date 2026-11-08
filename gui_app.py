@@ -1,12 +1,10 @@
 # -*- coding: utf-8 -*-
 import asyncio
-import sys
 import os
 import json
 import base64
 import re
 import threading
-import io
 import warnings
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -722,8 +720,9 @@ class BackroomsAPI:
             finally:
                 try:
                     encoded = json.dumps(payload, ensure_ascii=True)
-                    if webview.windows:
-                        webview.windows[0].evaluate_js(
+                    main_window = getattr(self, "_main_window", None)
+                    if main_window is not None:
+                        main_window.evaluate_js(
                             f"onOnlineWikiSaveCompleted({encoded})"
                         )
                 except Exception as error:
@@ -731,39 +730,53 @@ class BackroomsAPI:
                 self._maintenance_lock.release()
             return
 
-        class WebLogger(io.StringIO):
-            def write(self, s):
-                if s.strip():
-                    safe_str = json.dumps(s.strip())
-                    try:
-                        webview.windows[0].evaluate_js(f"appendLog({safe_str})")
-                    except Exception:
-                        pass
-        old_stdout = sys.stdout
+        task_labels = {
+            "update_master": "既存データベース更新",
+            "extract_info": "情報データベース更新",
+            "update_network": "ネットワーク更新",
+        }
+        task_label = task_labels.get(task_name)
+        if task_label is None:
+            self._notify_maintenance_task_completed(
+                False, f"未対応の保守タスクです: {task_name}"
+            )
+            self._maintenance_lock.release()
+            return
+
+        print(f"保守タスクを開始します: {task_label}")
         try:
-            if webview.windows:
-                webview.windows[0].evaluate_js(
-                    f"appendLog('=== [{task_name}] を開始します ===')"
-                )
-            sys.stdout = WebLogger()
             if task_name == "update_master":
                 run_update_database()
             elif task_name == "extract_info":
                 extract_levels(interactive=False)
             elif task_name == "update_network":
                 process_backrooms_data()
-            print("✔ 処理が正常に完了しました！")
-        except Exception as e:
-            print(f"❌ エラー: {e}")
+            print(f"保守タスクが完了しました: {task_label}")
+            self._notify_maintenance_task_completed(
+                True, f"{task_label}が完了しました。"
+            )
+        except Exception as error:
+            print(f"保守タスクに失敗しました ({task_label}): {error}")
+            self._notify_maintenance_task_completed(
+                False, f"{task_label}に失敗しました: {error}"
+            )
         finally:
-            sys.stdout = old_stdout
-            try:
-                if webview.windows:
-                    webview.windows[0].evaluate_js("onTaskCompleted()")
-            except Exception as e:
-                print(f"[GUI] 保守タスク完了通知に失敗: {e}")
-            finally:
-                self._maintenance_lock.release()
+            self._maintenance_lock.release()
+
+    def _notify_maintenance_task_completed(self, succeeded, message):
+        main_window = getattr(self, "_main_window", None)
+        if main_window is None:
+            return
+        payload = json.dumps(
+            {"ok": succeeded, "message": message},
+            ensure_ascii=True,
+        )
+        try:
+            main_window.evaluate_js(
+                f"onMaintenanceTaskCompleted({payload})"
+            )
+        except Exception as error:
+            print(f"[GUI] 保守タスク状態の画面通知に失敗: {error}")
 
 
 HTML_TEMPLATE = r"""
@@ -954,7 +967,8 @@ HTML_TEMPLATE = r"""
     </div>
     <div class="flex space-x-2">
       <button onclick="switchTab('explorer')" id="tab-btn-explorer" class="px-4 py-1.5 rounded text-xs font-semibold bg-[#b45309] text-white transition shadow">📖 Level 図鑑・検索</button>
-      <button onclick="switchTab('maintenance')" id="tab-btn-maintenance" class="px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition">🌐 Wiki閲覧・保存</button>
+      <button onclick="switchTab('wiki')" id="tab-btn-wiki" class="px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition">🌐 Wiki閲覧・保存</button>
+      <button onclick="switchTab('maintenance')" id="tab-btn-maintenance" class="px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition">⚙️ データ保守</button>
       <button onclick="switchTab('ai')" id="tab-btn-ai" class="px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition">🤖 AI Assistant</button>
     </div>
   </header>
@@ -1044,55 +1058,32 @@ HTML_TEMPLATE = r"""
 
     </div>
 
-    <!-- 2. ⚙️ データベース保守タブ -->
-    <div id="view-maintenance" class="hidden flex-1 flex flex-col p-8 bg-[#fbf6de] overflow-y-auto">
-      <div class="max-w-3xl mx-auto w-full bg-white border border-[#e2d8b5] p-6 rounded shadow-sm space-y-5">
-        <h2 class="text-lg font-bold text-gray-800 border-b border-gray-200 pb-2">🌐 Wiki閲覧・保存 / ローカルデータ管理</h2>
-        <div class="grid grid-cols-2 gap-3 pt-2">
-          <button onclick="runTask('update_master')" class="p-3 bg-[#f5eed3] hover:bg-[#eadfae] border border-[#d6c79a] rounded text-xs font-semibold text-gray-800 text-left">
-            <span class="text-sm block">🔄 既存データベース更新</span>
-            <span class="text-[10px] text-gray-500">図鑑・ルート機能の互換用（オンライン閲覧・保存には不要）</span>
-          </button>
-          <button onclick="openHTMLDownloadPicker()" class="p-3 bg-[#f5eed3] hover:bg-[#eadfae] border border-[#d6c79a] rounded text-xs font-semibold text-gray-800 text-left">
-            <span class="text-sm block">🌐 Wikiを検索・閲覧・保存</span>
-            <span class="text-[10px] text-gray-500">日本語版Wikiをオンライン検索して本文と画像を表示</span>
-          </button>
-          <button onclick="runTask('extract_info')" class="p-3 bg-[#f5eed3] hover:bg-[#eadfae] border border-[#d6c79a] rounded text-xs font-semibold text-gray-800 text-left">
-            <span class="text-sm block">📑 情報データベース更新</span>
-            <span class="text-[10px] text-gray-500">ローカルHTMLから本文やタグを抽出</span>
-          </button>
-          <button onclick="runTask('update_network')" class="p-3 bg-[#f5eed3] hover:bg-[#eadfae] border border-[#d6c79a] rounded text-xs font-semibold text-gray-800 text-left">
-            <span class="text-sm block">🕸️ ネットワーク更新</span>
-            <span class="text-[10px] text-gray-500">Level間の出入口・接続グラフを生成</span>
+    <!-- 2. 🌐 Wiki閲覧・保存タブ -->
+    <div id="view-wiki" class="hidden flex-1 flex flex-col p-8 bg-[#fbf6de] overflow-y-auto">
+      <div class="max-w-4xl mx-auto w-full bg-white border border-[#e2d8b5] p-6 rounded shadow-sm space-y-4">
+        <div class="border-b border-gray-200 pb-2">
+          <h2 class="text-lg font-bold text-gray-800">🌐 日本語版Backrooms Wiki</h2>
+          <p class="text-xs text-gray-500 mt-1">Fandomをオンライン検索し、アプリ内ブラウザーで直接閲覧できます。WindowsではChromiumベースのWebView2を使用します。</p>
+        </div>
+        <div class="flex gap-2">
+          <input id="html-download-search" type="search"
+            onkeydown="if(event.key==='Enter') searchOnlineWiki()"
+            class="min-w-0 flex-1 border border-[#d6c79a] rounded px-3 py-2 text-xs"
+            placeholder="Wikiページ名・キーワードでオンライン検索">
+          <button id="html-download-search-button" onclick="searchOnlineWiki()"
+            class="shrink-0 px-3 py-2 text-xs font-semibold bg-[#b45309] text-white rounded disabled:opacity-50">
+            検索
           </button>
         </div>
-        <section id="html-download-picker" class="hidden border border-[#dfd3a8] rounded p-3 bg-[#fffdf5] space-y-3">
-          <div class="flex items-center justify-between gap-2">
-            <div>
-              <h3 class="text-sm font-bold text-gray-800">日本語版Backrooms Wiki</h3>
-              <p class="text-[10px] text-gray-500">WindowsではChromiumベースのWebView2でページを直接表示します。</p>
-            </div>
-            <div class="flex gap-2">
-              <button onclick="closeHTMLDownloadPicker()" class="text-xs text-gray-500 hover:text-gray-800" title="閉じる">閉じる</button>
-            </div>
-          </div>
-          <div class="flex gap-2">
-            <input id="html-download-search" type="search"
-              onkeydown="if(event.key==='Enter') searchOnlineWiki()"
-              class="min-w-0 flex-1 border border-[#d6c79a] rounded px-3 py-2 text-xs"
-              placeholder="Wikiページ名・キーワードでオンライン検索">
-            <button id="html-download-search-button" onclick="searchOnlineWiki()"
-              class="shrink-0 px-3 py-2 text-xs font-semibold bg-[#b45309] text-white rounded disabled:opacity-50">
-              検索
-            </button>
-          </div>
-          <input id="html-download-tag-search" type="search" oninput="filterOnlineWikiResults()"
-            class="w-full border border-[#d6c79a] rounded px-3 py-1.5 text-xs"
-            placeholder="検索結果をタグで絞り込み">
-          <div class="flex items-center justify-between text-[11px] text-gray-600">
-            <span id="html-download-count">キーワードを入力して検索してください。</span>
-            <span id="html-download-status">本文・画像の読み込みにはインターネット接続が必要です。</span>
-          </div>
+        <input id="html-download-tag-search" type="search" oninput="filterOnlineWikiResults()"
+          class="w-full border border-[#d6c79a] rounded px-3 py-1.5 text-xs"
+          placeholder="検索結果をタグで絞り込み">
+        <div class="flex items-center justify-between text-[11px] text-gray-600">
+          <span id="html-download-count">キーワードを入力して検索してください。</span>
+          <span id="html-download-status">閲覧・保存にはインターネット接続が必要です。</span>
+        </div>
+        <div id="html-download-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 max-h-72 overflow-y-auto pr-1"></div>
+        <div class="border-t border-[#e2d8b5] pt-4 space-y-3">
           <div class="flex flex-col gap-2 sm:flex-row">
             <input id="online-wiki-url" type="url"
               onkeydown="if(event.key==='Enter') openDirectWikiUrl()"
@@ -1111,18 +1102,36 @@ HTML_TEMPLATE = r"""
             <span id="online-wiki-current-url" class="min-w-0 truncate">アプリ内Chromiumで開いたWikiページを確認しています...</span>
             <span id="online-wiki-save-status" class="shrink-0">保存先: downloaded_fandom_html</span>
           </div>
-        </section>
-        <div class="mt-4">
-          <div class="flex justify-between text-xs text-gray-500 mb-1">
-            <span>実行ログ:</span>
-            <button onclick="document.getElementById('task-log').innerText=''" class="hover:underline">クリア</button>
-          </div>
-          <div id="task-log" class="w-full h-56 bg-[#1a1714] text-green-400 font-mono text-xs p-3 rounded overflow-y-auto whitespace-pre-wrap select-text">待機中...</div>
         </div>
       </div>
     </div>
 
-    <!-- 3. BrNavi AI Assistant -->
+    <!-- 3. ⚙️ データベース保守タブ -->
+    <div id="view-maintenance" class="hidden flex-1 flex flex-col p-8 bg-[#fbf6de] overflow-y-auto">
+      <div class="max-w-3xl mx-auto w-full bg-white border border-[#e2d8b5] p-6 rounded shadow-sm space-y-5">
+        <h2 class="text-lg font-bold text-gray-800 border-b border-gray-200 pb-2">⚙️ データ保守</h2>
+        <div class="grid grid-cols-2 gap-3 pt-2">
+          <button onclick="runTask('update_master')" class="p-3 bg-[#f5eed3] hover:bg-[#eadfae] border border-[#d6c79a] rounded text-xs font-semibold text-gray-800 text-left">
+            <span class="text-sm block">🔄 既存データベース更新</span>
+            <span class="text-[10px] text-gray-500">図鑑・ルート機能の互換用（オンライン閲覧・保存には不要）</span>
+          </button>
+          <button onclick="runTask('extract_info')" class="p-3 bg-[#f5eed3] hover:bg-[#eadfae] border border-[#d6c79a] rounded text-xs font-semibold text-gray-800 text-left">
+            <span class="text-sm block">📑 情報データベース更新</span>
+            <span class="text-[10px] text-gray-500">ローカルHTMLから本文やタグを抽出</span>
+          </button>
+          <button onclick="runTask('update_network')" class="p-3 bg-[#f5eed3] hover:bg-[#eadfae] border border-[#d6c79a] rounded text-xs font-semibold text-gray-800 text-left">
+            <span class="text-sm block">🕸️ ネットワーク更新</span>
+            <span class="text-[10px] text-gray-500">Level間の出入口・接続グラフを生成</span>
+          </button>
+        </div>
+        <div id="maintenance-task-status" role="status" aria-live="polite"
+          class="min-h-10 rounded border border-[#dfd3a8] bg-[#fffdf5] px-3 py-2 text-xs text-gray-600">
+          保守タスクを選択してください。
+        </div>
+      </div>
+    </div>
+
+    <!-- 4. BrNavi AI Assistant -->
     <section id="view-ai" class="hidden flex-1 min-w-0 flex flex-col bg-[#fbf6de]">
       <div class="flex items-center justify-between px-5 py-3 bg-[#f2e8c5] border-b border-[#e2d8b5]">
         <div>
@@ -1180,7 +1189,7 @@ HTML_TEMPLATE = r"""
 
   <script>
     function switchTab(tab) {
-      ['explorer', 'maintenance', 'ai'].forEach(t => {
+      ['explorer', 'wiki', 'maintenance', 'ai'].forEach(t => {
         document.getElementById('view-' + t).classList.add('hidden');
         document.getElementById('tab-btn-' + t).className = "px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition";
       });
@@ -1329,15 +1338,6 @@ HTML_TEMPLATE = r"""
     let onlineWikiSearchBusy = false;
     let onlineWikiCurrentUrl = "";
     let onlineWikiCurrentIsWiki = false;
-
-    async function openHTMLDownloadPicker() {
-      document.getElementById('html-download-picker').classList.remove('hidden');
-      document.getElementById('html-download-search').focus();
-    }
-
-    function closeHTMLDownloadPicker() {
-      document.getElementById('html-download-picker').classList.add('hidden');
-    }
 
     async function searchOnlineWiki() {
       if (onlineWikiSearchBusy || onlineWikiBrowserBusy) return;
@@ -1494,24 +1494,28 @@ HTML_TEMPLATE = r"""
       updateOnlineWikiCurrentUrl();
     }
 
-    function appendLog(str) {
-      const logDiv = document.getElementById('task-log');
-      logDiv.innerText += "\n" + str;
-      logDiv.scrollTop = logDiv.scrollHeight;
-    }
-
     async function runTask(taskName) {
-      appendLog(`▶ タスクを開始します...`);
+      const status = document.getElementById('maintenance-task-status');
+      status.textContent = "保守タスクを開始しています...";
+      status.className = "min-h-10 rounded border border-[#dfd3a8] bg-[#fffdf5] px-3 py-2 text-xs text-gray-600";
       try {
         const result = await pywebview.api.run_maintenance_task(taskName);
-        if (result.status !== "started") appendLog(result.message || "タスクを開始できませんでした。");
+        if (result.status !== "started") {
+          status.textContent = result.message || "タスクを開始できませんでした。";
+          status.className = "min-h-10 rounded border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-800";
+        }
       } catch (error) {
-        appendLog("タスク開始エラー: " + error);
+        status.textContent = "タスク開始エラー: " + error;
+        status.className = "min-h-10 rounded border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-800";
       }
     }
 
-    function onTaskCompleted() {
-      appendLog(`✔ 処理が終了しました。`);
+    function onMaintenanceTaskCompleted(result) {
+      const status = document.getElementById('maintenance-task-status');
+      status.textContent = result.message || (result.ok ? "処理が完了しました。" : "処理に失敗しました。");
+      status.className = result.ok
+        ? "min-h-10 rounded border border-green-300 bg-green-50 px-3 py-2 text-xs text-green-800"
+        : "min-h-10 rounded border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-800";
       onSearchInput();
     }
 

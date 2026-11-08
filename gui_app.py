@@ -1063,7 +1063,7 @@ HTML_TEMPLATE = r"""
       <div class="max-w-4xl mx-auto w-full bg-white border border-[#e2d8b5] p-6 rounded shadow-sm space-y-4">
         <div class="border-b border-gray-200 pb-2">
           <h2 class="text-lg font-bold text-gray-800">🌐 日本語版Backrooms Wiki</h2>
-          <p class="text-xs text-gray-500 mt-1">Fandomをオンライン検索し、アプリ内ブラウザーで直接閲覧できます。WindowsではChromiumベースのWebView2を使用します。</p>
+          <p class="text-xs text-gray-500 mt-1">Backrooms Wikiを起点に、ページ内リンクをたどって自由に閲覧できます。WindowsではChromiumベースのWebView2を使用します。</p>
         </div>
         <div class="flex gap-2">
           <input id="html-download-search" type="search"
@@ -1088,6 +1088,7 @@ HTML_TEMPLATE = r"""
             <input id="online-wiki-url" type="url"
               onkeydown="if(event.key==='Enter') openDirectWikiUrl()"
               class="min-w-0 flex-1 border border-[#d6c79a] rounded px-3 py-2 text-xs"
+              value="https://backrooms.fandom.com/ja/wiki/Backrooms_Wiki"
               placeholder="https://backrooms.fandom.com/ja/wiki/...">
             <button onclick="openDirectWikiUrl()"
               class="shrink-0 px-3 py-2 text-xs font-semibold bg-[#91520f] text-white rounded">
@@ -1188,6 +1189,8 @@ HTML_TEMPLATE = r"""
   </main>
 
   <script>
+    let onlineWikiDefaultOpened = false;
+
     function switchTab(tab) {
       ['explorer', 'wiki', 'maintenance', 'ai'].forEach(t => {
         document.getElementById('view-' + t).classList.add('hidden');
@@ -1195,6 +1198,9 @@ HTML_TEMPLATE = r"""
       });
       document.getElementById('view-' + tab).classList.remove('hidden');
       document.getElementById('tab-btn-' + tab).className = "px-4 py-1.5 rounded text-xs font-semibold bg-[#b45309] text-white transition shadow";
+      if (tab === 'wiki' && !onlineWikiDefaultOpened) {
+        openDirectWikiUrl();
+      }
     }
 
     async function onSearchInput() {
@@ -1420,6 +1426,7 @@ HTML_TEMPLATE = r"""
       try {
         const result = await pywebview.api.open_online_wiki_browser(url);
         if (result.status !== "opened") throw new Error(result.message || "ブラウザーを開けませんでした。");
+        onlineWikiDefaultOpened = true;
         status.textContent = "Fandomをアプリ内Chromiumで表示しています。";
         onOnlineWikiBrowserUrlChanged({url: result.url, is_wiki_page: true});
       } catch (error) {
@@ -1438,6 +1445,9 @@ HTML_TEMPLATE = r"""
     function onOnlineWikiBrowserUrlChanged(result) {
       onlineWikiCurrentUrl = result.url || "";
       onlineWikiCurrentIsWiki = Boolean(result.is_wiki_page);
+      if (onlineWikiCurrentUrl) {
+        document.getElementById('online-wiki-url').value = onlineWikiCurrentUrl;
+      }
       document.getElementById('online-wiki-current-url').textContent =
         onlineWikiCurrentUrl || "Fandomページはまだ開かれていません。";
       document.getElementById('online-wiki-current-url').title = onlineWikiCurrentUrl;

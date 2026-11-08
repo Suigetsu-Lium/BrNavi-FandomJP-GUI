@@ -9,6 +9,7 @@ import threading
 import io
 import warnings
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -22,26 +23,27 @@ from modules.database import (
 )
 
 # 保守・更新モジュール
-from modules.downloader import (
-    download_pages as download_html_pages,
-    get_category_label,
-    load_master_database,
-)
 from modules.extractor import extract_levels
 from modules.network import process_backrooms_data
 from modules.update_database import main as run_update_database
+from modules.online_wiki import fetch_page as fetch_online_wiki_page
+from modules.online_wiki import is_supported_wiki_url
+from modules.online_wiki import save_page as save_online_wiki_page
+from modules.online_wiki import search_pages as search_online_wiki_pages
 
 # AI Assistant（Groq / ローカルWiki検索）
 try:
     from modules.ai.assistant import AIAssistant
     from modules.ai.markdown_renderer import render_markdown, syntax_highlight_css
     AI_AVAILABLE = True
+    AI_IMPORT_ERROR = None
 except Exception as e:
     AIAssistant = None
     render_markdown = None
     syntax_highlight_css = None
     AI_AVAILABLE = False
-    print(f"[AI] モジュールを読み込めません: {e}")
+    AI_IMPORT_ERROR = e
+    print(f"[AI] モジュールを読み込めません ({type(e).__name__}): {e}")
 
 BASE_DIR = Path(__file__).resolve().parent
 IMAGE_DIR = BASE_DIR / "downloaded_images"
@@ -67,6 +69,7 @@ class BackroomsAPI:
         self._ai_jobs = {}
         self._ai_jobs_lock = threading.Lock()
         self._maintenance_lock = threading.Lock()
+        self._wiki_browser_window = None
         if AI_AVAILABLE:
             try:
                 self.ai = AIAssistant(
@@ -77,7 +80,12 @@ class BackroomsAPI:
                 self.ai_error = str(e)
                 print(f"[AI] 初期化エラー: {e}")
         else:
-            self.ai_error = "AIモジュールを読み込めません。"
+            self.ai_error = (
+                "AIモジュールを読み込めません "
+                f"({type(AI_IMPORT_ERROR).__name__}): {AI_IMPORT_ERROR}"
+                if AI_IMPORT_ERROR
+                else "AIモジュールを読み込めません。"
+            )
 
     # --- AI Assistant API ---
     def ai_get_status(self):
@@ -566,60 +574,122 @@ class BackroomsAPI:
         return {"status": "error", "message": "ローカルHTMLがありません。"}
 
     # --- 保守・更新タスク ---
-    def get_html_download_pages(self):
-        pages = load_master_database()
-        if not pages:
-            return {"pages": [], "error": "Master Databaseにページがありません。"}
+    def search_online_wiki(self, query):
+        try:
+            pages = search_online_wiki_pages(query)
+            return {"pages": pages}
+        except Exception as error:
+            return {"pages": [], "error": str(error)}
 
-        result = []
-        for page in pages:
-            categories = [
-                value.strip()
-                for value in page.get("category", "").split("|")
-                if value.strip()
-            ]
-            tags = [
-                get_category_label(category)
-                for category in categories
-            ]
-            tags.extend(
-                value
-                for value in (
-                    page.get("language", ""),
-                    page.get("source_type", ""),
-                )
-                if value
-            )
-            result.append(
-                {
-                    "title": page.get("title", ""),
-                    "url": page.get("url", ""),
-                    "language": page.get("language", ""),
-                    "categories": categories,
-                    "tags": list(dict.fromkeys(tags)),
-                }
-            )
-        return {"pages": result}
+    def get_online_wiki_page(self, url):
+        try:
+            return {"page": fetch_online_wiki_page(url)}
+        except Exception as error:
+            return {"error": str(error)}
 
-    def start_html_download(self, selected_urls):
-        if not isinstance(selected_urls, list) or not selected_urls:
-            return {"status": "error", "message": "ダウンロードするページを選択してください。"}
-
-        pages = load_master_database()
-        by_url = {page.get("url", ""): page for page in pages if page.get("url")}
-        requested = list(dict.fromkeys(str(url) for url in selected_urls))
-        if any(url not in by_url for url in requested):
+    def open_online_wiki_browser(self, url):
+        url = str(url or "").strip()
+        if not is_supported_wiki_url(url):
             return {
                 "status": "error",
-                "message": "一覧が更新されています。ページ一覧を再読み込みしてください。",
+                "message": "日本語版Backrooms WikiのURLを指定してください。",
             }
-        return self.run_maintenance_task("download_selected_html", requested)
+        try:
+            window = getattr(self, "_wiki_browser_window", None)
+            if window is not None:
+                try:
+                    window.load_url(url)
+                    return {"status": "opened", "url": url}
+                except Exception:
+                    self._wiki_browser_window = None
+
+            title = url.rsplit("/", 1)[-1].replace("_", " ")
+            window = webview.create_window(
+                title=f"{title} - Fandom JP",
+                url=url,
+                width=1180,
+                height=840,
+                min_size=(760, 560),
+                text_select=True,
+                zoomable=True,
+            )
+            if window is None:
+                return {
+                    "status": "error",
+                    "message": "アプリ内ブラウザーを作成できませんでした。",
+                }
+            self._wiki_browser_window = window
+            window.events.closed += self._on_wiki_browser_closed
+            window.events.loaded += self._on_wiki_browser_loaded
+            return {"status": "opened", "url": url}
+        except Exception as error:
+            self._wiki_browser_window = None
+            return {"status": "error", "message": str(error)}
+
+    def _on_wiki_browser_closed(self):
+        self._wiki_browser_window = None
+        self._notify_online_wiki_url("", False)
+
+    def _on_wiki_browser_loaded(self):
+        current = self.get_current_online_wiki_url()
+        self._notify_online_wiki_url(
+            current["url"],
+            current["is_wiki_page"],
+        )
+
+    def _notify_online_wiki_url(self, url, is_wiki_page):
+        main_window = getattr(self, "_main_window", None)
+        if main_window is None:
+            return
+        payload = json.dumps(
+            {"url": url, "is_wiki_page": is_wiki_page},
+            ensure_ascii=True,
+        )
+        try:
+            main_window.evaluate_js(
+                f"onOnlineWikiBrowserUrlChanged({payload})"
+            )
+        except Exception as error:
+            print(f"[GUI] WikiブラウザーURLの画面通知に失敗: {error}")
+
+    def get_current_online_wiki_url(self):
+        window = getattr(self, "_wiki_browser_window", None)
+        if window is None:
+            return {"url": "", "is_wiki_page": False}
+        try:
+            url = window.get_current_url() or ""
+        except Exception:
+            url = ""
+        return {
+            "url": url,
+            "is_wiki_page": is_supported_wiki_url(url),
+        }
+
+    def save_current_online_wiki_page(self):
+        current = self.get_current_online_wiki_url()
+        if not current["is_wiki_page"]:
+            return {
+                "status": "error",
+                "message": "ブラウザーで日本語版Backrooms Wikiのページを開いてください。",
+            }
+        url = current["url"]
+        title = unquote(urlsplit(url).path.rsplit("/", 1)[-1]).replace("_", " ")
+        return self.start_online_wiki_save(
+            {"title": title, "url": url, "categories": []}
+        )
+
+    def start_online_wiki_save(self, page):
+        if not isinstance(page, dict):
+            return {"status": "error", "message": "保存するWikiページが不正です。"}
+        if not page.get("title") or not page.get("url"):
+            return {"status": "error", "message": "ページ名またはURLがありません。"}
+        return self.run_maintenance_task("save_online_wiki_page", page)
 
     def run_maintenance_task(self, task_name, selected_urls=None):
-        if task_name == "download_html":
+        if task_name in {"download_html", "download_selected_html"}:
             return {
                 "status": "error",
-                "message": "HTMLダウンロードは一覧からページを選択してください。",
+                "message": "オンラインWiki検索からページを選択してください。",
             }
         if not self._maintenance_lock.acquire(blocking=False):
             return {"status": "busy", "message": "別の保守タスクが実行中です。"}
@@ -636,34 +706,28 @@ class BackroomsAPI:
         return {"status": "started"}
 
     def _execute_task(self, task_name, selected_urls=None):
-        if task_name == "download_selected_html":
+        if task_name == "save_online_wiki_page":
+            payload = {"ok": False}
             try:
-                pages = load_master_database()
-                selected = set(selected_urls or [])
-                matched = [page for page in pages if page.get("url") in selected]
-                if not matched or {page.get("url") for page in matched} != selected:
-                    raise ValueError("一覧が更新されています。ページ一覧を再読み込みしてください。")
-                print(f"GUIで選択された {len(matched)} 件のHTMLダウンロードを開始します。")
-                result = download_html_pages(matched, overwrite=False)
+                page = selected_urls
                 print(
-                    "HTMLダウンロード完了: "
-                    f"取得 {result['downloaded']} 件 / "
-                    f"スキップ {result['skipped']} 件 / "
-                    f"失敗 {result['failed']} 件"
+                    f"GUIから選択されたWikiページを保存します: "
+                    f"{page.get('title', '')}"
                 )
+                result = save_online_wiki_page(page)
                 payload = {"ok": True, **result}
-            except Exception as e:
-                print(f"HTMLダウンロードエラー: {e}")
-                payload = {"ok": False, "error": str(e)}
+            except Exception as error:
+                print(f"Wikiページ保存エラー: {error}")
+                payload["error"] = str(error)
             finally:
                 try:
                     encoded = json.dumps(payload, ensure_ascii=True)
                     if webview.windows:
                         webview.windows[0].evaluate_js(
-                            f"onHTMLDownloadCompleted({encoded})"
+                            f"onOnlineWikiSaveCompleted({encoded})"
                         )
-                except Exception as e:
-                    print(f"[GUI] ダウンロード完了通知に失敗: {e}")
+                except Exception as error:
+                    print(f"[GUI] Wiki保存完了通知に失敗: {error}")
                 self._maintenance_lock.release()
             return
 
@@ -711,28 +775,39 @@ HTML_TEMPLATE = r"""
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
     :root {
-      --bg-fandom: #fbf6de;       /* 湿った壁紙イエロー */
-      --border-fandom: #e2d8b5;   /* ベージュ枠線 */
-      --header-amber: #b45309;    /* Infoboxオレンジ */
+      --bg-fandom: #e5d9b8;
+      --surface-fandom: #efe5c9;
+      --surface-raised: #f7f0dc;
+      --surface-soft: #e4d6b2;
+      --border-fandom: #d3c29a;
+      --header-amber: #91520f;
+      --accent-amber: #a45b0b;
+      --text-primary: #29261f;
+      --text-secondary: #655d4d;
     }
 
     body {
       background-color: var(--bg-fandom);
-      color: #202124;
-      font-family: -apple-system, BlinkMacSystemFont, "BIZ UDPGothic", "Meiryo", sans-serif;
+      color: var(--text-primary);
+      font-family: "Yu Gothic UI", "Meiryo UI", "Noto Sans JP", "Meiryo", sans-serif;
+      font-size: 14px;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      text-rendering: optimizeLegibility;
     }
 
     .toc-box {
-      background-color: #f5eed3;
-      border: 1px solid #dfd3a8;
+      background-color: var(--surface-fandom);
+      border: 1px solid var(--border-fandom);
     }
 
     /* Wiki Infobox（情報カード） */
     .wiki-infobox {
       width: 320px;
-      background: #ffffff;
-      border: 1px solid #d4c89f;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+      background: var(--surface-raised);
+      border: 1px solid var(--border-fandom);
+      box-shadow: 0 2px 6px rgba(58, 43, 20, 0.1);
     }
     .wiki-infobox-header {
       background-color: var(--header-amber);
@@ -747,17 +822,17 @@ HTML_TEMPLATE = r"""
       font-size: 12px;
     }
     .wiki-infobox th {
-      background-color: #f7f1dc;
-      border-top: 1px solid #e5dcbe;
-      border-bottom: 1px solid #e5dcbe;
+      background-color: var(--surface-fandom);
+      border-top: 1px solid var(--border-fandom);
+      border-bottom: 1px solid var(--border-fandom);
       padding: 6px 10px;
       text-align: left;
       width: 38%;
       font-weight: 600;
     }
     .wiki-infobox td {
-      border-top: 1px solid #e5dcbe;
-      border-bottom: 1px solid #e5dcbe;
+      border-top: 1px solid var(--border-fandom);
+      border-bottom: 1px solid var(--border-fandom);
       padding: 6px 10px;
     }
 
@@ -765,8 +840,8 @@ HTML_TEMPLATE = r"""
     .wiki-heading {
       font-size: 18px;
       font-weight: bold;
-      color: #202124;
-      border-bottom: 1px solid #dcd1a6;
+      color: var(--text-primary);
+      border-bottom: 1px solid var(--border-fandom);
       padding-bottom: 4px;
       margin-top: 24px;
       margin-bottom: 10px;
@@ -797,13 +872,71 @@ HTML_TEMPLATE = r"""
       color: #f8f6ef;
       border-radius: 0.375rem;
     }
+    .online-wiki-content {
+      color: #29261f;
+      font-size: 0.9rem;
+      line-height: 1.75;
+      overflow-wrap: anywhere;
+    }
+    .online-wiki-content h2, .online-wiki-content h3, .online-wiki-content h4 {
+      margin: 1.4rem 0 0.6rem;
+      padding-bottom: 0.3rem;
+      border-bottom: 1px solid #d3c29a;
+      font-weight: 700;
+    }
+    .online-wiki-content p, .online-wiki-content ul, .online-wiki-content ol,
+    .online-wiki-content blockquote, .online-wiki-content figure {
+      margin: 0.65rem 0;
+    }
+    .online-wiki-content a { color: #8a4b0d; text-decoration: underline; }
+    .online-wiki-content img { max-width: 100%; height: auto; margin: 0.5rem auto; }
+    .online-wiki-content table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
+    .online-wiki-content th, .online-wiki-content td {
+      border: 1px solid #d3c29a;
+      padding: 0.35rem 0.55rem;
+    }
+    .online-wiki-content th { background: #efe5c9; }
+    .online-wiki-content blockquote { border-left: 3px solid #a45b0b; padding-left: 0.8rem; color: #655d4d; }
     .ai-answer-content p { margin: 0.5rem 0; }
     .ai-answer-content blockquote {
       border-left: 3px solid #b45309;
       padding-left: 0.75rem;
-      color: #57534e;
+      color: var(--text-secondary);
     }
     .ai-answer-content a { color: #92400e; text-decoration: underline; }
+    .ai-answer-content th { background: var(--surface-fandom); }
+
+    [class~="bg-[#fbf6de]"] { background-color: var(--bg-fandom) !important; }
+    [class~="bg-[#f7f0d4]"],
+    [class~="bg-[#f5eed3]"],
+    [class~="bg-[#f2e8c5]"] { background-color: var(--surface-fandom) !important; }
+    [class~="bg-[#fffdf5]"],
+    [class~="bg-[#fffaf0]"],
+    [class~="bg-[#fdfaf0]"],
+    [class~="bg-white"] { background-color: var(--surface-raised) !important; }
+    [class~="bg-[#eee3bc]"],
+    [class~="bg-[#f4e7b8]"],
+    [class~="bg-[#ead9ad]"] { background-color: var(--surface-soft) !important; }
+    [class~="hover:bg-[#eadfae]"]:hover { background-color: #d9c99f !important; }
+    [class~="hover:bg-[#fffdf2]"]:hover { background-color: #eee4c9 !important; }
+    [class~="border-[#e2d8b5]"],
+    [class~="border-[#dfd3a8]"],
+    [class~="border-[#d6c79a]"] { border-color: var(--border-fandom) !important; }
+    [class~="bg-[#b45309]"] { background-color: var(--accent-amber) !important; }
+    [class~="hover:bg-[#92400e]"]:hover { background-color: #78440f !important; }
+    [class~="text-gray-800"],
+    [class~="text-[#202124]"] { color: var(--text-primary) !important; }
+    [class~="text-gray-600"],
+    [class~="text-gray-500"] { color: var(--text-secondary) !important; }
+    [class~="text-[#b45309]"] { color: var(--accent-amber) !important; }
+    input, textarea, select {
+      font: inherit;
+      line-height: 1.5;
+    }
+    button {
+      font-family: inherit;
+      transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
+    }
   </style>
 </head>
 <body class="flex flex-col h-screen overflow-hidden select-text">
@@ -821,7 +954,7 @@ HTML_TEMPLATE = r"""
     </div>
     <div class="flex space-x-2">
       <button onclick="switchTab('explorer')" id="tab-btn-explorer" class="px-4 py-1.5 rounded text-xs font-semibold bg-[#b45309] text-white transition shadow">📖 Level 図鑑・検索</button>
-      <button onclick="switchTab('maintenance')" id="tab-btn-maintenance" class="px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition">⚙️ データベース保守</button>
+      <button onclick="switchTab('maintenance')" id="tab-btn-maintenance" class="px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition">🌐 Wiki閲覧・保存</button>
       <button onclick="switchTab('ai')" id="tab-btn-ai" class="px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition">🤖 AI Assistant</button>
     </div>
   </header>
@@ -914,15 +1047,15 @@ HTML_TEMPLATE = r"""
     <!-- 2. ⚙️ データベース保守タブ -->
     <div id="view-maintenance" class="hidden flex-1 flex flex-col p-8 bg-[#fbf6de] overflow-y-auto">
       <div class="max-w-3xl mx-auto w-full bg-white border border-[#e2d8b5] p-6 rounded shadow-sm space-y-5">
-        <h2 class="text-lg font-bold text-gray-800 border-b border-gray-200 pb-2">⚙️ データベース・ローカルデータ保守</h2>
+        <h2 class="text-lg font-bold text-gray-800 border-b border-gray-200 pb-2">🌐 Wiki閲覧・保存 / ローカルデータ管理</h2>
         <div class="grid grid-cols-2 gap-3 pt-2">
           <button onclick="runTask('update_master')" class="p-3 bg-[#f5eed3] hover:bg-[#eadfae] border border-[#d6c79a] rounded text-xs font-semibold text-gray-800 text-left">
-            <span class="text-sm block">🔄 Master Database 更新</span>
-            <span class="text-[10px] text-gray-500">一覧HTMLからLevelリストを更新</span>
+            <span class="text-sm block">🔄 既存データベース更新</span>
+            <span class="text-[10px] text-gray-500">図鑑・ルート機能の互換用（オンライン閲覧・保存には不要）</span>
           </button>
           <button onclick="openHTMLDownloadPicker()" class="p-3 bg-[#f5eed3] hover:bg-[#eadfae] border border-[#d6c79a] rounded text-xs font-semibold text-gray-800 text-left">
-            <span class="text-sm block">📥 HTML ダウンロード</span>
-            <span class="text-[10px] text-gray-500">タグ検索してページを選択</span>
+            <span class="text-sm block">🌐 Wikiを検索・閲覧・保存</span>
+            <span class="text-[10px] text-gray-500">日本語版Wikiをオンライン検索して本文と画像を表示</span>
           </button>
           <button onclick="runTask('extract_info')" class="p-3 bg-[#f5eed3] hover:bg-[#eadfae] border border-[#d6c79a] rounded text-xs font-semibold text-gray-800 text-left">
             <span class="text-sm block">📑 情報データベース更新</span>
@@ -935,33 +1068,48 @@ HTML_TEMPLATE = r"""
         </div>
         <section id="html-download-picker" class="hidden border border-[#dfd3a8] rounded p-3 bg-[#fffdf5] space-y-3">
           <div class="flex items-center justify-between gap-2">
-            <h3 class="text-sm font-bold text-gray-800">ダウンロードするページを選択</h3>
+            <div>
+              <h3 class="text-sm font-bold text-gray-800">日本語版Backrooms Wiki</h3>
+              <p class="text-[10px] text-gray-500">WindowsではChromiumベースのWebView2でページを直接表示します。</p>
+            </div>
             <div class="flex gap-2">
-              <button onclick="loadHTMLDownloadPages()" class="text-xs text-gray-500 hover:text-gray-800">一覧を再読込</button>
               <button onclick="closeHTMLDownloadPicker()" class="text-xs text-gray-500 hover:text-gray-800" title="閉じる">閉じる</button>
             </div>
           </div>
-          <input id="html-download-search" type="search" oninput="filterHTMLDownloadTiles()"
-            class="w-full border border-[#d6c79a] rounded px-3 py-2 text-xs"
-            placeholder="タイトル・タグ・言語を検索">
-          <div class="flex items-center justify-between text-[11px] text-gray-600">
-            <span id="html-download-count">一覧を読み込みます</span>
-            <div class="flex gap-2">
-              <button onclick="selectVisibleHTMLPages(true)" class="hover:underline">表示中を選択</button>
-              <button onclick="selectVisibleHTMLPages(false)" class="hover:underline">表示中を解除</button>
-            </div>
-          </div>
-          <div id="html-download-grid" class="grid grid-cols-2 md:grid-cols-3 gap-2 max-h-72 overflow-y-auto p-1"></div>
-          <button id="html-download-more" onclick="showMoreHTMLDownloadTiles()"
-            class="hidden w-full py-1 text-[11px] text-amber-800 hover:underline">
-            さらに表示
-          </button>
-          <div class="flex items-center justify-between gap-2 border-t border-[#e2d8b5] pt-2">
-            <span id="html-download-status" class="text-[11px] text-gray-600">既存ファイルはスキップされます。進捗ログはCLIに表示されます。</span>
-            <button id="html-download-start" onclick="startHTMLDownload()"
+          <div class="flex gap-2">
+            <input id="html-download-search" type="search"
+              onkeydown="if(event.key==='Enter') searchOnlineWiki()"
+              class="min-w-0 flex-1 border border-[#d6c79a] rounded px-3 py-2 text-xs"
+              placeholder="Wikiページ名・キーワードでオンライン検索">
+            <button id="html-download-search-button" onclick="searchOnlineWiki()"
               class="shrink-0 px-3 py-2 text-xs font-semibold bg-[#b45309] text-white rounded disabled:opacity-50">
-              選択したページをダウンロード
+              検索
             </button>
+          </div>
+          <input id="html-download-tag-search" type="search" oninput="filterOnlineWikiResults()"
+            class="w-full border border-[#d6c79a] rounded px-3 py-1.5 text-xs"
+            placeholder="検索結果をタグで絞り込み">
+          <div class="flex items-center justify-between text-[11px] text-gray-600">
+            <span id="html-download-count">キーワードを入力して検索してください。</span>
+            <span id="html-download-status">本文・画像の読み込みにはインターネット接続が必要です。</span>
+          </div>
+          <div class="flex flex-col gap-2 sm:flex-row">
+            <input id="online-wiki-url" type="url"
+              onkeydown="if(event.key==='Enter') openDirectWikiUrl()"
+              class="min-w-0 flex-1 border border-[#d6c79a] rounded px-3 py-2 text-xs"
+              placeholder="https://backrooms.fandom.com/ja/wiki/...">
+            <button onclick="openDirectWikiUrl()"
+              class="shrink-0 px-3 py-2 text-xs font-semibold bg-[#91520f] text-white rounded">
+              Chromiumで開く
+            </button>
+            <button id="online-wiki-save-current" onclick="saveCurrentOnlineWikiPage()" disabled
+              class="shrink-0 px-3 py-2 text-xs font-semibold bg-[#b45309] text-white rounded disabled:opacity-50">
+              ローカルに保存
+            </button>
+          </div>
+          <div class="flex items-center justify-between gap-2 text-[11px] text-gray-600">
+            <span id="online-wiki-current-url" class="min-w-0 truncate">アプリ内Chromiumで開いたWikiページを確認しています...</span>
+            <span id="online-wiki-save-status" class="shrink-0">保存先: downloaded_fandom_html</span>
           </div>
         </section>
         <div class="mt-4">
@@ -1177,16 +1325,13 @@ HTML_TEMPLATE = r"""
     }
 
     let htmlDownloadPages = [];
-    let htmlDownloadMatchedPages = [];
-    let htmlDownloadVisiblePages = [];
-    let htmlDownloadPageLimit = 150;
-    const htmlDownloadSelected = new Set();
-    let htmlDownloadBusy = false;
-    let htmlDownloadLoaded = false;
+    let onlineWikiBrowserBusy = false;
+    let onlineWikiSearchBusy = false;
+    let onlineWikiCurrentUrl = "";
+    let onlineWikiCurrentIsWiki = false;
 
     async function openHTMLDownloadPicker() {
       document.getElementById('html-download-picker').classList.remove('hidden');
-      if (!htmlDownloadLoaded) await loadHTMLDownloadPages();
       document.getElementById('html-download-search').focus();
     }
 
@@ -1194,133 +1339,159 @@ HTML_TEMPLATE = r"""
       document.getElementById('html-download-picker').classList.add('hidden');
     }
 
-    async function loadHTMLDownloadPages() {
-      if (htmlDownloadBusy) return;
+    async function searchOnlineWiki() {
+      if (onlineWikiSearchBusy || onlineWikiBrowserBusy) return;
+      const query = document.getElementById('html-download-search').value.trim();
       const status = document.getElementById('html-download-status');
       const grid = document.getElementById('html-download-grid');
-      status.textContent = "Master Databaseを読み込み中...";
+      if (!query) {
+        status.textContent = "検索語を入力してください。";
+        return;
+      }
+      onlineWikiSearchBusy = true;
+      document.getElementById('html-download-search-button').disabled = true;
+      status.textContent = "Fandomから検索しています...";
       grid.replaceChildren();
+      document.getElementById('html-download-count').textContent = "検索中...";
       try {
-        const result = await pywebview.api.get_html_download_pages();
+        const result = await pywebview.api.search_online_wiki(query);
         if (result.error) throw new Error(result.error);
         htmlDownloadPages = result.pages || [];
-        htmlDownloadLoaded = true;
-        htmlDownloadSelected.clear();
-        filterHTMLDownloadTiles();
-        status.textContent = "既存ファイルはスキップされます。進捗ログはCLIに表示されます。";
+        filterOnlineWikiResults();
+        status.textContent = htmlDownloadPages.length
+          ? "Fandomの検索結果です。ページを選ぶとアプリ内Chromiumで開きます。"
+          : "該当するページは見つかりませんでした。";
       } catch (error) {
-        htmlDownloadLoaded = false;
-        status.textContent = "一覧を読み込めませんでした: " + error;
-        grid.textContent = "Master Databaseを確認してください。";
+        htmlDownloadPages = [];
+        status.textContent = "オンライン検索に失敗しました: " + error;
+        grid.textContent = "インターネット接続とFandomの応答を確認してください。";
         document.getElementById('html-download-count').textContent = "0件";
+      } finally {
+        onlineWikiSearchBusy = false;
+        document.getElementById('html-download-search-button').disabled = false;
       }
     }
 
-    function filterHTMLDownloadTiles(resetLimit = true) {
-      if (resetLimit) htmlDownloadPageLimit = 150;
-      const query = document.getElementById('html-download-search').value.trim().toLocaleLowerCase();
-      htmlDownloadMatchedPages = htmlDownloadPages.filter(page => {
-        const searchable = [
-          page.title, page.language, ...(page.tags || []), ...(page.categories || [])
-        ].join(" ").toLocaleLowerCase();
-        return searchable.includes(query);
-      });
-      htmlDownloadVisiblePages = htmlDownloadMatchedPages.slice(0, htmlDownloadPageLimit);
-
+    function filterOnlineWikiResults() {
+      const query = document.getElementById('html-download-tag-search').value.trim().toLocaleLowerCase();
+      const pages = htmlDownloadPages.filter(page =>
+        !query || [page.title, ...(page.categories || [])].join(" ").toLocaleLowerCase().includes(query)
+      );
       const grid = document.getElementById('html-download-grid');
       grid.replaceChildren();
-      htmlDownloadVisiblePages.forEach(page => {
-        const tile = document.createElement('label');
-        tile.className = "flex gap-2 p-2 rounded bg-white border border-[#dfd3a8] hover:border-[#b45309] cursor-pointer text-xs";
-        const checkbox = document.createElement('input');
-        checkbox.type = "checkbox";
-        checkbox.checked = htmlDownloadSelected.has(page.url);
-        checkbox.disabled = htmlDownloadBusy;
-        checkbox.className = "mt-0.5 accent-amber-700";
-        checkbox.onchange = () => {
-          if (checkbox.checked) htmlDownloadSelected.add(page.url);
-          else htmlDownloadSelected.delete(page.url);
-          updateHTMLDownloadCount();
-        };
-        const body = document.createElement('span');
-        body.className = "min-w-0";
+      pages.forEach(page => {
+        const tile = document.createElement('button');
+        tile.type = "button";
+        tile.className = "w-full text-left p-2 rounded bg-white border border-[#dfd3a8] hover:border-[#b45309] text-xs";
+        tile.disabled = onlineWikiBrowserBusy;
+        tile.onclick = () => openOnlineWikiPage(page);
         const title = document.createElement('span');
         title.className = "block font-semibold text-gray-800 break-words";
         title.textContent = page.title || page.url;
         const tags = document.createElement('span');
         tags.className = "flex flex-wrap gap-1 mt-1";
-        (page.tags || []).forEach(value => {
+        (page.categories || []).slice(0, 6).forEach(value => {
           const chip = document.createElement('span');
           chip.className = "px-1.5 py-0.5 rounded bg-[#f5eed3] text-[10px] text-gray-600";
           chip.textContent = value;
           tags.appendChild(chip);
         });
-        body.append(title, tags);
-        tile.append(checkbox, body);
+        tile.append(title, tags);
         grid.appendChild(tile);
       });
-      const more = document.getElementById('html-download-more');
-      more.classList.toggle('hidden', htmlDownloadVisiblePages.length >= htmlDownloadMatchedPages.length);
-      updateHTMLDownloadCount();
-    }
-
-    function showMoreHTMLDownloadTiles() {
-      htmlDownloadPageLimit += 150;
-      filterHTMLDownloadTiles(false);
-    }
-
-    function updateHTMLDownloadCount() {
       document.getElementById('html-download-count').textContent =
-        `${htmlDownloadVisiblePages.length} / ${htmlDownloadMatchedPages.length}件を表示・${htmlDownloadSelected.size}件を選択`;
-      document.getElementById('html-download-start').disabled =
-        htmlDownloadBusy || htmlDownloadSelected.size === 0;
+        `${pages.length}件 / 検索結果 ${htmlDownloadPages.length}件`;
     }
 
-    function selectVisibleHTMLPages(selected) {
-      if (htmlDownloadBusy) return;
-      htmlDownloadVisiblePages.forEach(page => {
-        if (selected) htmlDownloadSelected.add(page.url);
-        else htmlDownloadSelected.delete(page.url);
-      });
-      filterHTMLDownloadTiles();
+    async function openOnlineWikiPage(page) {
+      document.getElementById('online-wiki-url').value = page.url;
+      await openDirectWikiUrl();
     }
 
-    async function startHTMLDownload() {
-      if (htmlDownloadBusy || !htmlDownloadSelected.size) return;
-      htmlDownloadBusy = true;
-      filterHTMLDownloadTiles();
-      document.getElementById('html-download-status').textContent =
-        `${htmlDownloadSelected.size}件のダウンロードを開始しています...`;
+    async function openDirectWikiUrl() {
+      if (onlineWikiBrowserBusy) return;
+      const url = document.getElementById('online-wiki-url').value.trim();
+      const status = document.getElementById('html-download-status');
+      onlineWikiBrowserBusy = true;
+      status.textContent = "アプリ内ChromiumでFandomを開いています...";
+      onlineWikiCurrentUrl = "";
+      onlineWikiCurrentIsWiki = false;
+      document.getElementById('online-wiki-save-current').disabled = true;
       try {
-        const result = await pywebview.api.start_html_download([...htmlDownloadSelected]);
+        const result = await pywebview.api.open_online_wiki_browser(url);
+        if (result.status !== "opened") throw new Error(result.message || "ブラウザーを開けませんでした。");
+        status.textContent = "Fandomをアプリ内Chromiumで表示しています。";
+        onOnlineWikiBrowserUrlChanged({url: result.url, is_wiki_page: true});
+      } catch (error) {
+        status.textContent = "Fandomを開けませんでした: " + error;
+      } finally {
+        onlineWikiBrowserBusy = false;
+        if (onlineWikiCurrentUrl) {
+          onOnlineWikiBrowserUrlChanged({
+            url: onlineWikiCurrentUrl,
+            is_wiki_page: onlineWikiCurrentIsWiki
+          });
+        }
+      }
+    }
+
+    function onOnlineWikiBrowserUrlChanged(result) {
+      onlineWikiCurrentUrl = result.url || "";
+      onlineWikiCurrentIsWiki = Boolean(result.is_wiki_page);
+      document.getElementById('online-wiki-current-url').textContent =
+        onlineWikiCurrentUrl || "Fandomページはまだ開かれていません。";
+      document.getElementById('online-wiki-current-url').title = onlineWikiCurrentUrl;
+      document.getElementById('online-wiki-save-current').disabled =
+        !result.is_wiki_page || onlineWikiBrowserBusy;
+    }
+
+    async function updateOnlineWikiCurrentUrl() {
+      try {
+        const result = await pywebview.api.get_current_online_wiki_url();
+        onOnlineWikiBrowserUrlChanged(result);
+      } catch (error) {
+        document.getElementById('online-wiki-current-url').textContent =
+          "ブラウザーの状態を取得できません: " + error;
+      }
+    }
+
+    async function saveCurrentOnlineWikiPage() {
+      if (onlineWikiBrowserBusy || !onlineWikiCurrentUrl) return;
+      onlineWikiBrowserBusy = true;
+      document.getElementById('online-wiki-save-current').disabled = true;
+      document.getElementById('online-wiki-save-status').textContent =
+        "表示中のWiki本文と画像を保存しています...";
+      try {
+        const result = await pywebview.api.save_current_online_wiki_page();
         if (result.status !== "started") {
-          htmlDownloadBusy = false;
-          document.getElementById('html-download-status').textContent =
+          document.getElementById('online-wiki-save-status').textContent =
             result.message || "ダウンロードを開始できませんでした。";
-          filterHTMLDownloadTiles();
-        } else if (htmlDownloadBusy) {
-          document.getElementById('html-download-status').textContent =
-            "ダウンロード中です。詳しいログはCLIに表示されます。";
+          onlineWikiBrowserBusy = false;
+          await updateOnlineWikiCurrentUrl();
+        } else {
+          document.getElementById('online-wiki-save-status').textContent =
+            "保存中です。詳細ログはCLIに表示されます。";
         }
       } catch (error) {
-        htmlDownloadBusy = false;
-        document.getElementById('html-download-status').textContent =
-          "ダウンロード開始エラー: " + error;
-        filterHTMLDownloadTiles();
+        document.getElementById('online-wiki-save-status').textContent =
+          "保存開始エラー: " + error;
+        onlineWikiBrowserBusy = false;
+        await updateOnlineWikiCurrentUrl();
       }
     }
 
-    function onHTMLDownloadCompleted(result) {
-      htmlDownloadBusy = false;
+    function onOnlineWikiSaveCompleted(result) {
+      onlineWikiBrowserBusy = false;
       if (result.ok) {
-        htmlDownloadSelected.clear();
-        document.getElementById('html-download-status').textContent =
-          `完了: 取得 ${result.downloaded}件 / スキップ ${result.skipped}件 / 失敗 ${result.failed}件。詳細ログはCLIを確認してください。`;
+        document.getElementById('online-wiki-save-status').textContent =
+          `保存完了: ${result.title} / 画像 ${result.images_saved}件` +
+          (result.images_failed ? ` (失敗 ${result.images_failed}件)` : "") +
+          ` / ${result.path}`;
       } else {
-        document.getElementById('html-download-status').textContent =
-          "ダウンロードエラー: " + (result.error || "不明なエラー");
+        document.getElementById('online-wiki-save-status').textContent =
+          "保存エラー: " + (result.error || "不明なエラー");
       }
-      filterHTMLDownloadTiles();
+      updateOnlineWikiCurrentUrl();
     }
 
     function appendLog(str) {
@@ -1851,6 +2022,7 @@ HTML_TEMPLATE = r"""
     window.addEventListener('pywebviewready', () => {
       onSearchInput();
       initializeAI();
+      updateOnlineWikiCurrentUrl();
     });
   </script>
 </body>
@@ -1867,7 +2039,7 @@ def main():
             syntax_highlight_css() + "\n</style>",
             1,
         )
-    webview.create_window(
+    api._main_window = webview.create_window(
         title="Backrooms Navigation System - Fandom JP (Wiki Explorer)",
         html=html,
         js_api=api,
@@ -1875,7 +2047,10 @@ def main():
         height=850,
         min_size=(1000, 650)
     )
-    webview.start(debug=False)
+    if os.name == "nt":
+        webview.start(debug=False, gui="edgechromium")
+    else:
+        webview.start(debug=False)
 
 
 if __name__ == "__main__":

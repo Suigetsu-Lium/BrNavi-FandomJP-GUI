@@ -12,7 +12,7 @@ Backrooms Fandom JP のデータをローカルに構築し、Level検索・接�
 4. ZIPを解凍し、フォルダ内の `BackroomsNavigationSystem_FandomJP.exe` を実行してください。
 
 ## 🚀 初回データ構築の手順
-本ツールはCCライセンスへの配慮およびデータ最新化のため、データを同梱していません。起動後、メニューから以下の **[番号順]** に実行してデータベースを構築してください。
+保守タブの「Wikiを検索・閲覧・保存」はオンライン接続で利用でき、Master Databaseの構築は不要です。図鑑・ルート・分類機能も利用する場合は、データを同梱していないため、起動後に以下の順で既存データを構築してください。
 
 ```text
  [9] Master Database を更新
@@ -30,8 +30,8 @@ Backrooms Fandom JP のデータをローカルに構築し、Level検索・接�
 - **超高速ルート検索 (`[3]`, `[8]`)**：1万件以上のエッジから目的地までの最短経路を瞬時に探索。
 - **インテリジェント検索・閲覧 (`[1]`, `[2]`, `[4]`)**：キーワードによるLevel検索とテキスト閲覧。
 - **画像抽出・オフラインビューアー (`[5]`, `[6]`)**：HTMLから画像のみを抽出し、ローカルで表示。
-- **GUI版HTMLダウンロード**：保守タブの一覧からタイル選択し、タイトル・カテゴリタグ・言語で検索してダウンロードできます。ダウンロードの進捗ログはCLIに表示されます。
-- **BrNavi AI Assistant**：Groq APIとローカルWiki資料を利用したMarkdownチャット。会話はローカルSQLiteに保存されます。
+- **GUI版Wiki閲覧・保存**：保守タブから日本語版Backrooms Wikiをオンライン検索し、タグで絞り込みできます。ページを選ぶかURLを入力するとアプリ内ブラウザーでFandomを直接表示し、Fandom本来のレイアウト・ページ内リンクを閲覧できます。WindowsではChromiumベースのWebView2を使用します。保守タブの「ローカルに保存」で表示中のWikiページをHTMLと取得可能な画像とともに保存し、詳細なダウンロードログはCLIに表示します。この機能はMaster Databaseに依存しません。既存の図鑑・ルート・分類機能は互換性維持のため引き続き既存データベースを使用します。
+- **BrNavi AI Assistant**：Groq APIとローカルWiki資料を利用したMarkdownチャット。会話はローカルSQLiteに保存されます。Wiki調査では日本語版のローカル資料を優先し、見つからない場合はFandom APIで日本語版を検索して実際のページ本文を取得します。日本語版で該当情報を確認できた場合は外部検索を行わず、確認できない場合に英語版Wikiを検索します。検索にはインターネット接続が必要で、検索結果のスニペットだけを根拠には使用しません。
 
 ## 🧑‍💻 ソースからの起動
 Python 3.10以降を用意し、リポジトリのルートで依存パッケージをインストールします。
@@ -43,7 +43,17 @@ python -m pip install -r requirements.txt
 python gui_app.py
 ```
 
-GUI版は `gui_app.py`、コンソール版は `BackroomsNavigationSystem_FandomJP.py` から起動します。AI Assistantを利用するには、GroqのAPIキーを `GROQ_API_KEY` 環境変数に設定してください。キーが未設定の場合、AI機能は利用できません。
+GUI版は `gui_app.py`、コンソール版は `BackroomsNavigationSystem_FandomJP.py` から起動します。WindowsでGUI版のオンライン閲覧を利用するにはMicrosoft Edge WebView2 Runtimeが必要です（Chromiumを別途同梱する方式ではなく、WebView2 Runtimeを利用します）。AI Assistantを利用するには、GroqのAPIキーを `GROQ_API_KEY` 環境変数に設定してください。キーが未設定の場合、AI機能は利用できません。
+
+### AIモジュールのimportエラー
+`No module named 'bleach'` など依存パッケージが見つからない場合は、アプリの起動に使うPython環境と同じ環境で、リポジトリのルートから依存関係をインストールしてください。
+
+```powershell
+python -m pip install -r requirements.txt
+python gui_app.py
+```
+
+仮想環境を使っている場合は、その環境を有効化してから実行してください。PyInstaller版を使っている場合、pipでの追加だけでは既存exeに反映されないため、依存をインストールした環境で再ビルドが必要です。
 
 会話データと設定は `database/ai/` に保存されます。SQLiteスキーマの更新前にはSQLite Backup APIを使って同じフォルダにバックアップを作成します。アプリ内で会話を削除すると、関連するメッセージと回答バージョンも削除されます。
 

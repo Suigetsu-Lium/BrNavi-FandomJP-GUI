@@ -2,7 +2,6 @@ import contextlib
 import io
 import threading
 import unittest
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import gui_app
@@ -12,7 +11,7 @@ class OnlineWikiGuiTests(unittest.TestCase):
     def setUp(self):
         self.api = gui_app.BackroomsAPI.__new__(gui_app.BackroomsAPI)
         self.api._maintenance_lock = threading.Lock()
-        self.api._wiki_browser_window = None
+        self.api._current_online_wiki_url = ""
 
     @patch("gui_app.load_master_database")
     @patch("gui_app.search_online_wiki_pages")
@@ -64,8 +63,14 @@ class OnlineWikiGuiTests(unittest.TestCase):
         self.assertIn('id="view-wiki"', gui_app.HTML_TEMPLATE)
         self.assertIn("switchTab('wiki')", gui_app.HTML_TEMPLATE)
         self.assertIn('id="view-maintenance"', gui_app.HTML_TEMPLATE)
+        self.assertIn('id="online-wiki-frame"', gui_app.HTML_TEMPLATE)
+        self.assertIn(
+            "document.getElementById('online-wiki-frame').src = result.url",
+            gui_app.HTML_TEMPLATE,
+        )
         self.assertNotIn('id="task-log"', gui_app.HTML_TEMPLATE)
         self.assertNotIn("function appendLog", gui_app.HTML_TEMPLATE)
+        self.assertNotIn("open_online_wiki_browser", gui_app.HTML_TEMPLATE)
 
     def test_wiki_tab_opens_default_homepage_for_free_browsing(self):
         default_url = "https://backrooms.fandom.com/ja/wiki/Backrooms_Wiki"
@@ -109,54 +114,51 @@ class OnlineWikiGuiTests(unittest.TestCase):
         )
         self.assertFalse(self.api._maintenance_lock.locked())
 
-    @patch("gui_app.webview.create_window")
-    def test_open_online_wiki_browser_rejects_non_wiki_urls(self, create_window):
-        result = self.api.open_online_wiki_browser("https://example.com/")
+    def test_embedded_browser_navigation_rejects_non_wiki_urls(self):
+        result = self.api.navigate_online_wiki_frame("https://example.com/")
 
         self.assertEqual(result["status"], "error")
-        create_window.assert_not_called()
 
-    @patch("gui_app.webview.create_window")
-    def test_open_online_wiki_browser_creates_direct_browser_window(self, create_window):
-        class Event:
-            def __init__(self):
-                self.callbacks = []
-
-            def __iadd__(self, callback):
-                self.callbacks.append(callback)
-                return self
-
-        browser = unittest.mock.Mock()
-        browser.events = SimpleNamespace(closed=Event(), loaded=Event())
-        create_window.return_value = browser
-
-        result = self.api.open_online_wiki_browser(
+    def test_embedded_browser_navigation_accepts_and_tracks_wiki_url(self):
+        result = self.api.navigate_online_wiki_frame(
             "https://backrooms.fandom.com/ja/wiki/Level_0"
         )
 
-        self.assertEqual(result["status"], "opened")
-        create_window.assert_called_once()
+        self.assertEqual(result["status"], "ok")
         self.assertEqual(
-            create_window.call_args.kwargs["url"],
-            "https://backrooms.fandom.com/ja/wiki/Level_0",
+            self.api.get_current_online_wiki_url(),
+            {
+                "url": "https://backrooms.fandom.com/ja/wiki/Level_0",
+                "is_wiki_page": True,
+            },
         )
-        self.assertIs(self.api._wiki_browser_window, browser)
-        self.assertIn(self.api._on_wiki_browser_closed, browser.events.closed.callbacks)
-        self.assertIn(self.api._on_wiki_browser_loaded, browser.events.loaded.callbacks)
 
-    def test_current_browser_url_is_validated_before_saving(self):
-        browser = unittest.mock.Mock()
-        browser.get_current_url.return_value = "https://example.com/"
-        self.api._wiki_browser_window = browser
+    @patch.object(gui_app.BackroomsAPI, "_notify_online_wiki_url")
+    def test_embedded_frame_navigation_tracks_actual_wiki_document(self, notify):
+        response = unittest.mock.Mock()
+        response.url = "https://backrooms.fandom.com/ja/wiki/Level_0"
+        response.headers = {"Content-Type": "text/html; charset=UTF-8"}
 
-        result = self.api.get_current_online_wiki_url()
+        self.api._on_main_window_response_received(response)
 
-        self.assertEqual(result, {
-            "url": "https://example.com/",
-            "is_wiki_page": False,
-        })
+        self.assertEqual(
+            self.api.get_current_online_wiki_url(),
+            {"url": response.url, "is_wiki_page": True},
+        )
+        notify.assert_called_once_with(response.url, True)
 
-    def test_browser_url_notifications_target_the_main_window(self):
+    @patch.object(gui_app.BackroomsAPI, "_notify_online_wiki_url")
+    def test_embedded_frame_ignores_non_document_responses(self, notify):
+        response = unittest.mock.Mock()
+        response.url = "https://backrooms.fandom.com/ja/api.php"
+        response.headers = {"Content-Type": "application/json"}
+
+        self.api._on_main_window_response_received(response)
+
+        self.assertEqual(self.api._current_online_wiki_url, "")
+        notify.assert_not_called()
+
+    def test_embedded_frame_url_notifications_target_the_main_window(self):
         main_window = unittest.mock.Mock()
         self.api._main_window = main_window
 
@@ -171,12 +173,10 @@ class OnlineWikiGuiTests(unittest.TestCase):
         )
 
     @patch.object(gui_app.BackroomsAPI, "start_online_wiki_save")
-    def test_saving_current_browser_url_uses_decoded_page_title(self, start_save):
-        browser = unittest.mock.Mock()
-        browser.get_current_url.return_value = (
+    def test_saving_current_embedded_frame_url_uses_decoded_page_title(self, start_save):
+        self.api._current_online_wiki_url = (
             "https://backrooms.fandom.com/ja/wiki/%E4%BA%8C%E6%9C%88%E9%A7%85"
         )
-        self.api._wiki_browser_window = browser
         start_save.return_value = {"status": "started"}
 
         result = self.api.save_current_online_wiki_page()
@@ -184,7 +184,7 @@ class OnlineWikiGuiTests(unittest.TestCase):
         self.assertEqual(result["status"], "started")
         start_save.assert_called_once_with({
             "title": "二月駅",
-            "url": browser.get_current_url.return_value,
+            "url": self.api._current_online_wiki_url,
             "categories": [],
         })
 

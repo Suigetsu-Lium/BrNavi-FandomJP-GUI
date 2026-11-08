@@ -67,7 +67,7 @@ class BackroomsAPI:
         self._ai_jobs = {}
         self._ai_jobs_lock = threading.Lock()
         self._maintenance_lock = threading.Lock()
-        self._wiki_browser_window = None
+        self._current_online_wiki_url = ""
         if AI_AVAILABLE:
             try:
                 self.ai = AIAssistant(
@@ -585,55 +585,34 @@ class BackroomsAPI:
         except Exception as error:
             return {"error": str(error)}
 
-    def open_online_wiki_browser(self, url):
+    def navigate_online_wiki_frame(self, url):
         url = str(url or "").strip()
         if not is_supported_wiki_url(url):
             return {
                 "status": "error",
                 "message": "日本語版Backrooms WikiのURLを指定してください。",
             }
-        try:
-            window = getattr(self, "_wiki_browser_window", None)
-            if window is not None:
-                try:
-                    window.load_url(url)
-                    return {"status": "opened", "url": url}
-                except Exception:
-                    self._wiki_browser_window = None
+        self._current_online_wiki_url = url
+        return {"status": "ok", "url": url}
 
-            title = url.rsplit("/", 1)[-1].replace("_", " ")
-            window = webview.create_window(
-                title=f"{title} - Fandom JP",
-                url=url,
-                width=1180,
-                height=840,
-                min_size=(760, 560),
-                text_select=True,
-                zoomable=True,
-            )
-            if window is None:
-                return {
-                    "status": "error",
-                    "message": "アプリ内ブラウザーを作成できませんでした。",
-                }
-            self._wiki_browser_window = window
-            window.events.closed += self._on_wiki_browser_closed
-            window.events.loaded += self._on_wiki_browser_loaded
-            return {"status": "opened", "url": url}
-        except Exception as error:
-            self._wiki_browser_window = None
-            return {"status": "error", "message": str(error)}
-
-    def _on_wiki_browser_closed(self):
-        self._wiki_browser_window = None
-        self._notify_online_wiki_url("", False)
-
-    def _on_wiki_browser_loaded(self):
-        current = self.get_current_online_wiki_url()
-        self._notify_online_wiki_url(
-            current["url"],
-            current["is_wiki_page"],
+    def _on_main_window_response_received(self, response):
+        url = str(getattr(response, "url", "") or "")
+        headers = getattr(response, "headers", {}) or {}
+        content_type = next(
+            (
+                str(value)
+                for key, value in headers.items()
+                if str(key).lower() == "content-type"
+            ),
+            "",
         )
+        if (
+            not url.startswith("https://backrooms.fandom.com/")
+            or "text/html" not in content_type.lower()
+        ):
+            return
+        self._current_online_wiki_url = url
+        self._notify_online_wiki_url(url, is_supported_wiki_url(url))
 
     def _notify_online_wiki_url(self, url, is_wiki_page):
         main_window = getattr(self, "_main_window", None)
@@ -651,13 +630,7 @@ class BackroomsAPI:
             print(f"[GUI] WikiブラウザーURLの画面通知に失敗: {error}")
 
     def get_current_online_wiki_url(self):
-        window = getattr(self, "_wiki_browser_window", None)
-        if window is None:
-            return {"url": "", "is_wiki_page": False}
-        try:
-            url = window.get_current_url() or ""
-        except Exception:
-            url = ""
+        url = self._current_online_wiki_url
         return {
             "url": url,
             "is_wiki_page": is_supported_wiki_url(url),
@@ -1059,50 +1032,60 @@ HTML_TEMPLATE = r"""
     </div>
 
     <!-- 2. 🌐 Wiki閲覧・保存タブ -->
-    <div id="view-wiki" class="hidden flex-1 flex flex-col p-8 bg-[#fbf6de] overflow-y-auto">
-      <div class="max-w-4xl mx-auto w-full bg-white border border-[#e2d8b5] p-6 rounded shadow-sm space-y-4">
-        <div class="border-b border-gray-200 pb-2">
-          <h2 class="text-lg font-bold text-gray-800">🌐 日本語版Backrooms Wiki</h2>
-          <p class="text-xs text-gray-500 mt-1">Backrooms Wikiを起点に、ページ内リンクをたどって自由に閲覧できます。WindowsではChromiumベースのWebView2を使用します。</p>
+    <div id="view-wiki" class="hidden flex-1 min-h-0 flex flex-col p-3 bg-[#fbf6de] overflow-hidden">
+      <div class="w-full flex-1 min-h-0 flex flex-col bg-white border border-[#e2d8b5] p-3 rounded shadow-sm gap-2">
+        <div class="flex items-center justify-between gap-3">
+          <div class="min-w-0">
+            <h2 class="text-base font-bold text-gray-800">🌐 日本語版Backrooms Wiki</h2>
+            <p class="text-[11px] text-gray-500">ページ内リンクをたどって自由に閲覧できます。</p>
+          </div>
+          <span id="html-download-status" class="shrink-0 text-[11px] text-gray-600">閲覧・保存にはインターネット接続が必要です。</span>
         </div>
         <div class="flex gap-2">
           <input id="html-download-search" type="search"
             onkeydown="if(event.key==='Enter') searchOnlineWiki()"
-            class="min-w-0 flex-1 border border-[#d6c79a] rounded px-3 py-2 text-xs"
+            class="min-w-0 flex-1 border border-[#d6c79a] rounded px-3 py-1.5 text-xs"
             placeholder="Wikiページ名・キーワードでオンライン検索">
           <button id="html-download-search-button" onclick="searchOnlineWiki()"
-            class="shrink-0 px-3 py-2 text-xs font-semibold bg-[#b45309] text-white rounded disabled:opacity-50">
+            class="shrink-0 px-4 py-1.5 text-xs font-semibold bg-[#b45309] text-white rounded disabled:opacity-50">
             検索
           </button>
+          <input id="html-download-tag-search" type="search" oninput="filterOnlineWikiResults()"
+            class="w-56 border border-[#d6c79a] rounded px-3 py-1.5 text-xs"
+            placeholder="タグで絞り込み">
         </div>
-        <input id="html-download-tag-search" type="search" oninput="filterOnlineWikiResults()"
-          class="w-full border border-[#d6c79a] rounded px-3 py-1.5 text-xs"
-          placeholder="検索結果をタグで絞り込み">
-        <div class="flex items-center justify-between text-[11px] text-gray-600">
-          <span id="html-download-count">キーワードを入力して検索してください。</span>
-          <span id="html-download-status">閲覧・保存にはインターネット接続が必要です。</span>
+        <div id="html-download-results" class="hidden shrink-0 border border-[#dfd3a8] rounded p-2 bg-[#fffdf5]">
+          <div class="flex items-center justify-between text-[11px] text-gray-600 mb-1">
+            <span id="html-download-count">検索結果</span>
+            <button type="button" onclick="clearOnlineWikiResults()" class="text-gray-500 hover:text-gray-800">結果を閉じる</button>
+          </div>
+          <div id="html-download-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-1.5 max-h-28 overflow-y-auto pr-1"></div>
         </div>
-        <div id="html-download-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 max-h-72 overflow-y-auto pr-1"></div>
-        <div class="border-t border-[#e2d8b5] pt-4 space-y-3">
-          <div class="flex flex-col gap-2 sm:flex-row">
-            <input id="online-wiki-url" type="url"
-              onkeydown="if(event.key==='Enter') openDirectWikiUrl()"
-              class="min-w-0 flex-1 border border-[#d6c79a] rounded px-3 py-2 text-xs"
-              value="https://backrooms.fandom.com/ja/wiki/Backrooms_Wiki"
-              placeholder="https://backrooms.fandom.com/ja/wiki/...">
-            <button onclick="openDirectWikiUrl()"
-              class="shrink-0 px-3 py-2 text-xs font-semibold bg-[#91520f] text-white rounded">
-              Chromiumで開く
-            </button>
-            <button id="online-wiki-save-current" onclick="saveCurrentOnlineWikiPage()" disabled
-              class="shrink-0 px-3 py-2 text-xs font-semibold bg-[#b45309] text-white rounded disabled:opacity-50">
-              ローカルに保存
-            </button>
-          </div>
-          <div class="flex items-center justify-between gap-2 text-[11px] text-gray-600">
-            <span id="online-wiki-current-url" class="min-w-0 truncate">アプリ内Chromiumで開いたWikiページを確認しています...</span>
-            <span id="online-wiki-save-status" class="shrink-0">保存先: downloaded_fandom_html</span>
-          </div>
+        <div class="flex items-center gap-2">
+          <input id="online-wiki-url" type="url"
+            onkeydown="if(event.key==='Enter') openDirectWikiUrl()"
+            class="min-w-0 flex-1 border border-[#d6c79a] rounded px-3 py-1.5 text-xs"
+            value="https://backrooms.fandom.com/ja/wiki/Backrooms_Wiki"
+            placeholder="https://backrooms.fandom.com/ja/wiki/...">
+          <button onclick="openDirectWikiUrl()"
+            class="shrink-0 px-3 py-1.5 text-xs font-semibold bg-[#91520f] text-white rounded">
+            移動
+          </button>
+          <button id="online-wiki-save-current" onclick="saveCurrentOnlineWikiPage()" disabled
+            class="shrink-0 px-3 py-1.5 text-xs font-semibold bg-[#b45309] text-white rounded disabled:opacity-50">
+            表示中を保存
+          </button>
+          <span id="online-wiki-save-status" class="shrink-0 text-[11px] text-gray-600">保存先: downloaded_fandom_html</span>
+        </div>
+        <div class="flex-1 min-h-0 overflow-hidden rounded border border-[#d6c79a] bg-white">
+          <iframe id="online-wiki-frame"
+            title="日本語版Backrooms Wiki"
+            class="w-full h-full border-0 bg-white"
+            referrerpolicy="strict-origin-when-cross-origin"></iframe>
+        </div>
+        <div class="flex items-center justify-between gap-2 text-[10px] text-gray-500">
+          <span id="online-wiki-current-url" class="min-w-0 truncate">トップページを読み込みます...</span>
+          <span>表示・閲覧にはFandomの利用規約が適用されます。</span>
         </div>
       </div>
     </div>
@@ -1359,19 +1342,21 @@ HTML_TEMPLATE = r"""
       status.textContent = "Fandomから検索しています...";
       grid.replaceChildren();
       document.getElementById('html-download-count').textContent = "検索中...";
+      document.getElementById('html-download-results').classList.remove('hidden');
       try {
         const result = await pywebview.api.search_online_wiki(query);
         if (result.error) throw new Error(result.error);
         htmlDownloadPages = result.pages || [];
         filterOnlineWikiResults();
         status.textContent = htmlDownloadPages.length
-          ? "Fandomの検索結果です。ページを選ぶとアプリ内Chromiumで開きます。"
+          ? "検索結果からページを選択してください。"
           : "該当するページは見つかりませんでした。";
       } catch (error) {
         htmlDownloadPages = [];
         status.textContent = "オンライン検索に失敗しました: " + error;
         grid.textContent = "インターネット接続とFandomの応答を確認してください。";
         document.getElementById('html-download-count').textContent = "0件";
+        document.getElementById('html-download-results').classList.remove('hidden');
       } finally {
         onlineWikiSearchBusy = false;
         document.getElementById('html-download-search-button').disabled = false;
@@ -1385,6 +1370,7 @@ HTML_TEMPLATE = r"""
       );
       const grid = document.getElementById('html-download-grid');
       grid.replaceChildren();
+      document.getElementById('html-download-results').classList.remove('hidden');
       pages.forEach(page => {
         const tile = document.createElement('button');
         tile.type = "button";
@@ -1409,6 +1395,12 @@ HTML_TEMPLATE = r"""
         `${pages.length}件 / 検索結果 ${htmlDownloadPages.length}件`;
     }
 
+    function clearOnlineWikiResults() {
+      htmlDownloadPages = [];
+      document.getElementById('html-download-grid').replaceChildren();
+      document.getElementById('html-download-results').classList.add('hidden');
+    }
+
     async function openOnlineWikiPage(page) {
       document.getElementById('online-wiki-url').value = page.url;
       await openDirectWikiUrl();
@@ -1419,15 +1411,16 @@ HTML_TEMPLATE = r"""
       const url = document.getElementById('online-wiki-url').value.trim();
       const status = document.getElementById('html-download-status');
       onlineWikiBrowserBusy = true;
-      status.textContent = "アプリ内ChromiumでFandomを開いています...";
+      status.textContent = "埋め込みブラウザーでFandomを開いています...";
       onlineWikiCurrentUrl = "";
       onlineWikiCurrentIsWiki = false;
       document.getElementById('online-wiki-save-current').disabled = true;
       try {
-        const result = await pywebview.api.open_online_wiki_browser(url);
-        if (result.status !== "opened") throw new Error(result.message || "ブラウザーを開けませんでした。");
+        const result = await pywebview.api.navigate_online_wiki_frame(url);
+        if (result.status !== "ok") throw new Error(result.message || "Fandomを開けませんでした。");
         onlineWikiDefaultOpened = true;
-        status.textContent = "Fandomをアプリ内Chromiumで表示しています。";
+        status.textContent = "Wikiページをアプリ内に表示しています。";
+        document.getElementById('online-wiki-frame').src = result.url;
         onOnlineWikiBrowserUrlChanged({url: result.url, is_wiki_page: true});
       } catch (error) {
         status.textContent = "Fandomを開けませんでした: " + error;
@@ -2060,6 +2053,9 @@ def main():
         width=1320,
         height=850,
         min_size=(1000, 650)
+    )
+    api._main_window.events.response_received += (
+        api._on_main_window_response_received
     )
     if os.name == "nt":
         webview.start(debug=False, gui="edgechromium")

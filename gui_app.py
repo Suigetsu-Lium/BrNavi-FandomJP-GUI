@@ -22,7 +22,11 @@ from modules.database import (
 )
 
 # 保守・更新モジュール
-from modules.downloader import main as run_downloader
+from modules.downloader import (
+    download_pages as download_html_pages,
+    get_category_label,
+    load_master_database,
+)
 from modules.extractor import extract_levels
 from modules.network import process_backrooms_data
 from modules.update_database import main as run_update_database
@@ -62,6 +66,7 @@ class BackroomsAPI:
         self.ai_error = None
         self._ai_jobs = {}
         self._ai_jobs_lock = threading.Lock()
+        self._maintenance_lock = threading.Lock()
         if AI_AVAILABLE:
             try:
                 self.ai = AIAssistant(
@@ -561,12 +566,107 @@ class BackroomsAPI:
         return {"status": "error", "message": "ローカルHTMLがありません。"}
 
     # --- 保守・更新タスク ---
-    def run_maintenance_task(self, task_name):
-        threading.Thread(target=self._execute_task, args=(task_name,), daemon=True).start()
+    def get_html_download_pages(self):
+        pages = load_master_database()
+        if not pages:
+            return {"pages": [], "error": "Master Databaseにページがありません。"}
+
+        result = []
+        for page in pages:
+            categories = [
+                value.strip()
+                for value in page.get("category", "").split("|")
+                if value.strip()
+            ]
+            tags = [
+                get_category_label(category)
+                for category in categories
+            ]
+            tags.extend(
+                value
+                for value in (
+                    page.get("language", ""),
+                    page.get("source_type", ""),
+                )
+                if value
+            )
+            result.append(
+                {
+                    "title": page.get("title", ""),
+                    "url": page.get("url", ""),
+                    "language": page.get("language", ""),
+                    "categories": categories,
+                    "tags": list(dict.fromkeys(tags)),
+                }
+            )
+        return {"pages": result}
+
+    def start_html_download(self, selected_urls):
+        if not isinstance(selected_urls, list) or not selected_urls:
+            return {"status": "error", "message": "ダウンロードするページを選択してください。"}
+
+        pages = load_master_database()
+        by_url = {page.get("url", ""): page for page in pages if page.get("url")}
+        requested = list(dict.fromkeys(str(url) for url in selected_urls))
+        if any(url not in by_url for url in requested):
+            return {
+                "status": "error",
+                "message": "一覧が更新されています。ページ一覧を再読み込みしてください。",
+            }
+        return self.run_maintenance_task("download_selected_html", requested)
+
+    def run_maintenance_task(self, task_name, selected_urls=None):
+        if task_name == "download_html":
+            return {
+                "status": "error",
+                "message": "HTMLダウンロードは一覧からページを選択してください。",
+            }
+        if not self._maintenance_lock.acquire(blocking=False):
+            return {"status": "busy", "message": "別の保守タスクが実行中です。"}
+        worker = threading.Thread(
+            target=self._execute_task,
+            args=(task_name, selected_urls),
+            daemon=True,
+        )
+        try:
+            worker.start()
+        except Exception:
+            self._maintenance_lock.release()
+            raise
         return {"status": "started"}
 
-    def _execute_task(self, task_name):
-        webview.windows[0].evaluate_js(f"appendLog('=== [{task_name}] を開始します ===')")
+    def _execute_task(self, task_name, selected_urls=None):
+        if task_name == "download_selected_html":
+            try:
+                pages = load_master_database()
+                selected = set(selected_urls or [])
+                matched = [page for page in pages if page.get("url") in selected]
+                if not matched or {page.get("url") for page in matched} != selected:
+                    raise ValueError("一覧が更新されています。ページ一覧を再読み込みしてください。")
+                print(f"GUIで選択された {len(matched)} 件のHTMLダウンロードを開始します。")
+                result = download_html_pages(matched, overwrite=False)
+                print(
+                    "HTMLダウンロード完了: "
+                    f"取得 {result['downloaded']} 件 / "
+                    f"スキップ {result['skipped']} 件 / "
+                    f"失敗 {result['failed']} 件"
+                )
+                payload = {"ok": True, **result}
+            except Exception as e:
+                print(f"HTMLダウンロードエラー: {e}")
+                payload = {"ok": False, "error": str(e)}
+            finally:
+                try:
+                    encoded = json.dumps(payload, ensure_ascii=True)
+                    if webview.windows:
+                        webview.windows[0].evaluate_js(
+                            f"onHTMLDownloadCompleted({encoded})"
+                        )
+                except Exception as e:
+                    print(f"[GUI] ダウンロード完了通知に失敗: {e}")
+                self._maintenance_lock.release()
+            return
+
         class WebLogger(io.StringIO):
             def write(self, s):
                 if s.strip():
@@ -576,12 +676,14 @@ class BackroomsAPI:
                     except Exception:
                         pass
         old_stdout = sys.stdout
-        sys.stdout = WebLogger()
         try:
+            if webview.windows:
+                webview.windows[0].evaluate_js(
+                    f"appendLog('=== [{task_name}] を開始します ===')"
+                )
+            sys.stdout = WebLogger()
             if task_name == "update_master":
                 run_update_database()
-            elif task_name == "download_html":
-                run_downloader()
             elif task_name == "extract_info":
                 extract_levels(interactive=False)
             elif task_name == "update_network":
@@ -591,7 +693,13 @@ class BackroomsAPI:
             print(f"❌ エラー: {e}")
         finally:
             sys.stdout = old_stdout
-            webview.windows[0].evaluate_js("onTaskCompleted()")
+            try:
+                if webview.windows:
+                    webview.windows[0].evaluate_js("onTaskCompleted()")
+            except Exception as e:
+                print(f"[GUI] 保守タスク完了通知に失敗: {e}")
+            finally:
+                self._maintenance_lock.release()
 
 
 HTML_TEMPLATE = r"""
@@ -812,9 +920,9 @@ HTML_TEMPLATE = r"""
             <span class="text-sm block">🔄 Master Database 更新</span>
             <span class="text-[10px] text-gray-500">一覧HTMLからLevelリストを更新</span>
           </button>
-          <button onclick="runTask('download_html')" class="p-3 bg-[#f5eed3] hover:bg-[#eadfae] border border-[#d6c79a] rounded text-xs font-semibold text-gray-800 text-left">
-            <span class="text-sm block">📥 HTML 一括ダウンロード</span>
-            <span class="text-[10px] text-gray-500">未取得のLevelページを取得</span>
+          <button onclick="openHTMLDownloadPicker()" class="p-3 bg-[#f5eed3] hover:bg-[#eadfae] border border-[#d6c79a] rounded text-xs font-semibold text-gray-800 text-left">
+            <span class="text-sm block">📥 HTML ダウンロード</span>
+            <span class="text-[10px] text-gray-500">タグ検索してページを選択</span>
           </button>
           <button onclick="runTask('extract_info')" class="p-3 bg-[#f5eed3] hover:bg-[#eadfae] border border-[#d6c79a] rounded text-xs font-semibold text-gray-800 text-left">
             <span class="text-sm block">📑 情報データベース更新</span>
@@ -825,6 +933,37 @@ HTML_TEMPLATE = r"""
             <span class="text-[10px] text-gray-500">Level間の出入口・接続グラフを生成</span>
           </button>
         </div>
+        <section id="html-download-picker" class="hidden border border-[#dfd3a8] rounded p-3 bg-[#fffdf5] space-y-3">
+          <div class="flex items-center justify-between gap-2">
+            <h3 class="text-sm font-bold text-gray-800">ダウンロードするページを選択</h3>
+            <div class="flex gap-2">
+              <button onclick="loadHTMLDownloadPages()" class="text-xs text-gray-500 hover:text-gray-800">一覧を再読込</button>
+              <button onclick="closeHTMLDownloadPicker()" class="text-xs text-gray-500 hover:text-gray-800" title="閉じる">閉じる</button>
+            </div>
+          </div>
+          <input id="html-download-search" type="search" oninput="filterHTMLDownloadTiles()"
+            class="w-full border border-[#d6c79a] rounded px-3 py-2 text-xs"
+            placeholder="タイトル・タグ・言語を検索">
+          <div class="flex items-center justify-between text-[11px] text-gray-600">
+            <span id="html-download-count">一覧を読み込みます</span>
+            <div class="flex gap-2">
+              <button onclick="selectVisibleHTMLPages(true)" class="hover:underline">表示中を選択</button>
+              <button onclick="selectVisibleHTMLPages(false)" class="hover:underline">表示中を解除</button>
+            </div>
+          </div>
+          <div id="html-download-grid" class="grid grid-cols-2 md:grid-cols-3 gap-2 max-h-72 overflow-y-auto p-1"></div>
+          <button id="html-download-more" onclick="showMoreHTMLDownloadTiles()"
+            class="hidden w-full py-1 text-[11px] text-amber-800 hover:underline">
+            さらに表示
+          </button>
+          <div class="flex items-center justify-between gap-2 border-t border-[#e2d8b5] pt-2">
+            <span id="html-download-status" class="text-[11px] text-gray-600">既存ファイルはスキップされます。進捗ログはCLIに表示されます。</span>
+            <button id="html-download-start" onclick="startHTMLDownload()"
+              class="shrink-0 px-3 py-2 text-xs font-semibold bg-[#b45309] text-white rounded disabled:opacity-50">
+              選択したページをダウンロード
+            </button>
+          </div>
+        </section>
         <div class="mt-4">
           <div class="flex justify-between text-xs text-gray-500 mb-1">
             <span>実行ログ:</span>
@@ -1037,15 +1176,167 @@ HTML_TEMPLATE = r"""
       }
     }
 
+    let htmlDownloadPages = [];
+    let htmlDownloadMatchedPages = [];
+    let htmlDownloadVisiblePages = [];
+    let htmlDownloadPageLimit = 150;
+    const htmlDownloadSelected = new Set();
+    let htmlDownloadBusy = false;
+    let htmlDownloadLoaded = false;
+
+    async function openHTMLDownloadPicker() {
+      document.getElementById('html-download-picker').classList.remove('hidden');
+      if (!htmlDownloadLoaded) await loadHTMLDownloadPages();
+      document.getElementById('html-download-search').focus();
+    }
+
+    function closeHTMLDownloadPicker() {
+      document.getElementById('html-download-picker').classList.add('hidden');
+    }
+
+    async function loadHTMLDownloadPages() {
+      if (htmlDownloadBusy) return;
+      const status = document.getElementById('html-download-status');
+      const grid = document.getElementById('html-download-grid');
+      status.textContent = "Master Databaseを読み込み中...";
+      grid.replaceChildren();
+      try {
+        const result = await pywebview.api.get_html_download_pages();
+        if (result.error) throw new Error(result.error);
+        htmlDownloadPages = result.pages || [];
+        htmlDownloadLoaded = true;
+        htmlDownloadSelected.clear();
+        filterHTMLDownloadTiles();
+        status.textContent = "既存ファイルはスキップされます。進捗ログはCLIに表示されます。";
+      } catch (error) {
+        htmlDownloadLoaded = false;
+        status.textContent = "一覧を読み込めませんでした: " + error;
+        grid.textContent = "Master Databaseを確認してください。";
+        document.getElementById('html-download-count').textContent = "0件";
+      }
+    }
+
+    function filterHTMLDownloadTiles(resetLimit = true) {
+      if (resetLimit) htmlDownloadPageLimit = 150;
+      const query = document.getElementById('html-download-search').value.trim().toLocaleLowerCase();
+      htmlDownloadMatchedPages = htmlDownloadPages.filter(page => {
+        const searchable = [
+          page.title, page.language, ...(page.tags || []), ...(page.categories || [])
+        ].join(" ").toLocaleLowerCase();
+        return searchable.includes(query);
+      });
+      htmlDownloadVisiblePages = htmlDownloadMatchedPages.slice(0, htmlDownloadPageLimit);
+
+      const grid = document.getElementById('html-download-grid');
+      grid.replaceChildren();
+      htmlDownloadVisiblePages.forEach(page => {
+        const tile = document.createElement('label');
+        tile.className = "flex gap-2 p-2 rounded bg-white border border-[#dfd3a8] hover:border-[#b45309] cursor-pointer text-xs";
+        const checkbox = document.createElement('input');
+        checkbox.type = "checkbox";
+        checkbox.checked = htmlDownloadSelected.has(page.url);
+        checkbox.disabled = htmlDownloadBusy;
+        checkbox.className = "mt-0.5 accent-amber-700";
+        checkbox.onchange = () => {
+          if (checkbox.checked) htmlDownloadSelected.add(page.url);
+          else htmlDownloadSelected.delete(page.url);
+          updateHTMLDownloadCount();
+        };
+        const body = document.createElement('span');
+        body.className = "min-w-0";
+        const title = document.createElement('span');
+        title.className = "block font-semibold text-gray-800 break-words";
+        title.textContent = page.title || page.url;
+        const tags = document.createElement('span');
+        tags.className = "flex flex-wrap gap-1 mt-1";
+        (page.tags || []).forEach(value => {
+          const chip = document.createElement('span');
+          chip.className = "px-1.5 py-0.5 rounded bg-[#f5eed3] text-[10px] text-gray-600";
+          chip.textContent = value;
+          tags.appendChild(chip);
+        });
+        body.append(title, tags);
+        tile.append(checkbox, body);
+        grid.appendChild(tile);
+      });
+      const more = document.getElementById('html-download-more');
+      more.classList.toggle('hidden', htmlDownloadVisiblePages.length >= htmlDownloadMatchedPages.length);
+      updateHTMLDownloadCount();
+    }
+
+    function showMoreHTMLDownloadTiles() {
+      htmlDownloadPageLimit += 150;
+      filterHTMLDownloadTiles(false);
+    }
+
+    function updateHTMLDownloadCount() {
+      document.getElementById('html-download-count').textContent =
+        `${htmlDownloadVisiblePages.length} / ${htmlDownloadMatchedPages.length}件を表示・${htmlDownloadSelected.size}件を選択`;
+      document.getElementById('html-download-start').disabled =
+        htmlDownloadBusy || htmlDownloadSelected.size === 0;
+    }
+
+    function selectVisibleHTMLPages(selected) {
+      if (htmlDownloadBusy) return;
+      htmlDownloadVisiblePages.forEach(page => {
+        if (selected) htmlDownloadSelected.add(page.url);
+        else htmlDownloadSelected.delete(page.url);
+      });
+      filterHTMLDownloadTiles();
+    }
+
+    async function startHTMLDownload() {
+      if (htmlDownloadBusy || !htmlDownloadSelected.size) return;
+      htmlDownloadBusy = true;
+      filterHTMLDownloadTiles();
+      document.getElementById('html-download-status').textContent =
+        `${htmlDownloadSelected.size}件のダウンロードを開始しています...`;
+      try {
+        const result = await pywebview.api.start_html_download([...htmlDownloadSelected]);
+        if (result.status !== "started") {
+          htmlDownloadBusy = false;
+          document.getElementById('html-download-status').textContent =
+            result.message || "ダウンロードを開始できませんでした。";
+          filterHTMLDownloadTiles();
+        } else if (htmlDownloadBusy) {
+          document.getElementById('html-download-status').textContent =
+            "ダウンロード中です。詳しいログはCLIに表示されます。";
+        }
+      } catch (error) {
+        htmlDownloadBusy = false;
+        document.getElementById('html-download-status').textContent =
+          "ダウンロード開始エラー: " + error;
+        filterHTMLDownloadTiles();
+      }
+    }
+
+    function onHTMLDownloadCompleted(result) {
+      htmlDownloadBusy = false;
+      if (result.ok) {
+        htmlDownloadSelected.clear();
+        document.getElementById('html-download-status').textContent =
+          `完了: 取得 ${result.downloaded}件 / スキップ ${result.skipped}件 / 失敗 ${result.failed}件。詳細ログはCLIを確認してください。`;
+      } else {
+        document.getElementById('html-download-status').textContent =
+          "ダウンロードエラー: " + (result.error || "不明なエラー");
+      }
+      filterHTMLDownloadTiles();
+    }
+
     function appendLog(str) {
       const logDiv = document.getElementById('task-log');
       logDiv.innerText += "\n" + str;
       logDiv.scrollTop = logDiv.scrollHeight;
     }
 
-    function runTask(taskName) {
+    async function runTask(taskName) {
       appendLog(`▶ タスクを開始します...`);
-      pywebview.api.run_maintenance_task(taskName);
+      try {
+        const result = await pywebview.api.run_maintenance_task(taskName);
+        if (result.status !== "started") appendLog(result.message || "タスクを開始できませんでした。");
+      } catch (error) {
+        appendLog("タスク開始エラー: " + error);
+      }
     }
 
     function onTaskCompleted() {

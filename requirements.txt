@@ -1,0 +1,14 @@
+# Existing runtime dependencies
+beautifulsoup4==4.15.0
+curl-cffi==0.16.1
+groq==1.7.0
+pywebview==6.2.1
+requests==2.34.2
+
+# AI response rendering and sanitization
+bleach==6.4.0
+Markdown==3.11.3
+Pygments==2.21.0
+
+# Release build
+PyInstaller==6.22.2

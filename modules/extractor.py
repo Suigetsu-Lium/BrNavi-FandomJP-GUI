@@ -1301,95 +1301,73 @@ def determine_level_information(
     filename
 ):
     """
-    階層コード・メタタイトルを決定する。
+    HTML 1ページの正しい階層情報を決定する。
 
-    通常Level:
-        Levelタイトル行から取得。
+    重要:
+        本文中には別階層へのリンク・引用・説明が含まれるため、
+        本文で最初に見つかったLevelタイトルを無条件に採用しない。
 
-    番外・特殊階層:
-        ページタイトルを階層コードとして使用。
+    優先順位:
+        1. Fandomのページタイトル（ページ自身の識別子）
+        2. HTMLファイル名（取得元ページの識別子）
+        3. 本文タイトル（上記と階層コードが一致する場合のみ補完）
 
-    Returns:
-        (
-            level_title,
-            level_code,
-            meta_title
-        )
+    本文に別階層のタイトルが現れても、現在のページの階層として
+    誤採用しない。
     """
 
-    # --------------------------------------------------------
-    # 本文の正式Levelタイトル
-    # --------------------------------------------------------
+    page_candidate = clean_text(page_title) if page_title else ""
+    filename_candidate = level_code_from_filename(filename)
+    # 本文の先頭付近にある正式タイトルだけを候補にする。
+    # 記事後半のリンク・関連階層への言及をページタイトルと誤認しない。
+    leading_lines = [line for line in article_text.splitlines() if line.strip()][:25]
+    body_title = ""
+    for line in leading_lines:
+        candidate_line = clean_text(line)
+        if is_level_title_line(candidate_line):
+            body_title = candidate_line
+            break
 
-    level_title = find_level_title_line(
-        article_text
-    )
+    # ページタイトル・HTMLファイル名のうち、正式な階層ページとして
+    # 解釈できるものを優先する。
+    canonical_title = ""
+    for candidate in (page_candidate, filename_candidate):
+        if candidate and not is_probable_non_level_page_title(candidate):
+            canonical_title = candidate
+            break
 
-    if level_title:
+    if canonical_title:
+        canonical_code = extract_level_code_from_title(canonical_title)
 
-        level_code = (
-            extract_level_code_from_title(
-                level_title
-            )
-        )
+        # 本文のタイトルは、現在のページと同じ階層コードの場合のみ
+        # メタタイトルの補完に使う。
+        if body_title:
+            body_code = extract_level_code_from_title(body_title)
+            if (body_code and canonical_code and
+                    body_code.casefold() == canonical_code.casefold()):
+                return (
+                    body_title,
+                    canonical_code,
+                    extract_meta_title_from_level_title(body_title),
+                )
 
-        meta_title = (
-            extract_meta_title_from_level_title(
-                level_title
-            )
-        )
-
+        # 本文タイトルが別階層なら採用しない。
         return (
-            level_title,
-            level_code,
-            meta_title,
+            canonical_title,
+            canonical_code,
+            extract_meta_title_from_level_title(canonical_title),
         )
 
-    # --------------------------------------------------------
-    # 番外・特殊階層
-    # --------------------------------------------------------
-
-    if page_title:
-
-        page_title = clean_text(
-            page_title
+    # ページタイトル・ファイル名で識別できない特殊ケースのみ、
+    # 従来どおり本文タイトルをフォールバックとして利用する。
+    if body_title:
+        return (
+            body_title,
+            extract_level_code_from_title(body_title),
+            extract_meta_title_from_level_title(body_title),
         )
 
-        if not is_probable_non_level_page_title(
-            page_title
-        ):
-
-            return (
-                page_title,
-                page_title,
-                "",
-            )
-
-    # --------------------------------------------------------
-    # ファイル名 fallback
-    # --------------------------------------------------------
-
-    filename_title = level_code_from_filename(
-        filename
-    )
-
-    if filename_title:
-
-        if not is_probable_non_level_page_title(
-            filename_title
-        ):
-
-            return (
-                filename_title,
-                filename_title,
-                "",
-            )
-
-    return (
-        "",
-        "",
-        "",
-    )
+    return ("", "", "")
 
 
 # ============================================================
@@ -2210,11 +2188,8 @@ def process_html_file(
     """
     HTML 1件を処理する。
 
-    通常Level:
-        本文内のLevelタイトルを優先。
-
-    番外・特殊階層:
-        Fandomのページタイトルを使用。
+    Fandomページタイトル・HTMLファイル名を優先し、
+    本文タイトルは同じ階層コードの場合のみ補完に使用する。
 
     写真・画像ページ:
         スキップ。
@@ -2304,6 +2279,25 @@ def process_html_file(
         page_title,
         html_path.name
     )
+
+    # ページ自身の識別子と、本文冒頭のLevel見出しが食い違う場合は
+    # 誤った階層名で保存せず、HTML側の不整合としてスキップする。
+    leading_lines = [line for line in article_text.splitlines() if line.strip()][:25]
+    leading_body_title = ""
+    for line in leading_lines:
+        candidate_line = clean_text(line)
+        if is_level_title_line(candidate_line):
+            leading_body_title = candidate_line
+            break
+
+    if level_code and leading_body_title:
+        body_code = extract_level_code_from_title(leading_body_title)
+        if body_code and body_code.casefold() != level_code.casefold():
+            print(
+                "  ⚠ ページ識別子と本文タイトルが不一致のため保存を中止: "
+                f"ページ={level_code} / 本文={body_code}"
+            )
+            return None
 
     if not level_title:
 

@@ -1361,6 +1361,7 @@ HTML_TEMPLATE = r"""
           </div>
         </div>
         <div id="level-list-grid" class="flex flex-col flex-1 min-h-0 overflow-y-auto border-y border-[#e2d8b5] select-none"
+          style="display: flex; flex-direction: column; flex: 1 1 0%; min-height: 0; overflow-y: auto;"
           aria-label="レベルリスト"></div>
         <div class="border-t border-[#e2d8b5] pt-2 space-y-2">
           <div id="level-list-task-status" class="text-xs text-gray-600" role="status" aria-live="polite">対象を選択して「Level情報のオフライン保存」を実行してください。</div>
@@ -1715,6 +1716,7 @@ HTML_TEMPLATE = r"""
         const tile = document.createElement('div');
         tile.className = "flex items-center gap-3 min-h-12 px-3 py-2 border-b border-[#e8dfc7] cursor-pointer select-none transition " +
           (selected ? "bg-[#e7dfca] text-[#5b5343]" : "bg-white text-gray-800 hover:bg-[#fffaf0]");
+        tile.style.cssText = "box-sizing: border-box; flex: 0 0 auto; width: 100%;";
         tile.dataset.url = page.url;
         tile.setAttribute("role", "checkbox");
         tile.setAttribute("aria-checked", String(selected));

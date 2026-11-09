@@ -105,6 +105,8 @@ class OnlineWikiGuiTests(unittest.TestCase):
         self.assertIn('id="level-list-language"', gui_app.HTML_TEMPLATE)
         self.assertIn('id="level-list-grid"', gui_app.HTML_TEMPLATE)
         self.assertIn('class="flex flex-col flex-1 min-h-0 overflow-y-auto border-y', gui_app.HTML_TEMPLATE)
+        self.assertIn('style="display: flex; flex-direction: column;', gui_app.HTML_TEMPLATE)
+        self.assertIn('tile.style.cssText = "box-sizing: border-box; flex: 0 0 auto; width: 100%;"', gui_app.HTML_TEMPLATE)
         self.assertIn("tile.oncontextmenu = event =>", gui_app.HTML_TEMPLATE)
         self.assertIn("deselectLevelListPage(page)", gui_app.HTML_TEMPLATE)
         self.assertIn("selected ? \"bg-[#e7dfca] text-[#5b5343]\"", gui_app.HTML_TEMPLATE)

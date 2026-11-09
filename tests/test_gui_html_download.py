@@ -294,6 +294,21 @@ class OnlineWikiGuiTests(unittest.TestCase):
         self.assertIn("await aiNewConversation()", gui_app.HTML_TEMPLATE)
         self.assertIn("await sendAIMessage()", gui_app.HTML_TEMPLATE)
 
+    def test_theme_timezone_status_storage_and_image_views_are_wired(self):
+        for marker in (
+            'id="theme-toggle"', 'function toggleTheme()', 'id="header-clock"',
+            'setInterval(updateHeaderClock, 1000)', 'setInterval(refreshSystemStatus, 7000)',
+            'id="timezone-select"', 'id="storage-summary"', 'id="explorer-gallery-view"',
+            'function filterLocalImageGallery()', 'id="image-lightbox"',
+            "event.key === 'ArrowLeft'", "event.key === 'Escape'",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, gui_app.HTML_TEMPLATE)
+        self.assertTrue(hasattr(self.api, "get_system_status"))
+        self.assertTrue(hasattr(self.api, "get_storage_summary"))
+        self.assertTrue(hasattr(self.api, "get_local_image_gallery"))
+        self.assertTrue(hasattr(self.api, "get_local_image_data"))
+
     @patch.object(gui_app.BackroomsAPI, "_notify_maintenance_task_completed")
     @patch("gui_app.run_maintenance_operation")
     def test_maintenance_task_reports_status_without_gui_log_stream(

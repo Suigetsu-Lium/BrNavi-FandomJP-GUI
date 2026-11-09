@@ -25,7 +25,7 @@ for %%D in ("dist\BrNavi-GUI" "dist\BrNavi-CLI") do (
 )
 
 echo [1/4] GUIアプリをビルドしています...
-"%PYTHON%" -m PyInstaller --clean --noconfirm --onedir --contents-directory . --windowed --name BrNavi-GUI --distpath "dist\BrNavi-GUI" --workpath "build\pyinstaller-gui" --specpath "build\spec-gui" --paths "%ROOT%" --collect-submodules modules --collect-all webview --collect-all groq --collect-all curl_cffi --collect-all bleach --collect-all markdown --collect-all pygments "gui_app.py"
+"%PYTHON%" -m PyInstaller --clean --noconfirm --onedir --contents-directory . --windowed --name BrNavi-GUI --distpath "dist\BrNavi-GUI" --workpath "build\pyinstaller-gui" --specpath "build\spec-gui" --paths "%ROOT%" --collect-submodules modules --collect-all webview --collect-all groq --collect-all curl_cffi --collect-all bleach --collect-all markdown --collect-all pygments --collect-all tzdata "gui_app.py"
 if errorlevel 1 goto build_failed
 
 echo.

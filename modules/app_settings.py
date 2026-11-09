@@ -34,6 +34,8 @@ class AppSettingsStore:
 
     def get(self):
         data = {
+            "theme": "light",
+            "timezone": "Asia/Tokyo",
             "auto_update_catalog": True,
             "last_catalog_update_attempt_at": None,
             "last_catalog_update_success_at": None,
@@ -50,6 +52,11 @@ class AppSettingsStore:
     def update(self, values):
         with self._lock:
             data = self.get()
+            if isinstance(values.get("theme"), str) and values["theme"] in {"light", "dark"}:
+                data["theme"] = values["theme"]
+            allowed_timezones = {"Asia/Tokyo", "BRT", "UTC", "America/New_York", "Europe/London", "Asia/Seoul", "Asia/Shanghai"}
+            if isinstance(values.get("timezone"), str) and values["timezone"] in allowed_timezones:
+                data["timezone"] = values["timezone"]
             if "auto_update_catalog" in values:
                 data["auto_update_catalog"] = bool(values["auto_update_catalog"])
             self._write(data)

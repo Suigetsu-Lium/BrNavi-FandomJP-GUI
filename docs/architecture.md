@@ -16,6 +16,7 @@
 | `modules/ai/wiki_retriever.py` | ローカルWiki資料の索引・順位付け、日本語・英語Backrooms Wikiおよび一般Webのオンライン検索と本文取得 |
 | `modules/route_service.py` | 経路CSVの読み込み、非対話の候補解決・最短経路検索、AI向け経路コンテキスト |
 | `modules/app_settings.py` | 一般設定の保存、暦上1か月単位の一覧データ自動更新スケジュール |
+| `modules/system_dashboard.py` | ローカル時計表示、ネットワーク・電源状態、記憶域使用量、画像ギャラリー用ファイル一覧の副作用を抑えた計算 |
 | `modules/ai/groq_client.py` | Groq Chat Completionsとストリーミング通信 |
 | `modules/ai/markdown_renderer.py` | Markdown変換、Pygmentsコードハイライト、HTMLサニタイズ |
 | `modules/ai/conversation.py` | SQLiteスキーマ、会話・メッセージ・回答バージョンの永続化 |
@@ -29,6 +30,12 @@
 ### GUIとデータ経路
 
 図鑑は、日本語版Wiki「階層の一覧」の構成（https://backrooms.fandom.com/ja/wiki/%E9%9A%8E%E5%B1%A4%E3%81%AE%E4%B8%80%E8%A6%A7）に合わせた二段階表示です。初期画面に「階層の一覧」「通常階層」「通常階層 η」「番外階層」「亜階層」「別名」「翻訳」「コンテスト」等の画像タイルを並べ、選択後は番号帯見出し、Levelリンク、右側目次を表示します。通常階層 η は `0 η`、`1 η〜9 η`、`10 η〜99 η`、`100 η〜999 η` の見出しを使い、100番台はさらに100ごとの小見出しに分けます。Levelリンクは図鑑詳細へ進み、保存状態を表示します。左ペインはMaster Database、一覧データ、抽出Summaryを統合した予測検索を提供し、記事名・副題・別名・カテゴリで絞り込みます。候補はマウスまたは上下キー・Enterで選択し、空欄時は最近の閲覧履歴を表示します。未保存項目は内蔵Wikiの閲覧・保存フローへ接続します。
+
+### 表示・端末情報・画像ビュー
+
+テーマ (`light` / `dark`) とタイムゾーンは `database/app_settings.json` に保存します。ダークテーマはbody属性でCSS変数と既存のTailwind色クラスを上書きし、アプリ内の各タブとモーダルへ適用します。時計はフロントエンドで毎秒更新し、選択タイムゾーンで表示します。BRTはUTCと同じ時刻変換を使い、表示略称だけ `BRT` にします。ネットワーク種別と電源状態は `BackroomsAPI.get_system_status()` から取得し、7秒ごとに更新します。ネットワーク検出に失敗した場合はオフライン、電源状態を取得できない場合はAC給電表示へフォールバックします。
+
+記憶域モニターは `modules/system_dashboard.py` が保存済みHTML、画像、抽出テキスト、DB、索引、ルート直下CSVを列挙して件数とバイト数を集計します。ドライブ使用量は標準ライブラリの `shutil.disk_usage` を使います。画像ギャラリーも同モジュールが `downloaded_images/` を走査し、ファイル名からLevel名を推定します。画像メタデータを一覧で取得し、表示領域に入った画像または拡大表示された画像だけをAPI経由でdata URIとして読み込むため、起動時に全画像を一括転送しません。共通ライトボックスから拡大・前後移動・Level記事への逆引きを行い、記事内画像も同じモーダルと矢印キー操作を共有します。
 
 ```mermaid
 flowchart LR

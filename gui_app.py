@@ -39,6 +39,7 @@ from modules.online_wiki import save_page as save_online_wiki_page
 from modules.online_wiki import search_pages as search_online_wiki_pages
 from modules.route_service import search_routes as search_local_routes
 from modules.runtime_paths import get_application_dir
+from modules.system_dashboard import format_clock, get_network_kind, get_power_status, list_local_images, storage_summary
 from modules.version import VERSION
 from modules.webview_fallback import set_browser_window
 
@@ -113,6 +114,34 @@ class BackroomsAPI:
         settings["update_due"] = due
         settings["next_catalog_update_at"] = next_due.isoformat(timespec="seconds") if next_due else None
         return settings
+
+    def get_system_status(self):
+        return {"network": get_network_kind(), "power": get_power_status()}
+
+    def get_storage_summary(self):
+        return storage_summary(BASE_DIR)
+
+    def get_local_image_gallery(self):
+        result = []
+        for item in list_local_images(IMAGE_DIR):
+            item.pop("path", None)
+            result.append(item)
+        return result
+
+    def get_local_image_data(self, filename):
+        name = Path(str(filename or "")).name
+        path = IMAGE_DIR / name
+        if not name or path.resolve().parent != IMAGE_DIR.resolve() or path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}:
+            return {"error": "画像名が無効です。"}
+        try:
+            mime = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif", ".bmp": "image/bmp"}.get(path.suffix.lower(), "application/octet-stream")
+            return {"src": f"data:{mime};base64," + base64.b64encode(path.read_bytes()).decode("ascii")}
+        except OSError as error:
+            return {"error": str(error)}
+
+    def get_clock_text(self, timezone_name=None):
+        settings = APP_SETTINGS.get()
+        return format_clock(timezone_name=timezone_name or settings.get("timezone", "Asia/Tokyo"))
 
     def save_environment_settings(self, values):
         if not isinstance(values, dict):
@@ -1349,12 +1378,53 @@ HTML_TEMPLATE = r"""
       font-family: inherit;
       transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
     }
+
+    body[data-theme="dark"] {
+      --bg-fandom: #202020;
+      --surface-fandom: #2b2b2b;
+      --surface-raised: #323232;
+      --surface-soft: #292929;
+      --border-fandom: #454545;
+      --header-amber: #171717;
+      --accent-amber: #e5ad42;
+      --text-primary: #eeeeee;
+      --text-secondary: #b8b8b8;
+      color-scheme: dark;
+    }
+    body[data-theme="dark"] [class*="bg-[#"],
+    body[data-theme="dark"] [class~="bg-white"] { background-color: var(--surface-fandom) !important; }
+    body[data-theme="dark"] [class~="bg-[#fbf6de]"] { background-color: var(--bg-fandom) !important; }
+    body[data-theme="dark"] [class~="bg-[#f7f0d4]"],
+    body[data-theme="dark"] [class~="bg-[#f5eed3]"],
+    body[data-theme="dark"] [class~="bg-[#f2e8c5]"] { background-color: var(--surface-fandom) !important; }
+    body[data-theme="dark"] [class~="bg-[#fffdf5]"],
+    body[data-theme="dark"] [class~="bg-[#fffaf0]"],
+    body[data-theme="dark"] [class~="bg-[#fdfaf0]"],
+    body[data-theme="dark"] [class~="bg-white"] { background-color: var(--surface-raised) !important; }
+    body[data-theme="dark"] [class~="bg-[#eee3bc]"],
+    body[data-theme="dark"] [class~="bg-[#f4e7b8]"],
+    body[data-theme="dark"] [class~="bg-[#ead9ad]"] { background-color: var(--surface-soft) !important; }
+    body[data-theme="dark"] [class*="border-[#"] { border-color: var(--border-fandom) !important; }
+    body[data-theme="dark"] [class*="text-gray-"],
+    body[data-theme="dark"] [class*="text-[#"] { color: var(--text-primary) !important; }
+    body[data-theme="dark"] [class~="bg-gray-800"],
+    body[data-theme="dark"] [class~="bg-gray-700"] { background-color: #181818 !important; }
+    body[data-theme="dark"] header { background-color: #151515 !important; }
+    body[data-theme="dark"] a { color: #edb84d; }
+    body[data-theme="dark"] input, body[data-theme="dark"] textarea,
+    body[data-theme="dark"] select { color: #ededed; background-color: #303030; border-color: #505050; }
+    body[data-theme="dark"] .wiki-infobox-header { background-color: #a97423; }
+    body[data-theme="dark"] .online-wiki-content { color: #e7e7e7; }
+    body[data-theme="dark"] .online-wiki-content a, body[data-theme="dark"] .ai-answer-content a { color: #f2bd58; }
+    body[data-theme="dark"] .online-wiki-content th, body[data-theme="dark"] .ai-answer-content th { background: #383838; }
+    body[data-theme="dark"] .online-wiki-content th, body[data-theme="dark"] .online-wiki-content td,
+    body[data-theme="dark"] .ai-answer-content th, body[data-theme="dark"] .ai-answer-content td { border-color: #505050; }
   </style>
 </head>
 <body class="flex flex-col h-screen overflow-hidden select-text">
 
   <!-- トップナビバー -->
-  <header class="bg-[#1f1a14] text-white px-5 py-2.5 flex justify-between items-center shadow-md select-none">
+  <header class="bg-[#1f1a14] text-white px-5 py-2.5 flex justify-between items-center shadow-md select-none gap-3">
     <div class="flex items-center space-x-3">
       <div class="w-8 h-8 rounded-lg bg-[#b45309] flex items-center justify-center font-bold text-lg text-white shadow">
         ♾️
@@ -1372,6 +1442,10 @@ HTML_TEMPLATE = r"""
       <button onclick="switchTab('settings')" id="tab-btn-settings" class="px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition">⚙️ 環境設定</button>
       <button onclick="switchTab('ai')" id="tab-btn-ai" class="px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition">🤖 AI Assistant</button>
       <button onclick="showAbout()" id="about-button" class="px-3 py-1.5 rounded text-xs font-semibold bg-gray-700 text-gray-200 hover:bg-gray-600 transition">アプリ情報</button>
+    </div>
+    <div class="flex shrink-0 items-center gap-2 text-[10px] text-gray-300">
+      <div class="text-right leading-4"><div id="header-clock">時刻を取得中...</div><div><span id="header-network">接続確認中</span> · <span id="header-power">電源確認中</span></div></div>
+      <button id="theme-toggle" onclick="toggleTheme()" title="テーマ切り替え" aria-label="テーマ切り替え" class="rounded px-2 py-1 text-lg hover:bg-gray-700">🌙</button>
     </div>
   </header>
 
@@ -1409,6 +1483,13 @@ HTML_TEMPLATE = r"""
     </section>
   </div>
 
+  <div id="image-lightbox" class="hidden fixed inset-0 z-[120] flex items-center justify-center bg-black/90 p-4" onclick="if(event.target===this) closeImageLightbox()" role="dialog" aria-modal="true" aria-label="画像拡大表示">
+    <button onclick="closeImageLightbox()" aria-label="閉じる" class="absolute right-5 top-4 rounded bg-black/50 px-3 py-1 text-2xl text-white">×</button>
+    <button onclick="stepImageLightbox(-1)" aria-label="前の画像" class="absolute left-3 rounded bg-black/50 px-4 py-3 text-2xl text-white">←</button>
+    <figure class="max-h-full max-w-[88vw] text-center"><img id="lightbox-image" class="mx-auto max-h-[78vh] max-w-full object-contain" alt=""><figcaption id="lightbox-caption" class="mt-3 text-sm text-white"></figcaption><button id="lightbox-open-level" onclick="openLightboxLevel()" class="mt-3 rounded bg-amber-500 px-3 py-1.5 text-xs font-semibold text-black">このLevelの記事を開く</button></figure>
+    <button onclick="stepImageLightbox(1)" aria-label="次の画像" class="absolute right-3 rounded bg-black/50 px-4 py-3 text-2xl text-white">→</button>
+  </div>
+
   <main class="flex-1 flex overflow-hidden">
 
     <!-- 1. 📖 Level 図鑑 ＆ 検索タブ -->
@@ -1432,6 +1513,11 @@ HTML_TEMPLATE = r"""
 
       <!-- 右ペイン：本家Wiki風の一覧ハブ・番号一覧・記事詳細 -->
       <section class="flex-1 overflow-y-auto p-8 bg-[#fbf6de]">
+        <div class="mx-auto mb-4 flex max-w-6xl gap-2 border-b border-[#e2d8b5] pb-2">
+          <button id="explorer-subtab-article" onclick="switchExplorerSubtab('article')" class="rounded px-3 py-1.5 text-sm font-semibold bg-[#b45309] text-white">記事・図鑑ビュー</button>
+          <button id="explorer-subtab-gallery" onclick="switchExplorerSubtab('gallery')" class="rounded px-3 py-1.5 text-sm font-semibold bg-[#eee3bc]">画像ギャラリー</button>
+        </div>
+        <div id="explorer-article-view">
         <div id="explorer-index-home" class="mx-auto max-w-5xl">
           <div class="mb-5 text-center">
             <div class="text-xs text-[#8c6b12]">Backrooms Wiki — 一覧</div>
@@ -1524,6 +1610,15 @@ HTML_TEMPLATE = r"""
 
           </div>
         </div>
+        </div>
+        <section id="explorer-gallery-view" class="hidden mx-auto max-w-6xl">
+          <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
+            <div><h2 class="text-2xl font-semibold">画像ギャラリー</h2><p class="text-xs text-gray-600">保存済み画像からLevelを逆引きできます。</p></div>
+            <input id="local-gallery-filter" oninput="filterLocalImageGallery()" type="search" class="w-72 rounded border px-3 py-2 text-sm" placeholder="Level名・画像名で検索">
+          </div>
+          <div id="local-gallery-count" class="mb-3 text-xs text-gray-500"></div>
+          <div id="local-gallery-grid" class="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4"></div>
+        </section>
       </section>
 
     </div>
@@ -1685,6 +1780,27 @@ HTML_TEMPLATE = r"""
           <p id="catalog-update-history" class="text-[11px] text-gray-500">最終更新状態を確認中...</p>
         </section>
         <section class="space-y-3 border-t border-[#e2d8b5] pt-4">
+          <h3 class="text-sm font-bold text-gray-800">表示・時刻</h3>
+          <div class="flex flex-wrap items-center gap-3">
+            <button type="button" onclick="toggleTheme()" class="rounded border border-[#d6c79a] bg-[#fffdf5] px-3 py-2 text-xs font-semibold"><span id="settings-theme-icon">🌙</span> テーマ切り替え</button>
+            <label class="text-xs">タイムゾーン
+              <select id="timezone-select" class="ml-2 rounded border px-2 py-1.5" onchange="saveTimezone(this.value)">
+                <option value="Asia/Tokyo">Asia/Tokyo (UTC+09:00 / JST - 日本標準時)</option>
+                <option value="BRT">Backrooms Standard Time (UTC+00:00 / BRT)</option>
+                <option value="UTC">UTC (協定世界時)</option>
+                <option value="America/New_York">America/New_York (EST/EDT)</option>
+                <option value="Europe/London">Europe/London (GMT/BST)</option>
+                <option value="Asia/Seoul">Asia/Seoul (KST)</option>
+                <option value="Asia/Shanghai">Asia/Shanghai (CST)</option>
+              </select>
+            </label>
+          </div>
+        </section>
+        <section class="space-y-3 border-t border-[#e2d8b5] pt-4">
+          <div class="flex items-center justify-between"><h3 class="text-sm font-bold text-gray-800">記憶域（ストレージ）状況</h3><button onclick="refreshStorageSummary()" class="rounded border border-[#d6c79a] px-3 py-1.5 text-xs">記憶域を再計測</button></div>
+          <div id="storage-summary" class="space-y-2 text-xs text-gray-600">計測中...</div>
+        </section>
+        <section class="space-y-3 border-t border-[#e2d8b5] pt-4">
           <h3 class="text-sm font-bold text-gray-800">一覧データの手動更新</h3>
           <p class="text-xs text-gray-600">Level一覧HTMLを再取得し、Master Databaseと各言語のLevel Listを作り直します。更新中も画面を操作できます。</p>
           <div class="flex flex-wrap gap-2">
@@ -1821,7 +1937,157 @@ HTML_TEMPLATE = r"""
       }
     }
 
+    let activeTheme = 'light';
+    let activeTimezone = 'Asia/Tokyo';
+    let explorerImages = [];
+    let localImages = [];
+    let lightboxImages = [];
+    let lightboxIndex = 0;
+    let lightboxLevel = '';
+
+    function applyTheme(theme) {
+      activeTheme = theme === 'dark' ? 'dark' : 'light';
+      document.body.dataset.theme = activeTheme;
+      const icon = activeTheme === 'light' ? '🌙' : '☀️';
+      document.getElementById('theme-toggle').textContent = icon;
+      document.getElementById('settings-theme-icon').textContent = icon;
+    }
+    async function toggleTheme() {
+      const next = activeTheme === 'dark' ? 'light' : 'dark';
+      applyTheme(next);
+      try { await pywebview.api.save_environment_settings({theme: next}); }
+      catch (error) { console.error('テーマ設定の保存に失敗:', error); }
+    }
+    async function saveTimezone(timezone) {
+      activeTimezone = timezone;
+      try {
+        const result = await pywebview.api.save_environment_settings({timezone});
+        if (result.error) throw new Error(result.error);
+        updateHeaderClock();
+      } catch (error) { console.error('タイムゾーン設定の保存に失敗:', error); }
+    }
+    function updateHeaderClock() {
+      try {
+        const now = new Date();
+        const zone = activeTimezone === 'BRT' ? 'UTC' : activeTimezone;
+        const parts = Object.fromEntries(new Intl.DateTimeFormat('ja-JP', {
+          timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'short',
+          hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23', timeZoneName: 'short'
+        }).formatToParts(now).map(part => [part.type, part.value]));
+        const dynamicZoneName = new Intl.DateTimeFormat('en-US', {timeZone: zone, timeZoneName: 'short'})
+          .formatToParts(now).find(part => part.type === 'timeZoneName')?.value || parts.timeZoneName;
+        const abbr = activeTimezone === 'BRT' ? 'BRT' : ({'Asia/Tokyo':'JST','Asia/Seoul':'KST','Asia/Shanghai':'CST','UTC':'UTC'}[activeTimezone] || dynamicZoneName);
+        document.getElementById('header-clock').textContent = `${parts.year}/${parts.month}/${parts.day} (${parts.weekday}) ${parts.hour}:${parts.minute}:${parts.second} ${abbr}`;
+      } catch (_) { document.getElementById('header-clock').textContent = new Date().toLocaleString('ja-JP'); }
+    }
+    async function refreshSystemStatus() {
+      try {
+        const status = await pywebview.api.get_system_status();
+        document.getElementById('header-network').textContent = `${status.network === 'Wi-Fi' ? '📶' : status.network === '有線LAN' ? '🔌' : '○'} ${status.network}`;
+        document.getElementById('header-power').textContent = status.power;
+      } catch (_) {
+        document.getElementById('header-network').textContent = '○ 状態不明';
+        document.getElementById('header-power').textContent = '⚡ 状態不明';
+      }
+    }
+    function formatBytes(bytes) {
+      const units = ['B', 'KB', 'MB', 'GB', 'TB']; let size = Number(bytes) || 0, i = 0;
+      while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
+      return `${size.toFixed(i ? 1 : 0)} ${units[i]}`;
+    }
+    async function refreshStorageSummary() {
+      const target = document.getElementById('storage-summary'); target.textContent = '計測中...';
+      try {
+        const data = await pywebview.api.get_storage_summary();
+        const categories = Object.entries(data.categories || {}).map(([label, value]) => `<div class="flex justify-between"><span>${escapeHTML(label)}</span><span>${value.files} 件 · ${formatBytes(value.bytes)}</span></div>`).join('');
+        const drive = data.drive || {};
+        target.innerHTML = `<div>${categories}</div><p class="mt-2 font-semibold">ローカルデータ合計: ${data.files} 件 · ${formatBytes(data.bytes)}</p><div class="mt-2 flex justify-between"><span>ドライブ使用量</span><span>${formatBytes(drive.used)} / ${formatBytes(drive.total)} · 空き ${formatBytes(drive.free)}</span></div><progress class="mt-1 h-2 w-full" max="100" value="${Number(drive.percent)||0}"></progress>`;
+      } catch (error) { target.textContent = `計測できません: ${error}`; }
+    }
+    async function switchExplorerSubtab(tab) {
+      const gallery = tab === 'gallery';
+      document.getElementById('explorer-article-view').classList.toggle('hidden', gallery);
+      document.getElementById('explorer-gallery-view').classList.toggle('hidden', !gallery);
+      document.getElementById('explorer-subtab-gallery').className = gallery ? 'rounded px-3 py-1.5 text-sm font-semibold bg-[#b45309] text-white' : 'rounded px-3 py-1.5 text-sm font-semibold bg-[#eee3bc]';
+      document.getElementById('explorer-subtab-article').className = !gallery ? 'rounded px-3 py-1.5 text-sm font-semibold bg-[#b45309] text-white' : 'rounded px-3 py-1.5 text-sm font-semibold bg-[#eee3bc]';
+      if (gallery && localImages.length === 0) await loadLocalImageGallery();
+    }
+    async function loadLocalImageGallery() {
+      try {
+        localImages = await pywebview.api.get_local_image_gallery();
+        renderLocalImageGallery();
+      } catch (error) { document.getElementById('local-gallery-count').textContent = `画像一覧を読み込めません: ${error}`; }
+    }
+    function renderLocalImageGallery() {
+      const query = (document.getElementById('local-gallery-filter').value || '').trim().toLocaleLowerCase();
+      const items = localImages.filter(item => `${item.level_id} ${item.name}`.toLocaleLowerCase().includes(query));
+      document.getElementById('local-gallery-count').textContent = `${items.length} / ${localImages.length} 枚`;
+      const grid = document.getElementById('local-gallery-grid'); grid.replaceChildren();
+      items.forEach(item => {
+        const card = document.createElement('article'); card.className = 'overflow-hidden rounded border border-[#e2d8b5] bg-white p-2';
+        const img = document.createElement('img'); img.dataset.filename = item.name; img.alt = item.name; img.loading = 'lazy'; img.className = 'h-36 w-full cursor-zoom-in rounded object-cover';
+        img.onclick = () => openImageLightbox(items, items.indexOf(item), item.level_id);
+        const title = document.createElement('div'); title.className = 'mt-2 truncate text-xs font-semibold'; title.textContent = item.level_id || 'Level不明';
+        const name = document.createElement('div'); name.className = 'truncate text-[10px] text-gray-500'; name.textContent = item.name;
+        const open = document.createElement('button'); open.className = 'mt-2 text-xs text-amber-700 underline'; open.textContent = 'このLevelの記事を開く';
+        open.disabled = !item.level_id; open.onclick = () => openGalleryLevel(item.level_id);
+        card.append(img, title, name, open); grid.append(card);
+      });
+      if ('IntersectionObserver' in window) {
+        const observer = new IntersectionObserver(entries => entries.forEach(entry => {
+          if (entry.isIntersecting) { observer.unobserve(entry.target); loadLocalImageIntoElement(entry.target); }
+        }), {rootMargin: '200px'});
+        grid.querySelectorAll('img[data-filename]').forEach(img => observer.observe(img));
+      } else grid.querySelectorAll('img[data-filename]').forEach(loadLocalImageIntoElement);
+    }
+    async function loadLocalImageIntoElement(img) {
+      try {
+        const result = await pywebview.api.get_local_image_data(img.dataset.filename);
+        if (result.src) img.src = result.src;
+      } catch (_) { img.alt = '画像を読み込めません'; }
+    }
+    function filterLocalImageGallery() { renderLocalImageGallery(); }
+    async function openGalleryLevel(level) {
+      if (!level) return;
+      await switchExplorerSubtab('article');
+      document.getElementById('explorer-index-home').classList.add('hidden');
+      document.getElementById('explorer-index-category').classList.add('hidden');
+      document.getElementById('wiki-page-container').classList.remove('hidden');
+      await loadLevelDetail(level);
+    }
+    function openImageLightbox(images, index, level) {
+      lightboxImages = images || []; lightboxIndex = Math.max(0, index || 0); lightboxLevel = level || '';
+      renderImageLightbox(); document.getElementById('image-lightbox').classList.remove('hidden');
+    }
+    async function renderImageLightbox() {
+      const item = lightboxImages[lightboxIndex]; if (!item) return;
+      if (!item.src && item.name) {
+        const result = await pywebview.api.get_local_image_data(item.name);
+        if (result.src) item.src = result.src;
+      }
+      document.getElementById('lightbox-image').src = item.src || '';
+      document.getElementById('lightbox-image').alt = item.name || '';
+      document.getElementById('lightbox-caption').textContent = `${lightboxLevel || item.level_id || ''} · ${item.name || ''} (${lightboxIndex + 1}/${lightboxImages.length})`;
+      document.getElementById('lightbox-open-level').classList.toggle('hidden', !(lightboxLevel || item.level_id));
+    }
+    function stepImageLightbox(offset) {
+      if (!lightboxImages.length) return;
+      lightboxIndex = (lightboxIndex + offset + lightboxImages.length) % lightboxImages.length; renderImageLightbox();
+    }
+    function closeImageLightbox() { document.getElementById('image-lightbox').classList.add('hidden'); }
+    function openLightboxLevel() { const level = lightboxLevel || (lightboxImages[lightboxIndex] || {}).level_id; closeImageLightbox(); openGalleryLevel(level); }
+    document.addEventListener('keydown', event => {
+      if (document.getElementById('image-lightbox').classList.contains('hidden')) return;
+      if (event.key === 'Escape') closeImageLightbox();
+      else if (event.key === 'ArrowLeft') stepImageLightbox(-1);
+      else if (event.key === 'ArrowRight') stepImageLightbox(1);
+    });
+
     function renderEnvironmentSettings(settings) {
+      if (settings.theme) applyTheme(settings.theme);
+      activeTimezone = settings.timezone || 'Asia/Tokyo';
+      document.getElementById('timezone-select').value = activeTimezone;
+      updateHeaderClock();
       const toggle = document.getElementById('auto-update-catalog');
       toggle.checked = Boolean(settings.auto_update_catalog);
       const history = document.getElementById('catalog-update-history');
@@ -1854,6 +2120,7 @@ HTML_TEMPLATE = r"""
           toggle.checked = !toggle.checked;
         } finally { toggle.disabled = false; }
       });
+      refreshStorageSummary();
       try {
         const result = await pywebview.api.start_auto_database_update();
         if (result.status === 'started') {
@@ -2440,6 +2707,7 @@ HTML_TEMPLATE = r"""
     // レベル詳細の描画
     async function loadLevelDetail(levelId) {
       const d = await pywebview.api.get_level_detail(levelId);
+      explorerImages = d.images || [];
 
       document.getElementById('view-level-id').innerText = d.level_id;
       document.getElementById('view-meta-title').innerText = d.title && d.title !== d.level_id ? `"${d.title}"` : "";
@@ -2466,6 +2734,8 @@ HTML_TEMPLATE = r"""
       if (d.images && d.images.length > 0) {
         mainImg.src = d.images[0].src;
         mainImg.classList.remove('hidden');
+        mainImg.classList.add('cursor-zoom-in');
+        mainImg.onclick = () => openImageLightbox(explorerImages, 0, d.level_id);
         noImg.classList.add('hidden');
         caption.innerText = d.images[0].name;
       } else {
@@ -2481,13 +2751,14 @@ HTML_TEMPLATE = r"""
 
       if (d.images && d.images.length > 1) {
         galleryContainer.classList.remove('hidden');
-        d.images.slice(1).forEach(img => {
+        d.images.slice(1).forEach((img, index) => {
           const card = document.createElement('div');
           card.className = "bg-[#fdfaf0] border border-[#d6c99c] rounded p-2 text-center shadow-sm";
           card.innerHTML = `
-            <img src="${img.src}" class="w-full h-32 object-cover rounded border border-[#dfd3a8] mb-1">
+            <img src="${img.src}" class="w-full h-32 object-cover rounded border border-[#dfd3a8] mb-1 cursor-zoom-in" alt="${img.name}">
             <span class="text-[10px] text-gray-500 truncate block" title="${img.name}">${img.name}</span>
           `;
+          card.querySelector('img').onclick = () => openImageLightbox(explorerImages, index + 1, d.level_id);
           gallery.appendChild(card);
         });
       } else {
@@ -4101,6 +4372,10 @@ HTML_TEMPLATE = r"""
       loadExplorerIndexPages();
       initializeAI();
       initializeEnvironmentSettings();
+      updateHeaderClock();
+      refreshSystemStatus();
+      setInterval(updateHeaderClock, 1000);
+      setInterval(refreshSystemStatus, 7000);
       updateOnlineWikiCurrentUrl();
     });
   </script>

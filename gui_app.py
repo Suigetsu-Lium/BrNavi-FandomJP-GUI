@@ -1986,18 +1986,19 @@ HTML_TEMPLATE = r"""
       document.getElementById('online-wiki-current-url').textContent =
         onlineWikiCurrentUrl || "Fandomページはまだ開かれていません。";
       document.getElementById('online-wiki-current-url').title = onlineWikiCurrentUrl;
-    document.getElementById('online-wiki-save-current').disabled =
-      !result.is_wiki_page || onlineWikiBrowserBusy;
+      document.getElementById('online-wiki-save-current').disabled =
+        !result.is_wiki_page || onlineWikiBrowserBusy;
     }
 
     async function onOnlineWikiFrameLoaded() {
-    if (onlineWikiNavigationPending) {
-      onlineWikiNavigationPending = false;
-      if (onlineWikiNavigationTimeout) clearTimeout(onlineWikiNavigationTimeout);
-      onlineWikiNavigationTimeout = null;
-      onlineWikiBrowserBusy = false;
+      if (onlineWikiNavigationPending) {
+        onlineWikiNavigationPending = false;
+        if (onlineWikiNavigationTimeout) clearTimeout(onlineWikiNavigationTimeout);
+        onlineWikiNavigationTimeout = null;
+        onlineWikiBrowserBusy = false;
+      }
+      await updateOnlineWikiCurrentUrl();
     }
-    await updateOnlineWikiCurrentUrl();
 
     async function updateOnlineWikiCurrentUrl() {
       try {

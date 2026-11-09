@@ -92,6 +92,14 @@ class OnlineWikiGuiTests(unittest.TestCase):
         self.assertNotIn("function appendLog", gui_app.HTML_TEMPLATE)
         self.assertNotIn("open_online_wiki_browser", gui_app.HTML_TEMPLATE)
 
+    def test_wiki_frame_load_handler_closes_before_url_refresh_function(self):
+        self.assertIn(
+            "await updateOnlineWikiCurrentUrl();\n"
+            "    }\n\n"
+            "    async function updateOnlineWikiCurrentUrl()",
+            gui_app.HTML_TEMPLATE,
+        )
+
     def test_level_list_data_tools_tab_uses_level_list_tiles_not_search_results(self):
         self.assertIn("switchTab('data-tools')", gui_app.HTML_TEMPLATE)
         self.assertIn('id="level-list-language"', gui_app.HTML_TEMPLATE)

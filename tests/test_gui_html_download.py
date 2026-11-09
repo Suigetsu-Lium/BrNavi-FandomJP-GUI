@@ -72,6 +72,13 @@ class OnlineWikiGuiTests(unittest.TestCase):
         self.assertNotIn("function appendLog", gui_app.HTML_TEMPLATE)
         self.assertNotIn("open_online_wiki_browser", gui_app.HTML_TEMPLATE)
 
+    def test_about_dialog_has_version_model_and_license_links(self):
+        self.assertIn('id="about-dialog"', gui_app.HTML_TEMPLATE)
+        self.assertIn("get_about_info()", gui_app.HTML_TEMPLATE)
+        self.assertIn("openAboutLink('third_party')", gui_app.HTML_TEMPLATE)
+        self.assertIn("openAboutLink('license')", gui_app.HTML_TEMPLATE)
+        self.assertIn("pywebview.api.open_about_link", gui_app.HTML_TEMPLATE)
+
     def test_wiki_tab_opens_default_homepage_for_free_browsing(self):
         default_url = "https://backrooms.fandom.com/ja/wiki/Backrooms_Wiki"
 

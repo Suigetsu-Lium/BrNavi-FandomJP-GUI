@@ -8,13 +8,17 @@ pushd "%ROOT%"
 set "PYTHON=python"
 if exist "%ROOT%\.venv\Scripts\python.exe" set "PYTHON=%ROOT%\.venv\Scripts\python.exe"
 
-echo ================================================
-echo   BrNavi Fandom JP - GUI / CLI Build
-echo ================================================
-echo.
-
 "%PYTHON%" -c "import PyInstaller, webview, groq, curl_cffi, bleach, markdown, pygments"
 if errorlevel 1 goto missing_dependencies
+
+for /f "delims=" %%V in ('%PYTHON% -c "from modules.version import VERSION; print(VERSION)"') do set "APP_VERSION=%%V"
+if not defined APP_VERSION goto version_failed
+
+echo ================================================
+echo   BrNavi Fandom JP - GUI / CLI Build
+echo   Version: v%APP_VERSION%
+echo ================================================
+echo.
 
 for %%D in ("dist\BrNavi-GUI" "dist\BrNavi-CLI") do (
     if exist "%%~D" rmdir /s /q "%%~D"
@@ -37,11 +41,13 @@ call :stage_data "dist\BrNavi-CLI\BrNavi-CLI"
 if errorlevel 1 goto staging_failed
 
 echo.
-echo [4/4] READMEとライセンスを配置しています...
+echo [4/4] README、ライセンス、バージョン情報を配置しています...
 for %%T in ("dist\BrNavi-GUI\BrNavi-GUI" "dist\BrNavi-CLI\BrNavi-CLI") do (
     copy /y "README.md" "%%~T\README.md" > nul
     if errorlevel 1 goto staging_failed
     copy /y "LICENSE" "%%~T\LICENSE" > nul
+    if errorlevel 1 goto staging_failed
+    copy /y "THIRD_PARTY_NOTICES.md" "%%~T\THIRD_PARTY_NOTICES.md" > nul
     if errorlevel 1 goto staging_failed
     if not exist "%%~T\docs" mkdir "%%~T\docs"
     if errorlevel 1 goto staging_failed
@@ -72,6 +78,8 @@ for %%D in (parsed_index level_lists index_html downloaded_fandom_html extracted
 
 if not exist "%TARGET%\database\ai" mkdir "%TARGET%\database\ai"
 if errorlevel 1 exit /b 1
+> "%TARGET%\VERSION.txt" echo v%APP_VERSION%
+if errorlevel 1 exit /b 1
 
 for %%F in (wiki_list.txt extracted_fandom_levels_summary.csv backrooms_nodes.csv backrooms_edges.csv) do (
     if exist "%ROOT%\%%F" (
@@ -86,6 +94,12 @@ echo.
 echo 必要な依存パッケージがありません。
 echo Python環境で次を実行してから再試行してください:
 echo   python -m pip install -r requirements.txt
+popd
+exit /b 1
+
+:version_failed
+echo.
+echo modules\version.py からバージョンを取得できません。
 popd
 exit /b 1
 

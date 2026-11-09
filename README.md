@@ -4,6 +4,8 @@ Backrooms日本語版Fandom Wikiを閲覧するためのPython製デスクトッ
 
 > **配布:** Windows向けGUI版・CLI版は[GitHub Releases](https://github.com/Suigetsu-Lium/BrNavi-FandomJP-GUI/releases/latest)からダウンロードできます。ソースから `build_release.bat` を実行して個別にビルドすることもできます。
 
+アプリのバージョンはGUIの上部とウィンドウタイトル、CLIの起動画面に表示されます。現在のバージョンは `v1.0.0` です。
+
 ## 目次
 
 - [機能](#機能)

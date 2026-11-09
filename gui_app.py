@@ -631,9 +631,9 @@ class BackroomsAPI:
         except (OSError, ValueError) as error:
             return {"error": str(error)}
 
-    def start_level_list_html_download(self, pages, overwrite=False):
+    def start_level_list_offline_save(self, pages, overwrite=False):
         if not isinstance(pages, list) or not pages:
-            return {"status": "error", "message": "HTML取得するレベルを選択してください。"}
+            return {"status": "error", "message": "オフライン保存するレベルを選択してください。"}
         validated_pages = []
         for page in pages:
             if (
@@ -644,7 +644,7 @@ class BackroomsAPI:
                 return {"status": "error", "message": "選択リストに不正なページが含まれています。"}
             validated_pages.append(dict(page))
         return self.run_maintenance_task(
-            "download_level_list_html",
+            "save_level_list_offline",
             options={
                 "pages": validated_pages,
                 "overwrite": bool(overwrite),
@@ -846,7 +846,7 @@ class BackroomsAPI:
             return
 
         task_labels = {
-            "download_level_list_html": "レベルリストからHTML取得",
+            "save_level_list_offline": "Level情報のオフライン保存",
             "update_master": "既存データベース更新",
             "extract_info": "情報データベース更新",
             "update_network": "ネットワーク更新",
@@ -1352,10 +1352,8 @@ HTML_TEMPLATE = r"""
             <span id="level-list-selection-count" aria-live="polite">0件選択中</span>
           </div>
           <div class="flex flex-wrap gap-2">
-            <button id="level-list-download-button" onclick="downloadSelectedLevelListPages()" disabled
-              class="px-3 py-1.5 rounded bg-[#b45309] text-white text-xs font-semibold disabled:opacity-40">選択項目のHTMLを取得</button>
-            <button onclick="runLevelListExtraction()"
-              class="px-3 py-1.5 rounded bg-[#91520f] text-white text-xs font-semibold">取得済みHTMLからデータ抽出</button>
+            <button id="level-list-download-button" onclick="runLevelListOfflineSave()" disabled
+              class="px-3 py-1.5 rounded bg-[#b45309] text-white text-xs font-semibold disabled:opacity-40">Level情報のオフライン保存</button>
             <button id="level-list-clear-selection" onclick="clearLevelListSelection()" disabled
               class="px-3 py-1.5 rounded border border-[#d6c79a] text-xs disabled:opacity-40">選択解除</button>
             <button id="level-list-cancel-button" onclick="cancelMaintenanceTask()" disabled
@@ -1365,7 +1363,7 @@ HTML_TEMPLATE = r"""
         <div id="level-list-grid" class="flex flex-col flex-1 min-h-0 overflow-y-auto border-y border-[#e2d8b5] select-none"
           aria-label="レベルリスト"></div>
         <div class="border-t border-[#e2d8b5] pt-2 space-y-2">
-          <div id="level-list-task-status" class="text-xs text-gray-600" role="status" aria-live="polite">HTML取得またはデータ抽出を選択してください。</div>
+          <div id="level-list-task-status" class="text-xs text-gray-600" role="status" aria-live="polite">対象を選択して「Level情報のオフライン保存」を実行してください。</div>
           <div class="flex items-center gap-2">
             <progress id="level-list-progress" max="100" value="0" class="hidden flex-1 h-2"></progress>
             <span id="level-list-progress-label" class="text-[11px] text-gray-500">待機中</span>
@@ -1836,35 +1834,28 @@ HTML_TEMPLATE = r"""
       });
     }
 
-    async function downloadSelectedLevelListPages() {
+    async function runLevelListOfflineSave() {
       if (levelListTaskBusy || selectedLevelPages.size === 0) return;
       const pages = Array.from(selectedLevelPages.values());
       setLevelListTaskBusy(true);
       document.getElementById('level-list-log').textContent = "";
       document.getElementById('level-list-task-status').textContent =
-        `${pages.length}件のHTML取得を開始しています...`;
+        `選択した${pages.length}件のLevel情報をオフライン保存しています...`;
       try {
-        const result = await pywebview.api.start_level_list_html_download(
+        const result = await pywebview.api.start_level_list_offline_save(
           pages,
           document.getElementById('level-list-overwrite').checked
         );
         if (result.status !== "started") {
           setLevelListTaskBusy(false);
           document.getElementById('level-list-task-status').textContent =
-            result.message || "HTML取得を開始できませんでした。";
+            result.message || "オフライン保存を開始できませんでした。";
         }
       } catch (error) {
         setLevelListTaskBusy(false);
         document.getElementById('level-list-task-status').textContent =
-          "HTML取得開始エラー: " + error;
+          "オフライン保存開始エラー: " + error;
       }
-    }
-
-    function runLevelListExtraction() {
-      if (levelListTaskBusy) return;
-      document.getElementById('level-list-log').textContent = "";
-      setLevelListTaskBusy(true);
-      runTask('extract_info');
     }
 
     function appendLevelListLog(entry) {

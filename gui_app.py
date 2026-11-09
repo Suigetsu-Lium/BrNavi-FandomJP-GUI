@@ -7,6 +7,7 @@ import re
 import sys
 import threading
 import warnings
+import webbrowser
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
@@ -30,11 +31,12 @@ from modules.online_wiki import is_supported_wiki_url
 from modules.online_wiki import save_page as save_online_wiki_page
 from modules.online_wiki import search_pages as search_online_wiki_pages
 from modules.runtime_paths import get_application_dir
-from modules.version import APP_VERSION
+from modules.version import VERSION
 
 # AI Assistant（Groq / ローカルWiki検索）
+AI_DEFAULT_SETTINGS = {"model": "openai/gpt-oss-120b"}
 try:
-    from modules.ai.assistant import AIAssistant
+    from modules.ai.assistant import AIAssistant, DEFAULT_SETTINGS as AI_DEFAULT_SETTINGS
     from modules.ai.markdown_renderer import render_markdown, syntax_highlight_css
     AI_AVAILABLE = True
     AI_IMPORT_ERROR = None
@@ -93,6 +95,42 @@ class BackroomsAPI:
         if not self.ai:
             return {"available": False, "error": self.ai_error or "AIが初期化されていません。"}
         return self.ai.get_status()
+
+    def get_about_info(self):
+        settings = self.ai.get_settings() if self.ai else {}
+        model = settings.get("model")
+        if not model:
+            settings_path = BASE_DIR / "database" / "ai" / "settings.json"
+            try:
+                saved_settings = json.loads(settings_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                saved_settings = {}
+            model = saved_settings.get("model") if isinstance(saved_settings, dict) else None
+        return {
+            "name": "BrNavi Fandom JP",
+            "version": VERSION,
+            "application_type": "GUI",
+            "provider": "Groq",
+            "model": model or AI_DEFAULT_SETTINGS["model"],
+            "repository": "https://github.com/Suigetsu-Lium/BrNavi-FandomJP-GUI",
+        }
+
+    def open_about_link(self, destination):
+        urls = {
+            "repository": "https://github.com/Suigetsu-Lium/BrNavi-FandomJP-GUI",
+            "releases": "https://github.com/Suigetsu-Lium/BrNavi-FandomJP-GUI/releases",
+            "license": "https://github.com/Suigetsu-Lium/BrNavi-FandomJP-GUI/blob/main/LICENSE",
+            "third_party": (
+                "https://github.com/Suigetsu-Lium/BrNavi-FandomJP-GUI/"
+                "blob/main/THIRD_PARTY_NOTICES.md"
+            ),
+        }
+        url = urls.get(str(destination))
+        if not url:
+            return {"error": "リンク先が不正です。"}
+        if not webbrowser.open(url, new=2):
+            return {"error": "既定のブラウザーを起動できませんでした。"}
+        return {"opened": True}
 
     def ai_new_conversation(self):
         if not self.ai:
@@ -937,7 +975,7 @@ HTML_TEMPLATE = r"""
         ♾️
       </div>
       <div>
-        <h1 class="text-sm font-bold tracking-wide">Backrooms Wiki (Fandom JP) <span class="ml-1 text-[10px] font-medium text-gray-400">v__APP_VERSION__</span></h1>
+        <h1 class="text-sm font-bold tracking-wide">Backrooms Wiki (Fandom JP) <span class="ml-1 text-[10px] font-medium text-gray-400">v__VERSION__</span></h1>
         <p class="text-[10px] text-gray-400">Navigation & Database System</p>
       </div>
     </div>
@@ -946,8 +984,42 @@ HTML_TEMPLATE = r"""
       <button onclick="switchTab('wiki')" id="tab-btn-wiki" class="px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition">🌐 Wiki閲覧・保存</button>
       <button onclick="switchTab('maintenance')" id="tab-btn-maintenance" class="px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition">⚙️ データ保守</button>
       <button onclick="switchTab('ai')" id="tab-btn-ai" class="px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition">🤖 AI Assistant</button>
+      <button onclick="showAbout()" id="about-button" class="px-3 py-1.5 rounded text-xs font-semibold bg-gray-700 text-gray-200 hover:bg-gray-600 transition">アプリ情報</button>
     </div>
   </header>
+
+  <div id="about-dialog" class="hidden fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
+    onclick="if (event.target === this) closeAbout()">
+    <section role="dialog" aria-modal="true" aria-labelledby="about-title"
+      class="w-full max-w-lg bg-[#fbf6de] border border-[#d3c29a] rounded-lg shadow-xl overflow-hidden">
+      <div class="px-5 py-3 bg-[#1f1a14] text-white flex items-center justify-between">
+        <h2 id="about-title" class="font-bold">アプリケーション情報</h2>
+        <button onclick="closeAbout()" class="px-2 py-1 rounded hover:bg-gray-700" aria-label="閉じる">×</button>
+      </div>
+      <div class="p-5 space-y-4 text-sm">
+        <dl class="grid grid-cols-[7rem_1fr] gap-x-3 gap-y-2">
+          <dt class="text-gray-500">アプリ名</dt><dd id="about-name" class="font-medium"></dd>
+          <dt class="text-gray-500">バージョン</dt><dd id="about-version" class="font-medium"></dd>
+          <dt class="text-gray-500">種別</dt><dd id="about-type" class="font-medium"></dd>
+          <dt class="text-gray-500">LLMプロバイダー</dt><dd id="about-provider" class="font-medium"></dd>
+          <dt class="text-gray-500">モデル</dt><dd id="about-model" class="font-mono text-xs break-all"></dd>
+        </dl>
+        <section class="border-t border-[#d3c29a] pt-3">
+          <h3 class="font-semibold mb-2">リンク・ライセンス</h3>
+          <div class="flex flex-wrap gap-2">
+            <button onclick="openAboutLink('repository')" class="px-3 py-1 rounded border border-[#d3c29a] bg-white hover:bg-[#f2e8c5] text-xs">GitHubリポジトリ</button>
+            <button onclick="openAboutLink('releases')" class="px-3 py-1 rounded border border-[#d3c29a] bg-white hover:bg-[#f2e8c5] text-xs">更新情報</button>
+            <button onclick="openAboutLink('license')" class="px-3 py-1 rounded border border-[#d3c29a] bg-white hover:bg-[#f2e8c5] text-xs">MIT License</button>
+            <button onclick="openAboutLink('third_party')" class="px-3 py-1 rounded border border-[#d3c29a] bg-white hover:bg-[#f2e8c5] text-xs">第三者ライセンス</button>
+          </div>
+        </section>
+        <p id="about-link-status" class="min-h-4 text-xs text-red-700" aria-live="polite"></p>
+        <div class="flex justify-end">
+          <button onclick="closeAbout()" class="px-4 py-1.5 rounded bg-[#91520f] text-white hover:bg-[#75410b]">閉じる</button>
+        </div>
+      </div>
+    </section>
+  </div>
 
   <main class="flex-1 flex overflow-hidden">
 
@@ -1176,6 +1248,31 @@ HTML_TEMPLATE = r"""
 
   <script>
     let onlineWikiDefaultOpened = false;
+
+    async function showAbout() {
+      try {
+        const info = await pywebview.api.get_about_info();
+        document.getElementById('about-name').textContent = info.name;
+        document.getElementById('about-version').textContent = 'v' + info.version;
+        document.getElementById('about-type').textContent = info.application_type;
+        document.getElementById('about-provider').textContent = info.provider;
+        document.getElementById('about-model').textContent = info.model;
+        document.getElementById('about-link-status').textContent = '';
+        document.getElementById('about-dialog').classList.remove('hidden');
+      } catch (error) {
+        console.error('アプリ情報を取得できません:', error);
+      }
+    }
+
+    function closeAbout() {
+      document.getElementById('about-dialog').classList.add('hidden');
+    }
+
+    async function openAboutLink(destination) {
+      const result = await pywebview.api.open_about_link(destination);
+      document.getElementById('about-link-status').textContent =
+        result.error || '';
+    }
 
     function switchTab(tab) {
       ['explorer', 'wiki', 'maintenance', 'ai'].forEach(t => {
@@ -2044,7 +2141,7 @@ def main():
     if getattr(sys, "frozen", False):
         os.chdir(BASE_DIR)
     api = BackroomsAPI()
-    html = HTML_TEMPLATE.replace("__APP_VERSION__", APP_VERSION)
+    html = HTML_TEMPLATE.replace("__VERSION__", VERSION)
     if syntax_highlight_css:
         html = html.replace(
             "</style>",
@@ -2052,7 +2149,7 @@ def main():
             1,
         )
     api._main_window = webview.create_window(
-        title=f"Backrooms Navigation System - Fandom JP v{APP_VERSION} (Wiki Explorer)",
+        title=f"Backrooms Navigation System - Fandom JP v{VERSION} (Wiki Explorer)",
         html=html,
         js_api=api,
         width=1320,

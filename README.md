@@ -4,7 +4,7 @@ Backrooms日本語版Fandom Wikiを閲覧するためのPython製デスクトッ
 
 > **配布:** Windows向けGUI版・CLI版は[GitHub Releases](https://github.com/Suigetsu-Lium/BrNavi-FandomJP-GUI/releases/latest)からダウンロードできます。ソースから `build_release.bat` を実行して個別にビルドすることもできます。
 
-アプリのバージョンはGUIの上部とウィンドウタイトル、CLIの起動画面に表示されます。現在のバージョンは `v1.0.0` です。
+アプリのバージョンはGUIの上部とウィンドウタイトル、CLIの起動画面に表示されます。GUIの「アプリ情報」から現在のLLM設定、GitHub、更新情報、MIT License、第三者ライセンス情報にもアクセスできます。
 
 ## 目次
 
@@ -104,7 +104,7 @@ Level検索・情報表示・ルート検索・ローカルデータ閲覧、HTM
 | GUI | `dist\BrNavi-GUI\BrNavi-GUI\BrNavi-GUI.exe` |
 | CLI | `dist\BrNavi-CLI\BrNavi-CLI\BrNavi-CLI.exe` |
 
-onedir形式ではexeだけでなく同じ出力フォルダー内のDLL・Python依存ファイルも必要です。配布時は各 `BrNavi-GUI` / `BrNavi-CLI` フォルダーを丸ごと渡してください。ビルド時に存在するローカルWikiデータも各出力へコピーし、不足データ用の空フォルダーを作成します。会話履歴などの `database\ai` はコピーせず、配布先で新規作成されます。README、アーキテクチャ資料、ライセンスも配布フォルダーに含まれます。出力先は書き込み可能な場所に置いてください。
+onedir形式ではexeだけでなく同じ出力フォルダー内のDLL・Python依存ファイルも必要です。配布時は各 `BrNavi-GUI` / `BrNavi-CLI` フォルダーを丸ごと渡してください。ビルド時に存在するローカルWikiデータも各出力へコピーし、不足データ用の空フォルダーを作成します。会話履歴などの `database\ai` はコピーせず、配布先で新規作成されます。README、アーキテクチャ資料、MIT License、第三者ライセンス一覧、バージョン情報も配布フォルダーに含まれます。出力先は書き込み可能な場所に置いてください。
 
 GUI版はpywebviewをWindows Edge Chromiumバックエンドで起動します。WebView2 Runtimeはexeに含まれないため、配布先Windowsにも必要です。APIキーは同梱せず、利用者の `GROQ_API_KEY` 環境変数から読み込みます。
 

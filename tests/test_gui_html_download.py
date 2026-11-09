@@ -3,14 +3,19 @@ import io
 import threading
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 import gui_app
+from modules.operation_context import OperationCancelled, OperationContext
 
 
 class OnlineWikiGuiTests(unittest.TestCase):
     def setUp(self):
         self.api = gui_app.BackroomsAPI.__new__(gui_app.BackroomsAPI)
         self.api._maintenance_lock = threading.Lock()
+        self.api._maintenance_cancel_event = threading.Event()
+        self.api._maintenance_done_event = threading.Event()
+        self.api._maintenance_done_event.set()
         self.api._current_online_wiki_url = ""
 
     @patch("gui_app.load_master_database")
@@ -59,6 +64,21 @@ class OnlineWikiGuiTests(unittest.TestCase):
         self.assertEqual(result["status"], "error")
         self.assertIn("オンラインWiki検索", result["message"])
 
+    def test_cancel_request_is_cooperative_and_requires_active_task(self):
+        idle = self.api.cancel_maintenance_task()
+        self.assertEqual(idle["status"], "idle")
+        self.assertFalse(self.api._maintenance_cancel_event.is_set())
+
+        self.api._maintenance_lock.acquire()
+        self.api._maintenance_done_event.clear()
+        try:
+            result = self.api.cancel_maintenance_task()
+            self.assertEqual(result["status"], "cancelling")
+            self.assertTrue(self.api._maintenance_cancel_event.is_set())
+        finally:
+            self.api._maintenance_done_event.set()
+            self.api._maintenance_lock.release()
+
     def test_wiki_has_its_own_tab_and_gui_execution_log_is_removed(self):
         self.assertIn('id="view-wiki"', gui_app.HTML_TEMPLATE)
         self.assertIn("switchTab('wiki')", gui_app.HTML_TEMPLATE)
@@ -71,6 +91,14 @@ class OnlineWikiGuiTests(unittest.TestCase):
         self.assertNotIn('id="task-log"', gui_app.HTML_TEMPLATE)
         self.assertNotIn("function appendLog", gui_app.HTML_TEMPLATE)
         self.assertNotIn("open_online_wiki_browser", gui_app.HTML_TEMPLATE)
+
+    def test_maintenance_panel_exposes_service_progress_and_stop_controls(self):
+        self.assertIn("maintenance-update-mode", gui_app.HTML_TEMPLATE)
+        self.assertIn("maintenance-progress", gui_app.HTML_TEMPLATE)
+        self.assertIn("maintenance-log", gui_app.HTML_TEMPLATE)
+        self.assertIn("cancelMaintenanceTask()", gui_app.HTML_TEMPLATE)
+        self.assertIn("pywebview.api.cancel_maintenance_task()", gui_app.HTML_TEMPLATE)
+        self.assertIn("pywebview.api.run_maintenance_task(taskName, null, options)", gui_app.HTML_TEMPLATE)
 
     def test_about_dialog_has_version_model_and_license_links(self):
         self.assertIn('id="about-dialog"', gui_app.HTML_TEMPLATE)
@@ -91,24 +119,31 @@ class OnlineWikiGuiTests(unittest.TestCase):
         )
 
     @patch.object(gui_app.BackroomsAPI, "_notify_maintenance_task_completed")
-    @patch("gui_app.run_update_database")
+    @patch("gui_app.run_maintenance_operation")
     def test_maintenance_task_reports_status_without_gui_log_stream(
-        self, update_database, notify
+        self, run_operation, notify
     ):
+        run_operation.return_value = SimpleNamespace(
+            success=True,
+            message="既存データベースを更新しました。",
+        )
         self.api._maintenance_lock.acquire()
         output = io.StringIO()
 
         with contextlib.redirect_stdout(output):
-            self.api._execute_task("update_master")
+            self.api._execute_task("update_master", options={"mode": 1})
 
         self.assertIn("既存データベース更新", output.getvalue())
-        notify.assert_called_once_with(True, "既存データベース更新が完了しました。")
+        notify.assert_called_once_with(True, "既存データベースを更新しました。")
         self.assertFalse(self.api._maintenance_lock.locked())
-        update_database.assert_called_once_with()
+        args, kwargs = run_operation.call_args
+        self.assertEqual(args, ("update_master",))
+        self.assertEqual(kwargs["options"], {"mode": 1})
+        self.assertIsInstance(kwargs["context"], OperationContext)
 
     @patch.object(gui_app.BackroomsAPI, "_notify_maintenance_task_completed")
-    @patch("gui_app.run_update_database", side_effect=RuntimeError("test failure"))
-    def test_maintenance_task_reports_failures(self, update_database, notify):
+    @patch("gui_app.run_maintenance_operation", side_effect=RuntimeError("test failure"))
+    def test_maintenance_task_reports_failures(self, run_operation, notify):
         self.api._maintenance_lock.acquire()
         output = io.StringIO()
 
@@ -119,6 +154,21 @@ class OnlineWikiGuiTests(unittest.TestCase):
         notify.assert_called_once_with(
             False, "既存データベース更新に失敗しました: test failure"
         )
+        self.assertFalse(self.api._maintenance_lock.locked())
+
+    @patch.object(gui_app.BackroomsAPI, "_notify_maintenance_task_completed")
+    @patch("gui_app.run_maintenance_operation", side_effect=OperationCancelled())
+    def test_maintenance_task_reports_cooperative_cancellation(
+        self, run_operation, notify
+    ):
+        self.api._maintenance_lock.acquire()
+
+        self.api._execute_task("extract_info")
+
+        args, kwargs = notify.call_args
+        self.assertFalse(args[0])
+        self.assertIn("停止", args[1])
+        self.assertTrue(kwargs["cancelled"])
         self.assertFalse(self.api._maintenance_lock.locked())
 
     def test_embedded_browser_navigation_rejects_non_wiki_urls(self):

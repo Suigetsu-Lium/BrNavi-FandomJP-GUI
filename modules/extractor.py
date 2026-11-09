@@ -3,10 +3,14 @@
 import re
 import csv
 import html
+import os
+import shutil
+import tempfile
 from pathlib import Path
 from urllib.parse import unquote
 
 from bs4 import BeautifulSoup
+from modules.operation_context import OperationCancelled
 from modules.runtime_paths import get_application_dir
 
 
@@ -1405,8 +1409,7 @@ def save_individual_txt(
         output_dir / filename
     )
 
-    # 更新開始時に既存TXTを削除しているため
-    # 単純上書き
+    # 出力先は抽出処理専用のため単純上書き
     with open(
         output_path,
         "w",
@@ -1471,7 +1474,10 @@ def clear_output_txt_files(
 # ============================================================
 
 def rebuild_combined_txt(
-    output_dir=OUTPUT_DIR
+    output_dir=OUTPUT_DIR,
+    output_file=COMBINED_TXT,
+    display_output_file=None,
+    context=None,
 ):
     """
     個別TXTから
@@ -1482,10 +1488,12 @@ def rebuild_combined_txt(
     output_dir = Path(
         output_dir
     )
+    output_path = Path(output_file)
+    log = context.log if context else print
 
     if not output_dir.exists():
 
-        print(
+        log(
             "⚠ 個別TXTフォルダがありません。"
         )
 
@@ -1506,8 +1514,9 @@ def rebuild_combined_txt(
 
     try:
 
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(
-            COMBINED_TXT,
+            output_path,
             "w",
             encoding="utf-8-sig"
         ) as output_file:
@@ -1515,6 +1524,8 @@ def rebuild_combined_txt(
             first = True
 
             for txt_path in txt_files:
+                if context:
+                    context.check_cancelled()
 
                 try:
 
@@ -1547,35 +1558,35 @@ def rebuild_combined_txt(
 
                 except OSError as e:
 
-                    print(
+                    log(
                         f"⚠ 統合スキップ: "
                         f"{txt_path.name} - {e}"
                     )
 
-        print()
-        print(
+        log()
+        log(
             "統合TXTを再生成しました。"
         )
 
-        print(
+        log(
             f"  個別TXT : "
             f"{len(txt_files)} 件"
         )
 
-        print(
+        log(
             f"  統合TXT : "
-            f"{COMBINED_TXT}"
+            f"{display_output_file or output_path}"
         )
 
         return True
 
     except OSError as e:
 
-        print(
+        log(
             "❌ 統合TXTの生成に失敗しました。"
         )
 
-        print(
+        log(
             f"  {e}"
         )
 
@@ -2179,7 +2190,8 @@ def extract_level_guide(
 def process_html_file(
     html_path,
     output_dir,
-    index
+    index,
+    context=None,
 ):
     """
     HTML 1件を処理する。
@@ -2194,6 +2206,9 @@ def process_html_file(
     html_path = Path(
         html_path
     )
+    log = context.log if context else print
+    if context:
+        context.check_cancelled()
 
     # --------------------------------------------------------
     # HTML読み込み
@@ -2212,7 +2227,7 @@ def process_html_file(
 
     except OSError as e:
 
-        print(
+        log(
             f"  ⚠ 読み込み失敗: "
             f"{e}"
         )
@@ -2237,7 +2252,7 @@ def process_html_file(
         page_title
     ):
 
-        print(
+        log(
             "  → 画像・写真等の"
             "非階層ページとしてスキップ"
         )
@@ -2256,7 +2271,7 @@ def process_html_file(
 
     if not article_text:
 
-        print(
+        log(
             "  → 本文を取得できないためスキップ"
         )
 
@@ -2289,7 +2304,7 @@ def process_html_file(
     if level_code and leading_body_title:
         body_code = extract_level_code_from_title(leading_body_title)
         if body_code and body_code.casefold() != level_code.casefold():
-            print(
+            log(
                 "  ⚠ ページ識別子と本文タイトルが不一致のため保存を中止: "
                 f"ページ={level_code} / 本文={body_code}"
             )
@@ -2297,7 +2312,7 @@ def process_html_file(
 
     if not level_title:
 
-        print(
+        log(
             "  → 正式な階層タイトルを"
             "取得できないためスキップ"
         )
@@ -2307,6 +2322,9 @@ def process_html_file(
     # --------------------------------------------------------
     # TXT
     # --------------------------------------------------------
+
+    if context:
+        context.check_cancelled()
 
     txt_path = save_individual_txt(
         article_text,
@@ -2332,6 +2350,51 @@ def process_html_file(
     return row
 
 
+def _publish_extraction_outputs(
+    staging_dir,
+    output_dir,
+    summary_staging_path,
+    summary_csv,
+    combined_staging_path,
+    combined_path,
+):
+    output_dir = Path(output_dir)
+    summary_csv = Path(summary_csv)
+    combined_path = Path(combined_path)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    old_targets = list(output_dir.glob("*.txt"))
+    for path in (summary_csv, combined_path):
+        if path.exists() and path not in old_targets:
+            old_targets.append(path)
+
+    backup_dir = Path(staging_dir).parent / "backup"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backups = {}
+    for index, target in enumerate(old_targets):
+        backup_path = backup_dir / str(index)
+        shutil.copy2(target, backup_path)
+        backups[target] = backup_path
+
+    try:
+        for target in output_dir.glob("*.txt"):
+            target.unlink()
+        for staged_file in Path(staging_dir).glob("*.txt"):
+            os.replace(staged_file, output_dir / staged_file.name)
+        os.replace(summary_staging_path, summary_csv)
+        os.replace(combined_staging_path, combined_path)
+    except Exception:
+        for target in output_dir.glob("*.txt"):
+            target.unlink(missing_ok=True)
+        for target in (summary_csv, combined_path):
+            if target not in backups:
+                target.unlink(missing_ok=True)
+        for target, backup_path in backups.items():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(backup_path, target)
+        raise
+
+
 # ============================================================
 # ALL抽出
 # ============================================================
@@ -2340,7 +2403,8 @@ def extract_levels(
     html_dir=DOWNLOADED_HTML_DIR,
     output_dir=OUTPUT_DIR,
     summary_csv=SUMMARY_CSV,
-    interactive=False
+    interactive=False,
+    context=None,
 ):
     """
     downloaded_fandom_html内のHTMLを
@@ -2364,75 +2428,29 @@ def extract_levels(
     summary_csv = Path(
         summary_csv
     )
+    log = context.log if context else print
 
     # ========================================================
     # HTMLフォルダ確認
     # ========================================================
 
     if not html_dir.exists():
-
-        print()
-        print(
-            "❌ HTMLフォルダが存在しません。"
-        )
-
-        print(
-            f"  {html_dir}"
-        )
-
-        return []
-
-    # ========================================================
-    # 出力フォルダ
-    # ========================================================
-
-    output_dir.mkdir(
-        parents=True,
-        exist_ok=True
-    )
+        log()
+        log("❌ HTMLフォルダが存在しません。")
+        log(f"  {html_dir}")
+        return None
 
     # ========================================================
     # 開始
     # ========================================================
 
-    print()
-    print(
-        "=" * 80
-    )
-
-    print(
-        "Backrooms Fandom JP - "
-        "情報データベース更新"
-    )
-
-    print(
-        "=" * 80
-    )
-
-    print()
-
-    print(
-        "処理モード : ALL"
-    )
-
-    print()
-
-    # ========================================================
-    # 既存TXT削除
-    # ========================================================
-
-    deleted_count = (
-        clear_output_txt_files(
-            output_dir
-        )
-    )
-
-    print(
-        f"既存個別TXT削除 : "
-        f"{deleted_count} 件"
-    )
-
-    print()
+    log()
+    log("=" * 80)
+    log("Backrooms Fandom JP - 情報データベース更新")
+    log("=" * 80)
+    log()
+    log("処理モード : ALL")
+    log()
 
     # ========================================================
     # HTML一覧
@@ -2459,12 +2477,7 @@ def extract_levels(
         html_files
     )
 
-    print(
-        f"処理対象HTML : "
-        f"{total} 件"
-    )
-
-    print()
+    log(f"処理対象HTML : {total} 件")
 
     # ========================================================
     # 抽出
@@ -2478,134 +2491,86 @@ def extract_levels(
 
     error_count = 0
 
-    for index, html_path in enumerate(
-        html_files,
-        1
-    ):
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    summary_csv.parent.mkdir(parents=True, exist_ok=True)
+    combined_path = Path(COMBINED_TXT)
+    temp_parent = output_dir.parent
 
-        print(
-            f"[{index}/{total}] "
-            f"{html_path.name}"
+    with tempfile.TemporaryDirectory(
+        prefix=".brnavi-extract-",
+        dir=temp_parent,
+    ) as temp_dir:
+        temp_dir = Path(temp_dir)
+        staging_dir = temp_dir / "levels"
+        staging_dir.mkdir()
+        summary_staging_path = temp_dir / "summary.csv"
+        combined_staging_path = temp_dir / "combined.txt"
+
+        for index, html_path in enumerate(html_files, 1):
+            if context:
+                context.check_cancelled()
+                context.progress(index - 1, total, html_path.name)
+            log(f"[{index}/{total}] {html_path.name}")
+
+            try:
+                row = process_html_file(
+                    html_path,
+                    staging_dir,
+                    index,
+                    context=context,
+                )
+                if row is None:
+                    skipped_count += 1
+                    continue
+                rows.append(row)
+                success_count += 1
+            except OperationCancelled:
+                raise
+            except Exception as e:
+                error_count += 1
+                message = f"  ❌ エラー: {type(e).__name__}: {e}"
+                if context:
+                    log(message, "error")
+                else:
+                    log(message)
+
+        if context:
+            context.check_cancelled()
+            context.progress(total, total, "出力ファイルを準備中")
+        save_summary_csv(rows, summary_staging_path)
+        combined_success = rebuild_combined_txt(
+            staging_dir,
+            output_file=combined_staging_path,
+            display_output_file=combined_path,
+            context=context,
+        )
+        if not combined_success:
+            raise OSError("統合TXTを生成できませんでした。")
+        if context:
+            context.check_cancelled()
+            context.progress(total, total, "既存データを安全に更新中")
+        _publish_extraction_outputs(
+            staging_dir,
+            output_dir,
+            summary_staging_path,
+            summary_csv,
+            combined_staging_path,
+            combined_path,
         )
 
-        try:
-
-            row = process_html_file(
-                html_path,
-                output_dir,
-                index
-            )
-
-            if row is None:
-
-                skipped_count += 1
-
-                continue
-
-            rows.append(
-                row
-            )
-
-            success_count += 1
-
-        except Exception as e:
-
-            error_count += 1
-
-            print(
-                f"  ❌ エラー: "
-                f"{type(e).__name__}: {e}"
-            )
-
-    # ========================================================
-    # Summary CSV
-    # ========================================================
-
-    save_summary_csv(
-        rows,
-        summary_csv
-    )
-
-    # ========================================================
-    # 統合TXT
-    # ========================================================
-
-    combined_success = (
-        rebuild_combined_txt(
-            output_dir
-        )
-    )
-
-    # ========================================================
-    # 完了
-    # ========================================================
-
-    print()
-    print(
-        "=" * 80
-    )
-
-    print(
-        "抽出完了"
-    )
-
-    print(
-        "=" * 80
-    )
-
-    print()
-
-    print(
-        f"処理対象HTML : "
-        f"{total} 件"
-    )
-
-    print(
-        f"抽出成功     : "
-        f"{success_count} 件"
-    )
-
-    print(
-        f"対象外       : "
-        f"{skipped_count} 件"
-    )
-
-    print(
-        f"抽出エラー   : "
-        f"{error_count} 件"
-    )
-
-    print()
-
-    print(
-        "出力ファイル"
-    )
-
-    print(
-        f"  CSV : "
-        f"{summary_csv}"
-    )
-
-    print(
-        f"  TXT : "
-        f"{output_dir}"
-    )
-
-    print(
-        f"  統合TXT : "
-        f"{COMBINED_TXT}"
-    )
-
-    print()
-
-    if not combined_success:
-
-        print(
-            "⚠ 統合TXTの再生成に失敗しました。"
-        )
-
-        print()
-
+    log()
+    log("=" * 80)
+    log("抽出完了")
+    log("=" * 80)
+    log(f"処理対象HTML : {total} 件")
+    log(f"抽出成功     : {success_count} 件")
+    log(f"対象外       : {skipped_count} 件")
+    log(f"抽出エラー   : {error_count} 件")
+    log(f"  CSV : {summary_csv}")
+    log(f"  TXT : {output_dir}")
+    log(f"  統合TXT : {combined_path}")
+    if context:
+        context.progress(total, total, "完了")
     return rows
 
 

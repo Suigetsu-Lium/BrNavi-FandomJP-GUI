@@ -14,7 +14,10 @@ Level間の接続情報を解析し、
 import csv
 import os
 import re
+import shutil
+import tempfile
 
+from modules.operation_context import OperationCancelled
 from modules.runtime_paths import get_application_dir
 
 # =============================================================================
@@ -202,7 +205,63 @@ def is_valid_target(name: str) -> bool:
 # ネットワーク抽出
 # =============================================================================
 
-def process_backrooms_data():
+def _write_csv_staging_file(output_path, fieldnames, rows):
+    output_dir = os.path.dirname(os.path.abspath(output_path))
+    os.makedirs(output_dir, exist_ok=True)
+    fd, staging_path = tempfile.mkstemp(
+        prefix=".brnavi-network-",
+        suffix=".tmp",
+        dir=output_dir,
+    )
+    try:
+        with os.fdopen(fd, "w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+    except Exception:
+        os.unlink(staging_path)
+        raise
+    return staging_path
+
+
+def _replace_csv_outputs(staged_outputs):
+    backups = {}
+    replaced = []
+    try:
+        for target, staging_path in staged_outputs:
+            if os.path.exists(target):
+                fd, backup_path = tempfile.mkstemp(
+                    prefix=".brnavi-network-backup-",
+                    dir=os.path.dirname(os.path.abspath(target)),
+                )
+                os.close(fd)
+                shutil.copy2(target, backup_path)
+                backups[target] = backup_path
+            else:
+                backups[target] = None
+
+        for target, staging_path in staged_outputs:
+            os.replace(staging_path, target)
+            replaced.append(target)
+    except Exception:
+        for target in reversed(replaced):
+            backup_path = backups.get(target)
+            if backup_path:
+                os.replace(backup_path, target)
+                backups[target] = None
+            elif os.path.exists(target):
+                os.unlink(target)
+        raise
+    finally:
+        for _, staging_path in staged_outputs:
+            if os.path.exists(staging_path):
+                os.unlink(staging_path)
+        for backup_path in backups.values():
+            if backup_path and os.path.exists(backup_path):
+                os.unlink(backup_path)
+
+
+def process_backrooms_data(context=None):
     """
     extracted_fandom_levels_all.txt から
     ノード・エッジ情報を抽出してCSVに保存する。
@@ -215,9 +274,11 @@ def process_backrooms_data():
 
     unique_edges = {}
     nodes_info = {}
+    log = context.log if context else print
 
     current_level = None
     current_section_type = None
+    processed_lines = 0
 
     # =========================================================================
     # 入力
@@ -232,6 +293,15 @@ def process_backrooms_data():
         ) as f:
 
             for line in f:
+                if context:
+                    context.check_cancelled()
+                    processed_lines += 1
+                    if processed_lines % 1000 == 0:
+                        context.progress(
+                            processed_lines,
+                            None,
+                            "ネットワーク情報を解析中",
+                        )
 
                 line = line.strip()
 
@@ -432,15 +502,17 @@ def process_backrooms_data():
                                 "Condition": line
                             }
 
+    except OperationCancelled:
+        raise
     except FileNotFoundError:
 
-        print()
-        print(
+        log()
+        log(
             f"【エラー】ファイル "
             f"'{INPUT_FILE}' が見つかりません。"
         )
 
-        print(
+        log(
             "先に情報データベースの更新を実行してください。"
         )
 
@@ -448,13 +520,13 @@ def process_backrooms_data():
 
     except Exception as e:
 
-        print()
-        print(
+        log()
+        log(
             "【エラー】ネットワーク解析中に"
             "予期しないエラーが発生しました。"
         )
 
-        print(
+        log(
             f"{type(e).__name__}: {e}"
         )
 
@@ -472,54 +544,6 @@ def process_backrooms_data():
         "Condition"
     ]
 
-    try:
-
-        with open(
-            EDGES_OUTPUT_FILE,
-            "w",
-            newline="",
-            encoding="utf-8"
-        ) as csvfile:
-
-            writer = csv.DictWriter(
-                csvfile,
-                fieldnames=edges_fieldnames
-            )
-
-            writer.writeheader()
-
-            writer.writerows(
-                unique_edges.values()
-            )
-
-        print()
-        print(
-            f"エッジ抽出完了: "
-            f"{len(unique_edges)} 件"
-        )
-
-        print(
-            f" -> '{EDGES_OUTPUT_FILE}'"
-        )
-
-    except IOError as e:
-
-        print()
-        print(
-            "【エラー】エッジファイルの"
-            "書き込みに失敗しました。"
-        )
-
-        print(
-            f"詳細: {e}"
-        )
-
-        return False
-
-    # =========================================================================
-    # ノードCSV
-    # =========================================================================
-
     nodes_fieldnames = [
         "Id",
         "Label",
@@ -527,62 +551,71 @@ def process_backrooms_data():
         "Danger"
     ]
 
+    edges_staging_path = None
+    nodes_staging_path = None
     try:
-
-        with open(
-            NODES_OUTPUT_FILE,
-            "w",
-            newline="",
-            encoding="utf-8"
-        ) as csvfile:
-
-            writer = csv.DictWriter(
-                csvfile,
-                fieldnames=nodes_fieldnames
+        if context:
+            context.check_cancelled()
+            context.progress(None, None, "CSV出力を準備中")
+        edges_staging_path = _write_csv_staging_file(
+            EDGES_OUTPUT_FILE,
+            edges_fieldnames,
+            unique_edges.values(),
+        )
+        try:
+            nodes_staging_path = _write_csv_staging_file(
+                NODES_OUTPUT_FILE,
+                nodes_fieldnames,
+                nodes_info.values(),
             )
+        except Exception:
+            os.unlink(edges_staging_path)
+            raise
 
-            writer.writeheader()
-
-            writer.writerows(
-                nodes_info.values()
-            )
-
-        print(
-            f"ノード抽出完了: "
-            f"{len(nodes_info)} 件"
+        if context:
+            context.check_cancelled()
+            context.progress(None, None, "既存ネットワークデータを更新中")
+        _replace_csv_outputs(
+            [
+                (EDGES_OUTPUT_FILE, edges_staging_path),
+                (NODES_OUTPUT_FILE, nodes_staging_path),
+            ]
         )
-
-        print(
-            f" -> '{NODES_OUTPUT_FILE}'"
-        )
-
-    except IOError as e:
-
-        print()
-        print(
-            "【エラー】ノードファイルの"
-            "書き込みに失敗しました。"
-        )
-
-        print(
-            f"詳細: {e}"
-        )
-
+    except OperationCancelled:
+        for staging_path in (edges_staging_path, nodes_staging_path):
+            if staging_path and os.path.exists(staging_path):
+                os.unlink(staging_path)
+        raise
+    except Exception as e:
+        for staging_path in (edges_staging_path, nodes_staging_path):
+            if staging_path and os.path.exists(staging_path):
+                os.unlink(staging_path)
+        log()
+        log("【エラー】ネットワークCSVの書き込みに失敗しました。")
+        log(f"詳細: {e}")
         return False
+
+    log()
+    log(f"エッジ抽出完了: {len(unique_edges)} 件")
+    log(f" -> '{EDGES_OUTPUT_FILE}'")
+    log(f"ノード抽出完了: {len(nodes_info)} 件")
+    log(f" -> '{NODES_OUTPUT_FILE}'")
 
     # =========================================================================
     # 完了
     # =========================================================================
 
-    print()
-    print("=" * 70)
-    print("ネットワークデータの更新が完了しました。")
-    print(
+    log()
+    log("=" * 70)
+    log("ネットワークデータの更新が完了しました。")
+    log(
         f"ノード数 : {len(nodes_info):,}"
     )
-    print(
+    log(
         f"エッジ数 : {len(unique_edges):,}"
     )
-    print("=" * 70)
+    log("=" * 70)
+    if context:
+        context.progress(processed_lines, None, "完了")
 
     return True

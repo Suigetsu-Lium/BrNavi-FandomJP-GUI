@@ -22,10 +22,9 @@ from modules.database import (
     open_local_html
 )
 
-# 保守・更新モジュール
-from modules.extractor import extract_levels
-from modules.network import process_backrooms_data
-from modules.update_database import main as run_update_database
+# 保守・更新サービス
+from modules.operation_context import OperationCancelled, OperationContext
+from modules.operations import run_maintenance_operation
 from modules.online_wiki import fetch_page as fetch_online_wiki_page
 from modules.online_wiki import is_supported_wiki_url
 from modules.online_wiki import save_page as save_online_wiki_page
@@ -72,6 +71,9 @@ class BackroomsAPI:
         self._ai_jobs = {}
         self._ai_jobs_lock = threading.Lock()
         self._maintenance_lock = threading.Lock()
+        self._maintenance_cancel_event = threading.Event()
+        self._maintenance_done_event = threading.Event()
+        self._maintenance_done_event.set()
         self._current_online_wiki_url = ""
         if AI_AVAILABLE:
             try:
@@ -697,7 +699,7 @@ class BackroomsAPI:
             return {"status": "error", "message": "ページ名またはURLがありません。"}
         return self.run_maintenance_task("save_online_wiki_page", page)
 
-    def run_maintenance_task(self, task_name, selected_urls=None):
+    def run_maintenance_task(self, task_name, selected_urls=None, options=None):
         if task_name in {"download_html", "download_selected_html"}:
             return {
                 "status": "error",
@@ -705,19 +707,31 @@ class BackroomsAPI:
             }
         if not self._maintenance_lock.acquire(blocking=False):
             return {"status": "busy", "message": "別の保守タスクが実行中です。"}
+        self._maintenance_cancel_event.clear()
+        self._maintenance_done_event.clear()
         worker = threading.Thread(
             target=self._execute_task,
-            args=(task_name, selected_urls),
+            args=(task_name, selected_urls, options),
             daemon=True,
         )
         try:
             worker.start()
         except Exception:
+            self._maintenance_done_event.set()
             self._maintenance_lock.release()
             raise
         return {"status": "started"}
 
-    def _execute_task(self, task_name, selected_urls=None):
+    def cancel_maintenance_task(self):
+        if (
+            not self._maintenance_lock.locked()
+            or self._maintenance_done_event.is_set()
+        ):
+            return {"status": "idle", "message": "実行中の保守タスクはありません。"}
+        self._maintenance_cancel_event.set()
+        return {"status": "cancelling", "message": "安全な停止位置で処理を停止します。"}
+
+    def _execute_task(self, task_name, selected_urls=None, options=None):
         if task_name == "save_online_wiki_page":
             payload = {"ok": False}
             try:
@@ -732,6 +746,7 @@ class BackroomsAPI:
                 print(f"Wikiページ保存エラー: {error}")
                 payload["error"] = str(error)
             finally:
+                self._maintenance_done_event.set()
                 try:
                     encoded = json.dumps(payload, ensure_ascii=True)
                     main_window = getattr(self, "_main_window", None)
@@ -751,6 +766,7 @@ class BackroomsAPI:
         }
         task_label = task_labels.get(task_name)
         if task_label is None:
+            self._maintenance_done_event.set()
             self._notify_maintenance_task_completed(
                 False, f"未対応の保守タスクです: {task_name}"
             )
@@ -758,31 +774,85 @@ class BackroomsAPI:
             return
 
         print(f"保守タスクを開始します: {task_label}")
+        context = OperationContext(
+            cancel_event=getattr(
+                self, "_maintenance_cancel_event", threading.Event()
+            ),
+            on_log=self._notify_maintenance_log,
+            on_progress=self._notify_maintenance_progress,
+        )
         try:
-            if task_name == "update_master":
-                run_update_database()
-            elif task_name == "extract_info":
-                extract_levels(interactive=False)
-            elif task_name == "update_network":
-                process_backrooms_data()
+            result = run_maintenance_operation(
+                task_name,
+                options=options,
+                context=context,
+            )
             print(f"保守タスクが完了しました: {task_label}")
+            self._maintenance_done_event.set()
             self._notify_maintenance_task_completed(
-                True, f"{task_label}が完了しました。"
+                result.success,
+                result.message,
+            )
+        except OperationCancelled:
+            message = f"{task_label}を安全な停止位置で停止しました。"
+            if task_name in {"extract_info", "update_network"}:
+                message += "既存の出力データは維持されています。"
+            else:
+                message += "完了済みステップの出力は維持されています。"
+            print(message)
+            self._maintenance_done_event.set()
+            self._notify_maintenance_task_completed(
+                False, message, cancelled=True
             )
         except Exception as error:
             print(f"保守タスクに失敗しました ({task_label}): {error}")
+            context.log(f"{type(error).__name__}: {error}", "error")
+            self._maintenance_done_event.set()
             self._notify_maintenance_task_completed(
                 False, f"{task_label}に失敗しました: {error}"
             )
         finally:
+            self._maintenance_done_event.set()
             self._maintenance_lock.release()
 
-    def _notify_maintenance_task_completed(self, succeeded, message):
+    def _notify_maintenance_log(self, message, level="info"):
         main_window = getattr(self, "_main_window", None)
         if main_window is None:
             return
         payload = json.dumps(
-            {"ok": succeeded, "message": message},
+            {"message": message, "level": level},
+            ensure_ascii=True,
+        )
+        try:
+            main_window.evaluate_js(f"onMaintenanceLog({payload})")
+        except Exception as error:
+            print(f"[GUI] 保守タスクログの画面通知に失敗: {error}")
+
+    def _notify_maintenance_progress(self, current, total, message):
+        main_window = getattr(self, "_main_window", None)
+        if main_window is None:
+            return
+        payload = json.dumps(
+            {"current": current, "total": total, "message": message},
+            ensure_ascii=True,
+        )
+        try:
+            main_window.evaluate_js(f"onMaintenanceProgress({payload})")
+        except Exception as error:
+            print(f"[GUI] 保守タスク進捗の画面通知に失敗: {error}")
+
+    def _notify_maintenance_task_completed(
+        self, succeeded, message, cancelled=False
+    ):
+        main_window = getattr(self, "_main_window", None)
+        if main_window is None:
+            return
+        payload = json.dumps(
+            {
+                "ok": succeeded,
+                "message": message,
+                "cancelled": cancelled,
+            },
             ensure_ascii=True,
         )
         try:
@@ -1169,8 +1239,15 @@ HTML_TEMPLATE = r"""
     <div id="view-maintenance" class="hidden flex-1 flex flex-col p-8 bg-[#fbf6de] overflow-y-auto">
       <div class="max-w-3xl mx-auto w-full bg-white border border-[#e2d8b5] p-6 rounded shadow-sm space-y-5">
         <h2 class="text-lg font-bold text-gray-800 border-b border-gray-200 pb-2">⚙️ データ保守</h2>
+        <label class="flex items-center gap-2 text-xs text-gray-700">
+          Master Database更新方法
+          <select id="maintenance-update-mode" class="border border-[#d6c79a] rounded px-2 py-1 bg-white">
+            <option value="1">一覧HTMLを再取得して全更新</option>
+            <option value="2">保存済みHTMLからDBを再構築</option>
+          </select>
+        </label>
         <div class="grid grid-cols-2 gap-3 pt-2">
-          <button onclick="runTask('update_master')" class="p-3 bg-[#f5eed3] hover:bg-[#eadfae] border border-[#d6c79a] rounded text-xs font-semibold text-gray-800 text-left">
+          <button onclick="runTask('update_master', {mode: Number(document.getElementById('maintenance-update-mode').value)})" class="p-3 bg-[#f5eed3] hover:bg-[#eadfae] border border-[#d6c79a] rounded text-xs font-semibold text-gray-800 text-left">
             <span class="text-sm block">🔄 既存データベース更新</span>
             <span class="text-[10px] text-gray-500">図鑑・ルート機能の互換用（オンライン閲覧・保存には不要）</span>
           </button>
@@ -1187,6 +1264,14 @@ HTML_TEMPLATE = r"""
           class="min-h-10 rounded border border-[#dfd3a8] bg-[#fffdf5] px-3 py-2 text-xs text-gray-600">
           保守タスクを選択してください。
         </div>
+        <div class="flex items-center gap-3">
+          <progress id="maintenance-progress" max="100" value="0" class="hidden flex-1 h-2"></progress>
+          <span id="maintenance-progress-label" class="text-[11px] text-gray-500">待機中</span>
+          <button id="maintenance-cancel" onclick="cancelMaintenanceTask()" disabled
+            class="px-3 py-1.5 text-xs bg-red-700 text-white rounded disabled:opacity-40">停止</button>
+        </div>
+        <pre id="maintenance-log" aria-label="保守タスクログ"
+          class="max-h-56 overflow-auto whitespace-pre-wrap break-words rounded border border-[#e2d8b5] bg-[#fffdf5] p-3 text-[11px] text-gray-700"></pre>
       </div>
     </div>
 
@@ -1597,28 +1682,82 @@ HTML_TEMPLATE = r"""
       updateOnlineWikiCurrentUrl();
     }
 
-    async function runTask(taskName) {
+    function setMaintenanceBusy(busy) {
+      document.getElementById('maintenance-cancel').disabled = !busy;
+    }
+
+    async function runTask(taskName, options = {}) {
       const status = document.getElementById('maintenance-task-status');
       status.textContent = "保守タスクを開始しています...";
       status.className = "min-h-10 rounded border border-[#dfd3a8] bg-[#fffdf5] px-3 py-2 text-xs text-gray-600";
+      document.getElementById('maintenance-log').textContent = "";
+      const progressBar = document.getElementById('maintenance-progress');
+      progressBar.value = 0;
+      progressBar.classList.add('hidden');
+      document.getElementById('maintenance-progress-label').textContent = "開始中";
+      setMaintenanceBusy(true);
       try {
-        const result = await pywebview.api.run_maintenance_task(taskName);
+        const result = await pywebview.api.run_maintenance_task(taskName, null, options);
         if (result.status !== "started") {
+          setMaintenanceBusy(false);
           status.textContent = result.message || "タスクを開始できませんでした。";
           status.className = "min-h-10 rounded border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-800";
         }
       } catch (error) {
+        setMaintenanceBusy(false);
         status.textContent = "タスク開始エラー: " + error;
         status.className = "min-h-10 rounded border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-800";
+      }
+    }
+
+    async function cancelMaintenanceTask() {
+      const button = document.getElementById('maintenance-cancel');
+      button.disabled = true;
+      try {
+        const result = await pywebview.api.cancel_maintenance_task();
+        document.getElementById('maintenance-progress-label').textContent =
+          result.message || "安全な停止位置を待っています...";
+        if (result.status === "idle") setMaintenanceBusy(false);
+      } catch (error) {
+        button.disabled = false;
+        document.getElementById('maintenance-task-status').textContent =
+          "停止要求エラー: " + error;
+      }
+    }
+
+    function onMaintenanceLog(entry) {
+      const log = document.getElementById('maintenance-log');
+      log.textContent += (entry.message || "") + "\n";
+      const lines = log.textContent.split("\n");
+      if (lines.length > 300) log.textContent = lines.slice(-300).join("\n");
+      log.scrollTop = log.scrollHeight;
+    }
+
+    function onMaintenanceProgress(progress) {
+      const bar = document.getElementById('maintenance-progress');
+      const label = document.getElementById('maintenance-progress-label');
+      if (Number.isFinite(progress.current) && Number.isFinite(progress.total) && progress.total > 0) {
+        bar.classList.remove('hidden');
+        bar.value = Math.min(100, Math.round(progress.current * 100 / progress.total));
+        label.textContent = `${progress.current}/${progress.total} ${progress.message || ""}`;
+      } else {
+        bar.classList.add('hidden');
+        label.textContent = progress.message || "処理中";
       }
     }
 
     function onMaintenanceTaskCompleted(result) {
       const status = document.getElementById('maintenance-task-status');
       status.textContent = result.message || (result.ok ? "処理が完了しました。" : "処理に失敗しました。");
-      status.className = result.ok
+      status.className = result.cancelled
+        ? "min-h-10 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800"
+        : result.ok
         ? "min-h-10 rounded border border-green-300 bg-green-50 px-3 py-2 text-xs text-green-800"
         : "min-h-10 rounded border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-800";
+      document.getElementById('maintenance-progress-label').textContent =
+        result.cancelled ? "停止しました" : (result.ok ? "完了" : "失敗");
+      document.getElementById('maintenance-progress').classList.add('hidden');
+      setMaintenanceBusy(false);
       onSearchInput();
     }
 

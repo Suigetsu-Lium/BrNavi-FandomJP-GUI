@@ -14,6 +14,7 @@ from urllib.parse import unquote
 from bs4 import BeautifulSoup
 import requests
 
+from modules.operation_context import OperationCancelled
 from modules.runtime_paths import get_application_dir
 
 # =============================================================================
@@ -216,22 +217,31 @@ def get_level_number(filename):
 # =============================================================================
 
 def download_images(
-    start_level,
-    end_level
+    start_level=None,
+    end_level=None,
+    html_files=None,
+    context=None,
+    return_details=False,
 ):
     """
     指定Level範囲のローカルHTMLから画像を抽出し、
     Fandom JPから画像をダウンロードする。
     """
 
+    log = context.log if context else print
+    details = {"downloaded": 0, "skipped": 0, "failed": 0}
+
+    if html_files is None and (start_level is None or end_level is None):
+        raise ValueError("Level範囲、または処理対象HTMLを指定してください。")
+
     # -------------------------------------------------------------------------
     # 範囲調整
     # -------------------------------------------------------------------------
 
-    if start_level > end_level:
+    if html_files is None and start_level is not None and end_level is not None and start_level > end_level:
 
-        print()
-        print(
+        log()
+        log(
             "[注意] 開始数値が終了数値より大きいため、"
             "順序を入れ替えて処理します。"
         )
@@ -245,19 +255,19 @@ def download_images(
     # HTMLフォルダ確認
     # -------------------------------------------------------------------------
 
-    if not os.path.exists(HTML_DIR):
+    if html_files is None and not os.path.exists(HTML_DIR):
 
-        print()
-        print(
+        log()
+        log(
             f"❌ エラー: HTMLフォルダ "
             f"'{HTML_DIR}' が見つかりません。"
         )
 
-        print(
+        log(
             "先にHTMLダウンロードを実行してください。"
         )
 
-        return False
+        return details if return_details else False
 
     # -------------------------------------------------------------------------
     # 出力フォルダ作成
@@ -272,48 +282,55 @@ def download_images(
     # wiki_list.txt読み込み
     # -------------------------------------------------------------------------
 
-    print()
-    print(
-        "🔍 wiki_list.txt を読み込んで"
-        "マッピング情報を構築中..."
-    )
+    if html_files is None:
+        log()
+        log(
+            "🔍 wiki_list.txt を読み込んで"
+            "マッピング情報を構築中..."
+        )
 
-    meta_title_map = load_meta_titles(
-        LIST_FILE_PATH
-    )
+        meta_title_map = load_meta_titles(
+            LIST_FILE_PATH
+        )
 
-    print(
-        f"   -> {len(meta_title_map)} 件の"
-        "タイトル情報を登録しました。"
-    )
+        log(
+            f"   -> {len(meta_title_map)} 件の"
+            "タイトル情報を登録しました。"
+        )
+    else:
+        meta_title_map = {}
+        log("選択したHTML内の画像だけを処理します。")
 
     # -------------------------------------------------------------------------
     # HTMLファイル取得
     # -------------------------------------------------------------------------
 
-    html_files = []
-
-    for filename in os.listdir(HTML_DIR):
-
-        if not filename.endswith(".html"):
-            continue
-
-        level_num = get_level_number(
-            filename
+    if html_files is None:
+        selected_html_files = []
+        for filename in os.listdir(HTML_DIR):
+            if not filename.lower().endswith((".html", ".htm")):
+                continue
+            level_num = get_level_number(filename)
+            if (
+                level_num != 999999
+                and start_level <= level_num <= end_level
+            ):
+                selected_html_files.append(os.path.join(HTML_DIR, filename))
+        selected_html_files.sort(
+            key=lambda path: get_level_number(os.path.basename(path))
+        )
+    else:
+        selected_html_files = sorted(
+            (
+                os.fspath(path)
+                for path in html_files
+                if os.path.isfile(path)
+                and os.path.splitext(os.fspath(path))[1].lower() in (".html", ".htm")
+            ),
+            key=lambda path: os.path.basename(path).casefold(),
         )
 
-        if (
-            level_num != 999999
-            and start_level <= level_num <= end_level
-        ):
-
-            html_files.append(filename)
-
-    html_files.sort(
-        key=get_level_number
-    )
-
-    total_files = len(html_files)
+    total_files = len(selected_html_files)
 
     # -------------------------------------------------------------------------
     # 対象HTMLなし
@@ -321,21 +338,24 @@ def download_images(
 
     if total_files == 0:
 
-        print()
-        print(
-            f"❌ 指定された範囲 "
-            f"(Level {start_level} ～ Level {end_level}) "
-            "のHTMLファイルが見つかりません。"
-        )
+        log()
+        if html_files is None:
+            log(
+                f"❌ 指定された範囲 "
+                f"(Level {start_level} ～ Level {end_level}) "
+                "のHTMLファイルが見つかりません。"
+            )
+        else:
+            log("選択されたHTMLファイルがありません。")
 
-        return False
+        return details if return_details else False
 
-    print()
-    print(
+    log()
+    log(
         f"📁 {total_files} 件のHTMLファイルから"
         "画像を順番に検索します..."
     )
-    print()
+    log()
 
     # -------------------------------------------------------------------------
     # HTTPヘッダー
@@ -361,14 +381,11 @@ def download_images(
     # HTMLごとの処理
     # -------------------------------------------------------------------------
 
-    for i, filename in enumerate(
-        html_files
-    ):
-
-        filepath = os.path.join(
-            HTML_DIR,
-            filename
-        )
+    for i, filepath in enumerate(selected_html_files):
+        if context:
+            context.check_cancelled()
+            context.progress(i, total_files, os.path.basename(filepath))
+        filename = os.path.basename(filepath)
 
         dict_key, level_str = (
             extract_level_info(filename)
@@ -400,11 +417,12 @@ def download_images(
 
         except Exception as e:
 
-            print(
+            log(
                 f"[{i + 1}/{total_files}] "
                 f"読み込みエラー: {filename} - {e}"
             )
 
+            details["failed"] += 1
             continue
 
         # ---------------------------------------------------------------------
@@ -422,12 +440,13 @@ def download_images(
 
         if not content_area:
 
-            print(
+            log(
                 f"[{i + 1}/{total_files}] "
                 f"スキップ: {level_str} "
                 "(本文領域なし)"
             )
 
+            details["skipped"] += 1
             continue
 
         # ---------------------------------------------------------------------
@@ -479,11 +498,12 @@ def download_images(
 
         if not valid_images:
 
-            print(
+            log(
                 f"[{i + 1}/{total_files}] "
                 f"画像なし: {level_str}"
             )
 
+            details["skipped"] += 1
             continue
 
         # ---------------------------------------------------------------------
@@ -501,7 +521,7 @@ def download_images(
 
             display_title = level_str
 
-        print(
+        log(
             f"[{i + 1}/{total_files}] "
             f"🖼️ {len(valid_images)} 枚の画像を発見: "
             f"{display_title}"
@@ -583,6 +603,7 @@ def download_images(
                 img_save_path
             ):
 
+                details["skipped"] += 1
                 image_counter += 1
                 continue
 
@@ -591,6 +612,8 @@ def download_images(
             # ---------------------------------------------------------------
 
             try:
+                if context:
+                    context.check_cancelled()
 
                 response = requests.get(
                     img_url,
@@ -603,6 +626,8 @@ def download_images(
                 # -----------------------------------------------------------
 
                 if response.status_code != 200:
+                    if context:
+                        context.check_cancelled()
 
                     response = requests.get(
                         raw_url,
@@ -615,6 +640,8 @@ def download_images(
                 # -----------------------------------------------------------
 
                 if response.status_code != 200:
+                    if context:
+                        context.check_cancelled()
 
                     fallback_match = re.search(
                         r'(https?://.*?/[^/]+\.(?:png|jpg|jpeg|gif|webp))',
@@ -635,6 +662,8 @@ def download_images(
                 # -----------------------------------------------------------
 
                 if response.status_code == 200:
+                    if context:
+                        context.check_cancelled()
 
                     with open(
                         img_save_path,
@@ -648,21 +677,26 @@ def download_images(
                     time.sleep(
                         0.5
                     )
+                    details["downloaded"] += 1
 
                 else:
 
-                    print(
+                    log(
                         f"    ⚠️ 最終エラー "
                         f"({response.status_code}): "
                         f"{new_img_filename}"
                     )
+                    details["failed"] += 1
 
+            except OperationCancelled:
+                raise
             except Exception as e:
 
-                print(
+                log(
                     f"    ❌ 通信エラー: "
                     f"{new_img_filename} - {e}"
                 )
+                details["failed"] += 1
 
             image_counter += 1
 
@@ -670,16 +704,21 @@ def download_images(
     # 完了
     # -------------------------------------------------------------------------
 
-    print()
-    print("=" * 50)
-    print(
-        f"【完了】Level {start_level} ～ "
-        f"{end_level} の画像抽出・"
-        "ダウンロードが完了しました。"
-    )
-    print(
+    log()
+    log("=" * 50)
+    if html_files is None:
+        log(
+            f"【完了】Level {start_level} ～ "
+            f"{end_level} の画像抽出・"
+            "ダウンロードが完了しました。"
+        )
+    else:
+        log(f"選択したHTML {total_files}件の画像抽出が完了しました。")
+    log(
         f"保存先: {OUTPUT_IMG_DIR}/"
     )
-    print("=" * 50)
+    log("=" * 50)
 
-    return True
+    if context:
+        context.progress(total_files, total_files, "画像抽出完了")
+    return details if return_details else True

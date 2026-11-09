@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 from modules.downloader import download_page, find_existing_html
 from modules.extractor import extract_levels
+from modules.image_downloader import download_images
 from modules.network import process_backrooms_data
 from modules.operation_context import OperationContext
 from modules.runtime_paths import get_application_dir
@@ -183,6 +184,103 @@ def run_maintenance_operation(task_name, options=None, context=None):
                 f"取得済み {counts['skipped']}件、失敗 {counts['failed']}件"
             ),
             details=counts,
+        )
+
+    if task_name == "save_level_list_offline":
+        pages = options.get("pages", [])
+        overwrite = bool(options.get("overwrite", False))
+        counts = {"downloaded": 0, "skipped": 0, "failed": 0}
+        total = len(pages)
+        if total == 0:
+            return OperationResult(
+                success=False,
+                message="オフライン保存するレベルを選択してください。",
+                details={"html": counts, "extracted": 0, "images": None},
+            )
+
+        html_paths = []
+        seen_paths = set()
+        for index, page in enumerate(pages, 1):
+            context.check_cancelled()
+            if (
+                not isinstance(page, dict)
+                or not page.get("title")
+                or not is_supported_level_list_url(page.get("url"))
+            ):
+                raise ValueError("レベルリストに不正なページが含まれています。")
+            existing = find_existing_html(page)
+            context.progress(index - 1, total, f"HTML取得: {page['title']}")
+            path = download_page(
+                page,
+                overwrite=overwrite,
+                delay=0,
+                show_detail=False,
+                context=context,
+            )
+            if path is None:
+                counts["failed"] += 1
+                context.log(f"HTML取得失敗: {page['title']}", "error")
+                continue
+            if existing is not None and not overwrite:
+                counts["skipped"] += 1
+                context.log(f"取得済みHTMLを使用: {path.name}")
+            else:
+                counts["downloaded"] += 1
+                context.log(f"HTML保存完了: {path.name}")
+            resolved_path = Path(path).resolve()
+            if resolved_path not in seen_paths:
+                seen_paths.add(resolved_path)
+                html_paths.append(resolved_path)
+            context.progress(index, total, f"HTML取得: {page['title']}")
+
+        context.check_cancelled()
+        if not html_paths:
+            return OperationResult(
+                success=False,
+                message="利用できるHTMLがありません。HTML取得に成功したページがないため抽出を行いませんでした。",
+                details={"html": counts, "extracted": 0, "images": None},
+            )
+
+        context.log(f"選択したHTML {len(html_paths)}件からLevel情報を抽出します。")
+        extracted_rows = extract_levels(
+            html_files=html_paths,
+            merge_existing=True,
+            interactive=False,
+            context=context,
+        )
+        if extracted_rows is None:
+            return OperationResult(
+                success=False,
+                message="HTMLは保存されましたが、Level情報をTXTへ抽出できませんでした。",
+                details={"html": counts, "extracted": 0, "images": None},
+            )
+
+        context.check_cancelled()
+        context.log("同じHTMLだけを対象に画像を抽出します。")
+        image_counts = download_images(
+            html_files=html_paths,
+            context=context,
+            return_details=True,
+        )
+        success = counts["failed"] == 0 and image_counts["failed"] == 0
+        message = (
+            f"Level情報のオフライン保存完了: HTML新規 {counts['downloaded']}件、"
+            f"取得済み {counts['skipped']}件、TXT抽出 {len(extracted_rows)}件、"
+            f"画像保存 {image_counts['downloaded']}件"
+        )
+        if counts["failed"] or image_counts["failed"]:
+            message += (
+                f"、HTML取得失敗 {counts['failed']}件"
+                f"、画像取得失敗 {image_counts['failed']}件"
+            )
+        return OperationResult(
+            success=success,
+            message=message,
+            details={
+                "html": counts,
+                "extracted": len(extracted_rows),
+                "images": image_counts,
+            },
         )
 
     raise ValueError(f"未対応の保守タスクです: {task_name}")

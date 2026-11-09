@@ -2405,6 +2405,8 @@ def extract_levels(
     summary_csv=SUMMARY_CSV,
     interactive=False,
     context=None,
+    html_files=None,
+    merge_existing=False,
 ):
     """
     downloaded_fandom_html内のHTMLを
@@ -2434,7 +2436,7 @@ def extract_levels(
     # HTMLフォルダ確認
     # ========================================================
 
-    if not html_dir.exists():
+    if html_files is None and not html_dir.exists():
         log()
         log("❌ HTMLフォルダが存在しません。")
         log(f"  {html_dir}")
@@ -2456,8 +2458,8 @@ def extract_levels(
     # HTML一覧
     # ========================================================
 
-    html_files = sorted(
-        [
+    if html_files is None:
+        html_files = [
             path
             for path in html_dir.iterdir()
             if (
@@ -2468,9 +2470,17 @@ def extract_levels(
                     ".htm"
                 )
             )
-        ],
-        key=lambda path:
-            path.name.casefold()
+        ]
+    else:
+        html_files = [
+            Path(path)
+            for path in html_files
+            if Path(path).is_file()
+            and Path(path).suffix.lower() in (".html", ".htm")
+        ]
+    html_files = sorted(
+        html_files,
+        key=lambda path: path.name.casefold()
     )
 
     total = len(
@@ -2505,6 +2515,17 @@ def extract_levels(
         staging_dir.mkdir()
         summary_staging_path = temp_dir / "summary.csv"
         combined_staging_path = temp_dir / "combined.txt"
+        existing_rows = []
+        if merge_existing:
+            for existing_txt in output_dir.glob("*.txt"):
+                shutil.copy2(existing_txt, staging_dir / existing_txt.name)
+            if summary_csv.is_file():
+                with summary_csv.open(
+                    "r",
+                    encoding="utf-8-sig",
+                    newline="",
+                ) as summary_file:
+                    existing_rows = list(csv.DictReader(summary_file))
 
         for index, html_path in enumerate(html_files, 1):
             if context:
@@ -2533,6 +2554,20 @@ def extract_levels(
                     log(message, "error")
                 else:
                     log(message)
+
+        if merge_existing and existing_rows:
+            url_key = "URL"
+            code_key = CSV_HEADERS[0]
+            merged_rows = {}
+            for row in existing_rows:
+                key = row.get(url_key) or row.get(code_key)
+                if key:
+                    merged_rows[key] = row
+            for row in rows:
+                key = row.get(url_key) or row.get(code_key)
+                if key:
+                    merged_rows[key] = row
+            rows = list(merged_rows.values())
 
         if context:
             context.check_cancelled()

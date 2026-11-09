@@ -104,10 +104,19 @@ class OnlineWikiGuiTests(unittest.TestCase):
         self.assertIn("switchTab('data-tools')", gui_app.HTML_TEMPLATE)
         self.assertIn('id="level-list-language"', gui_app.HTML_TEMPLATE)
         self.assertIn('id="level-list-grid"', gui_app.HTML_TEMPLATE)
+        self.assertIn('class="flex flex-col flex-1 min-h-0 overflow-y-auto border-y', gui_app.HTML_TEMPLATE)
+        self.assertIn('style="display: flex; flex-direction: column;', gui_app.HTML_TEMPLATE)
+        self.assertIn('tile.style.cssText = "box-sizing: border-box; flex: 0 0 auto; width: 100%;"', gui_app.HTML_TEMPLATE)
+        self.assertIn("tile.oncontextmenu = event =>", gui_app.HTML_TEMPLATE)
+        self.assertIn("deselectLevelListPage(page)", gui_app.HTML_TEMPLATE)
+        self.assertIn("selected ? \"bg-[#e7dfca] text-[#5b5343]\"", gui_app.HTML_TEMPLATE)
+        self.assertIn("selected ? \"border-[#713b09] bg-[#91520f] text-white shadow-sm\"", gui_app.HTML_TEMPLATE)
         self.assertIn('id="level-list-clear-selection"', gui_app.HTML_TEMPLATE)
         self.assertIn("event.shiftKey", gui_app.HTML_TEMPLATE)
         self.assertIn("pywebview.api.get_level_list_pages(language)", gui_app.HTML_TEMPLATE)
-        self.assertIn("pywebview.api.start_level_list_html_download", gui_app.HTML_TEMPLATE)
+        self.assertIn("pywebview.api.start_level_list_offline_save", gui_app.HTML_TEMPLATE)
+        self.assertIn("onclick=\"runLevelListOfflineSave()\"", gui_app.HTML_TEMPLATE)
+        self.assertIn(">Level情報のオフライン保存</button>", gui_app.HTML_TEMPLATE)
 
     @patch("gui_app.get_level_list_languages", return_value=["JP", "EN"])
     def test_level_list_languages_are_exposed_to_the_gui(self, get_languages):
@@ -124,8 +133,8 @@ class OnlineWikiGuiTests(unittest.TestCase):
         load_pages.assert_called_once_with("JP")
 
     @patch.object(gui_app.BackroomsAPI, "run_maintenance_task")
-    def test_level_list_download_rejects_external_pages_before_starting(self, run_task):
-        result = self.api.start_level_list_html_download(
+    def test_level_list_offline_save_rejects_external_pages_before_starting(self, run_task):
+        result = self.api.start_level_list_offline_save(
             [{"title": "External", "url": "https://example.com/wiki/Page"}]
         )
 
@@ -133,18 +142,18 @@ class OnlineWikiGuiTests(unittest.TestCase):
         run_task.assert_not_called()
 
     @patch.object(gui_app.BackroomsAPI, "run_maintenance_task")
-    def test_level_list_download_starts_with_selected_pages_and_overwrite(self, run_task):
+    def test_level_list_offline_save_starts_with_selected_pages_and_overwrite(self, run_task):
         run_task.return_value = {"status": "started"}
         page = {
             "title": "Level 0",
             "url": "https://backrooms.fandom.com/wiki/Level_0",
         }
 
-        result = self.api.start_level_list_html_download([page], overwrite=True)
+        result = self.api.start_level_list_offline_save([page], overwrite=True)
 
         self.assertEqual(result["status"], "started")
         run_task.assert_called_once_with(
-            "download_level_list_html",
+            "save_level_list_offline",
             options={"pages": [page], "overwrite": True},
         )
 

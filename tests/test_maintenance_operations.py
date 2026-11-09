@@ -1,3 +1,4 @@
+import csv
 import tempfile
 import threading
 import unittest
@@ -6,6 +7,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from modules import downloader
+from modules import extractor
+from modules import image_downloader
 from modules import network
 from modules.extractor import extract_levels
 from modules.operation_context import OperationCancelled, OperationContext
@@ -97,6 +100,154 @@ class MaintenanceOperationTests(unittest.TestCase):
             {"downloaded": 1, "skipped": 1, "failed": 1},
         )
         self.assertEqual(download.call_count, 3)
+
+    def test_offline_save_extracts_text_and_images_from_only_selected_html(self):
+        pages = [
+            {"title": "Level 0", "url": "https://backrooms.fandom.com/wiki/Level_0"},
+            {"title": "Level 1", "url": "https://backrooms.fandom.com/wiki/Level_1"},
+        ]
+        html_paths = [Path("Level_0.html"), Path("Level_1.html")]
+
+        with (
+            patch(
+                "modules.operations.find_existing_html",
+                side_effect=[None, Path("Level_1.html")],
+            ),
+            patch(
+                "modules.operations.download_page",
+                side_effect=html_paths,
+            ),
+            patch(
+                "modules.operations.extract_levels",
+                return_value=[{"URL": pages[0]["url"]}],
+            ) as extract,
+            patch(
+                "modules.operations.download_images",
+                return_value={"downloaded": 2, "skipped": 0, "failed": 0},
+            ) as images,
+        ):
+            result = run_maintenance_operation(
+                "save_level_list_offline",
+                options={"pages": pages, "overwrite": False},
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["html"], {"downloaded": 1, "skipped": 1, "failed": 0})
+        self.assertEqual(result.details["extracted"], 1)
+        self.assertEqual(result.details["images"]["downloaded"], 2)
+        extract.assert_called_once()
+        self.assertEqual(
+            extract.call_args.kwargs["html_files"],
+            [path.resolve() for path in html_paths],
+        )
+        self.assertTrue(extract.call_args.kwargs["merge_existing"])
+        images.assert_called_once_with(
+            html_files=[path.resolve() for path in html_paths],
+            context=unittest.mock.ANY,
+            return_details=True,
+        )
+
+    def test_offline_save_does_not_extract_when_no_html_download_succeeds(self):
+        page = {"title": "Level 0", "url": "https://backrooms.fandom.com/wiki/Level_0"}
+        with (
+            patch("modules.operations.find_existing_html", return_value=None),
+            patch("modules.operations.download_page", return_value=None),
+            patch("modules.operations.extract_levels") as extract,
+            patch("modules.operations.download_images") as images,
+        ):
+            result = run_maintenance_operation(
+                "save_level_list_offline",
+                options={"pages": [page]},
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.details["html"]["failed"], 1)
+        extract.assert_not_called()
+        images.assert_not_called()
+
+    def test_image_extraction_uses_only_explicit_html_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            selected = root / "Level_0.html"
+            unrelated = root / "Level_1.html"
+            selected.write_text(
+                '<div class="mw-parser-output"><img src="https://static.wikia.nocookie.net/backrooms/images/a/ab/Test.png/revision/latest"></div>',
+                encoding="utf-8",
+            )
+            unrelated.write_text(
+                '<div class="mw-parser-output"><img src="https://static.wikia.nocookie.net/backrooms/images/a/ab/Other.png/revision/latest"></div>',
+                encoding="utf-8",
+            )
+            image_dir = root / "images"
+            response = SimpleNamespace(status_code=200, content=b"image")
+
+            with (
+                patch.object(image_downloader, "OUTPUT_IMG_DIR", str(image_dir)),
+                patch.object(image_downloader, "load_meta_titles", return_value={}),
+                patch.object(image_downloader.requests, "get", return_value=response) as get,
+                patch.object(image_downloader.time, "sleep"),
+            ):
+                result = image_downloader.download_images(
+                    html_files=[selected],
+                    context=OperationContext(),
+                    return_details=True,
+                )
+
+            self.assertEqual(result["downloaded"], 1)
+            self.assertEqual(get.call_count, 1)
+            self.assertEqual(
+                [path.name for path in image_dir.iterdir()],
+                ["Level_0 - image1.png"],
+            )
+
+    def test_selected_html_extraction_preserves_unselected_txt_and_summary_rows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            html_dir = root / "html"
+            html_dir.mkdir()
+            selected_html = html_dir / "Level_0.html"
+            selected_html.write_text("<html></html>", encoding="utf-8")
+            output_dir = root / "levels"
+            output_dir.mkdir()
+            (output_dir / "Level 1.txt").write_text("unselected text", encoding="utf-8")
+            summary_path = root / "summary.csv"
+            combined_path = root / "combined.txt"
+            old_row = {key: "" for key in extractor.CSV_HEADERS}
+            old_row["URL"] = "https://backrooms.fandom.com/wiki/Level_1"
+            extractor.save_summary_csv([old_row], summary_path)
+            new_row = {key: "" for key in extractor.CSV_HEADERS}
+            new_row["URL"] = "https://backrooms.fandom.com/wiki/Level_0"
+
+            def write_selected_output(_html, staging_dir, _index, context=None):
+                (staging_dir / "Level 0.txt").write_text("selected text", encoding="utf-8")
+                return new_row
+
+            with (
+                patch.object(extractor, "COMBINED_TXT", combined_path),
+                patch.object(extractor, "process_html_file", side_effect=write_selected_output),
+            ):
+                rows = extractor.extract_levels(
+                    html_dir=html_dir,
+                    output_dir=output_dir,
+                    summary_csv=summary_path,
+                    html_files=[selected_html],
+                    merge_existing=True,
+                )
+
+            self.assertEqual(len(rows), 2)
+            self.assertEqual((output_dir / "Level 1.txt").read_text(encoding="utf-8"), "unselected text")
+            self.assertEqual((output_dir / "Level 0.txt").read_text(encoding="utf-8"), "selected text")
+            with summary_path.open(encoding="utf-8-sig", newline="") as file:
+                urls = {row["URL"] for row in csv.DictReader(file)}
+            self.assertEqual(
+                urls,
+                {
+                    "https://backrooms.fandom.com/wiki/Level_0",
+                    "https://backrooms.fandom.com/wiki/Level_1",
+                },
+            )
+            self.assertIn("selected text", combined_path.read_text(encoding="utf-8-sig"))
+            self.assertIn("unselected text", combined_path.read_text(encoding="utf-8-sig"))
 
     def test_html_download_cancellation_before_replace_preserves_existing_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:

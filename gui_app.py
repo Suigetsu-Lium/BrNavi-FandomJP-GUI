@@ -631,9 +631,9 @@ class BackroomsAPI:
         except (OSError, ValueError) as error:
             return {"error": str(error)}
 
-    def start_level_list_html_download(self, pages, overwrite=False):
+    def start_level_list_offline_save(self, pages, overwrite=False):
         if not isinstance(pages, list) or not pages:
-            return {"status": "error", "message": "HTML取得するレベルを選択してください。"}
+            return {"status": "error", "message": "オフライン保存するレベルを選択してください。"}
         validated_pages = []
         for page in pages:
             if (
@@ -644,7 +644,7 @@ class BackroomsAPI:
                 return {"status": "error", "message": "選択リストに不正なページが含まれています。"}
             validated_pages.append(dict(page))
         return self.run_maintenance_task(
-            "download_level_list_html",
+            "save_level_list_offline",
             options={
                 "pages": validated_pages,
                 "overwrite": bool(overwrite),
@@ -846,7 +846,7 @@ class BackroomsAPI:
             return
 
         task_labels = {
-            "download_level_list_html": "レベルリストからHTML取得",
+            "save_level_list_offline": "Level情報のオフライン保存",
             "update_master": "既存データベース更新",
             "extract_info": "情報データベース更新",
             "update_network": "ネットワーク更新",
@@ -1352,20 +1352,19 @@ HTML_TEMPLATE = r"""
             <span id="level-list-selection-count" aria-live="polite">0件選択中</span>
           </div>
           <div class="flex flex-wrap gap-2">
-            <button id="level-list-download-button" onclick="downloadSelectedLevelListPages()" disabled
-              class="px-3 py-1.5 rounded bg-[#b45309] text-white text-xs font-semibold disabled:opacity-40">選択項目のHTMLを取得</button>
-            <button onclick="runLevelListExtraction()"
-              class="px-3 py-1.5 rounded bg-[#91520f] text-white text-xs font-semibold">取得済みHTMLからデータ抽出</button>
+            <button id="level-list-download-button" onclick="runLevelListOfflineSave()" disabled
+              class="px-3 py-1.5 rounded bg-[#b45309] text-white text-xs font-semibold disabled:opacity-40">Level情報のオフライン保存</button>
             <button id="level-list-clear-selection" onclick="clearLevelListSelection()" disabled
               class="px-3 py-1.5 rounded border border-[#d6c79a] text-xs disabled:opacity-40">選択解除</button>
             <button id="level-list-cancel-button" onclick="cancelMaintenanceTask()" disabled
               class="px-3 py-1.5 rounded bg-red-700 text-white text-xs disabled:opacity-40">処理停止</button>
           </div>
         </div>
-        <div id="level-list-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2 flex-1 min-h-0 overflow-y-auto p-1 select-none"
+        <div id="level-list-grid" class="flex flex-col flex-1 min-h-0 overflow-y-auto border-y border-[#e2d8b5] select-none"
+          style="display: flex; flex-direction: column; flex: 1 1 0%; min-height: 0; overflow-y: auto;"
           aria-label="レベルリスト"></div>
         <div class="border-t border-[#e2d8b5] pt-2 space-y-2">
-          <div id="level-list-task-status" class="text-xs text-gray-600" role="status" aria-live="polite">HTML取得またはデータ抽出を選択してください。</div>
+          <div id="level-list-task-status" class="text-xs text-gray-600" role="status" aria-live="polite">対象を選択して「Level情報のオフライン保存」を実行してください。</div>
           <div class="flex items-center gap-2">
             <progress id="level-list-progress" max="100" value="0" class="hidden flex-1 h-2"></progress>
             <span id="level-list-progress-label" class="text-[11px] text-gray-500">待機中</span>
@@ -1715,14 +1714,19 @@ HTML_TEMPLATE = r"""
       visibleLevelListPages.forEach(page => {
         const selected = selectedLevelPages.has(page.url);
         const tile = document.createElement('div');
-        tile.className = "relative min-h-20 p-3 pr-9 rounded border cursor-pointer select-none transition " +
-          (selected ? "border-[#b45309] bg-[#fff4d6] ring-1 ring-[#b45309]" : "border-[#dfd3a8] bg-white hover:border-[#b45309]");
+        tile.className = "flex items-center gap-3 min-h-12 px-3 py-2 border-b border-[#e8dfc7] cursor-pointer select-none transition " +
+          (selected ? "bg-[#e7dfca] text-[#5b5343]" : "bg-white text-gray-800 hover:bg-[#fffaf0]");
+        tile.style.cssText = "box-sizing: border-box; flex: 0 0 auto; width: 100%;";
         tile.dataset.url = page.url;
         tile.setAttribute("role", "checkbox");
         tile.setAttribute("aria-checked", String(selected));
         tile.setAttribute("aria-label", `${page.title}をHTML取得対象に選択`);
         tile.tabIndex = 0;
         tile.onclick = event => selectLevelListTile(page, event.shiftKey);
+        tile.oncontextmenu = event => {
+          event.preventDefault();
+          deselectLevelListPage(page);
+        };
         tile.onkeydown = event => {
           if (event.key === "Enter" || event.key === " ") {
             event.preventDefault();
@@ -1730,21 +1734,24 @@ HTML_TEMPLATE = r"""
           }
         };
         const mark = document.createElement('span');
-        mark.className = "absolute right-3 top-2 text-base font-bold " +
-          (selected ? "text-[#b45309]" : "text-transparent");
+        mark.className = "flex h-5 w-5 shrink-0 items-center justify-center rounded border-2 text-xs font-black transition " +
+          (selected ? "border-[#713b09] bg-[#91520f] text-white shadow-sm" : "border-[#a99a78] bg-white text-transparent");
         mark.textContent = "✓";
+        const content = document.createElement('div');
+        content.className = "flex min-w-0 flex-1 flex-wrap items-center justify-between gap-x-4 gap-y-1";
         const title = document.createElement('div');
-        title.className = "font-semibold text-xs text-gray-800 break-words";
+        title.className = "min-w-0 flex-1 break-words text-xs font-semibold";
         title.textContent = page.title;
         const details = document.createElement('div');
-        details.className = "mt-2 flex flex-wrap gap-1";
+        details.className = "flex shrink-0 flex-wrap gap-1";
         [page.category_label, page.language].filter(Boolean).forEach(value => {
           const tag = document.createElement('span');
-          tag.className = "px-1.5 py-0.5 rounded bg-[#f5eed3] text-[10px] text-gray-600";
+          tag.className = "rounded bg-[#f5eed3] px-1.5 py-0.5 text-[10px] text-gray-600";
           tag.textContent = value;
           details.appendChild(tag);
         });
-        tile.append(mark, title, details);
+        content.append(title, details);
+        tile.append(mark, content);
         grid.appendChild(tile);
       });
       document.getElementById('level-list-total').textContent =
@@ -1773,6 +1780,12 @@ HTML_TEMPLATE = r"""
       updateLevelListSelectionControls();
     }
 
+    function deselectLevelListPage(page) {
+      if (!selectedLevelPages.delete(page.url)) return;
+      if (levelListAnchorUrl === page.url) levelListAnchorUrl = null;
+      updateLevelListSelectionControls();
+    }
+
     function updateLevelListSelectionControls() {
       const count = selectedLevelPages.size;
       document.getElementById('level-list-selection-count').textContent = `${count}件選択中`;
@@ -1782,13 +1795,19 @@ HTML_TEMPLATE = r"""
       document.querySelectorAll('#level-list-grid [role="checkbox"]').forEach(tile => {
         const selected = selectedLevelPages.has(tile.dataset.url);
         tile.setAttribute("aria-checked", String(selected));
-        tile.classList.toggle("border-[#b45309]", selected);
-        tile.classList.toggle("bg-[#fff4d6]", selected);
-        tile.classList.toggle("ring-1", selected);
-        tile.classList.toggle("ring-[#b45309]", selected);
-        const mark = tile.querySelector("span.absolute");
+        tile.classList.toggle("bg-[#e7dfca]", selected);
+        tile.classList.toggle("text-[#5b5343]", selected);
+        tile.classList.toggle("bg-white", !selected);
+        tile.classList.toggle("text-gray-800", !selected);
+        tile.classList.toggle("hover:bg-[#fffaf0]", !selected);
+        const mark = tile.querySelector("span");
         if (mark) {
-          mark.classList.toggle("text-[#b45309]", selected);
+          mark.classList.toggle("border-[#713b09]", selected);
+          mark.classList.toggle("bg-[#91520f]", selected);
+          mark.classList.toggle("text-white", selected);
+          mark.classList.toggle("shadow-sm", selected);
+          mark.classList.toggle("border-[#a99a78]", !selected);
+          mark.classList.toggle("bg-white", !selected);
           mark.classList.toggle("text-transparent", !selected);
         }
       });
@@ -1817,35 +1836,28 @@ HTML_TEMPLATE = r"""
       });
     }
 
-    async function downloadSelectedLevelListPages() {
+    async function runLevelListOfflineSave() {
       if (levelListTaskBusy || selectedLevelPages.size === 0) return;
       const pages = Array.from(selectedLevelPages.values());
       setLevelListTaskBusy(true);
       document.getElementById('level-list-log').textContent = "";
       document.getElementById('level-list-task-status').textContent =
-        `${pages.length}件のHTML取得を開始しています...`;
+        `選択した${pages.length}件のLevel情報をオフライン保存しています...`;
       try {
-        const result = await pywebview.api.start_level_list_html_download(
+        const result = await pywebview.api.start_level_list_offline_save(
           pages,
           document.getElementById('level-list-overwrite').checked
         );
         if (result.status !== "started") {
           setLevelListTaskBusy(false);
           document.getElementById('level-list-task-status').textContent =
-            result.message || "HTML取得を開始できませんでした。";
+            result.message || "オフライン保存を開始できませんでした。";
         }
       } catch (error) {
         setLevelListTaskBusy(false);
         document.getElementById('level-list-task-status').textContent =
-          "HTML取得開始エラー: " + error;
+          "オフライン保存開始エラー: " + error;
       }
-    }
-
-    function runLevelListExtraction() {
-      if (levelListTaskBusy) return;
-      document.getElementById('level-list-log').textContent = "";
-      setLevelListTaskBusy(true);
-      runTask('extract_info');
     }
 
     function appendLevelListLog(entry) {

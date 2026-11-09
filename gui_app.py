@@ -1362,7 +1362,7 @@ HTML_TEMPLATE = r"""
               class="px-3 py-1.5 rounded bg-red-700 text-white text-xs disabled:opacity-40">処理停止</button>
           </div>
         </div>
-        <div id="level-list-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2 flex-1 min-h-0 overflow-y-auto p-1 select-none"
+        <div id="level-list-grid" class="flex flex-col flex-1 min-h-0 overflow-y-auto border-y border-[#e2d8b5] select-none"
           aria-label="レベルリスト"></div>
         <div class="border-t border-[#e2d8b5] pt-2 space-y-2">
           <div id="level-list-task-status" class="text-xs text-gray-600" role="status" aria-live="polite">HTML取得またはデータ抽出を選択してください。</div>
@@ -1715,14 +1715,18 @@ HTML_TEMPLATE = r"""
       visibleLevelListPages.forEach(page => {
         const selected = selectedLevelPages.has(page.url);
         const tile = document.createElement('div');
-        tile.className = "relative min-h-20 p-3 pr-9 rounded border cursor-pointer select-none transition " +
-          (selected ? "border-[#b45309] bg-[#fff4d6] ring-1 ring-[#b45309]" : "border-[#dfd3a8] bg-white hover:border-[#b45309]");
+        tile.className = "flex items-center gap-3 min-h-12 px-3 py-2 border-b border-[#e8dfc7] cursor-pointer select-none transition " +
+          (selected ? "bg-[#e7dfca] text-[#5b5343]" : "bg-white text-gray-800 hover:bg-[#fffaf0]");
         tile.dataset.url = page.url;
         tile.setAttribute("role", "checkbox");
         tile.setAttribute("aria-checked", String(selected));
         tile.setAttribute("aria-label", `${page.title}をHTML取得対象に選択`);
         tile.tabIndex = 0;
         tile.onclick = event => selectLevelListTile(page, event.shiftKey);
+        tile.oncontextmenu = event => {
+          event.preventDefault();
+          deselectLevelListPage(page);
+        };
         tile.onkeydown = event => {
           if (event.key === "Enter" || event.key === " ") {
             event.preventDefault();
@@ -1730,21 +1734,24 @@ HTML_TEMPLATE = r"""
           }
         };
         const mark = document.createElement('span');
-        mark.className = "absolute right-3 top-2 text-base font-bold " +
-          (selected ? "text-[#b45309]" : "text-transparent");
+        mark.className = "flex h-5 w-5 shrink-0 items-center justify-center rounded border-2 text-xs font-black transition " +
+          (selected ? "border-[#713b09] bg-[#91520f] text-white shadow-sm" : "border-[#a99a78] bg-white text-transparent");
         mark.textContent = "✓";
+        const content = document.createElement('div');
+        content.className = "flex min-w-0 flex-1 flex-wrap items-center justify-between gap-x-4 gap-y-1";
         const title = document.createElement('div');
-        title.className = "font-semibold text-xs text-gray-800 break-words";
+        title.className = "min-w-0 flex-1 break-words text-xs font-semibold";
         title.textContent = page.title;
         const details = document.createElement('div');
-        details.className = "mt-2 flex flex-wrap gap-1";
+        details.className = "flex shrink-0 flex-wrap gap-1";
         [page.category_label, page.language].filter(Boolean).forEach(value => {
           const tag = document.createElement('span');
-          tag.className = "px-1.5 py-0.5 rounded bg-[#f5eed3] text-[10px] text-gray-600";
+          tag.className = "rounded bg-[#f5eed3] px-1.5 py-0.5 text-[10px] text-gray-600";
           tag.textContent = value;
           details.appendChild(tag);
         });
-        tile.append(mark, title, details);
+        content.append(title, details);
+        tile.append(mark, content);
         grid.appendChild(tile);
       });
       document.getElementById('level-list-total').textContent =
@@ -1773,6 +1780,12 @@ HTML_TEMPLATE = r"""
       updateLevelListSelectionControls();
     }
 
+    function deselectLevelListPage(page) {
+      if (!selectedLevelPages.delete(page.url)) return;
+      if (levelListAnchorUrl === page.url) levelListAnchorUrl = null;
+      updateLevelListSelectionControls();
+    }
+
     function updateLevelListSelectionControls() {
       const count = selectedLevelPages.size;
       document.getElementById('level-list-selection-count').textContent = `${count}件選択中`;
@@ -1782,13 +1795,19 @@ HTML_TEMPLATE = r"""
       document.querySelectorAll('#level-list-grid [role="checkbox"]').forEach(tile => {
         const selected = selectedLevelPages.has(tile.dataset.url);
         tile.setAttribute("aria-checked", String(selected));
-        tile.classList.toggle("border-[#b45309]", selected);
-        tile.classList.toggle("bg-[#fff4d6]", selected);
-        tile.classList.toggle("ring-1", selected);
-        tile.classList.toggle("ring-[#b45309]", selected);
-        const mark = tile.querySelector("span.absolute");
+        tile.classList.toggle("bg-[#e7dfca]", selected);
+        tile.classList.toggle("text-[#5b5343]", selected);
+        tile.classList.toggle("bg-white", !selected);
+        tile.classList.toggle("text-gray-800", !selected);
+        tile.classList.toggle("hover:bg-[#fffaf0]", !selected);
+        const mark = tile.querySelector("span");
         if (mark) {
-          mark.classList.toggle("text-[#b45309]", selected);
+          mark.classList.toggle("border-[#713b09]", selected);
+          mark.classList.toggle("bg-[#91520f]", selected);
+          mark.classList.toggle("text-white", selected);
+          mark.classList.toggle("shadow-sm", selected);
+          mark.classList.toggle("border-[#a99a78]", !selected);
+          mark.classList.toggle("bg-white", !selected);
           mark.classList.toggle("text-transparent", !selected);
         }
       });

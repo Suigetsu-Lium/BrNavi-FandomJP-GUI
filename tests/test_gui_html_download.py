@@ -92,6 +92,54 @@ class OnlineWikiGuiTests(unittest.TestCase):
         self.assertNotIn("function appendLog", gui_app.HTML_TEMPLATE)
         self.assertNotIn("open_online_wiki_browser", gui_app.HTML_TEMPLATE)
 
+    def test_level_list_data_tools_tab_uses_level_list_tiles_not_search_results(self):
+        self.assertIn("switchTab('data-tools')", gui_app.HTML_TEMPLATE)
+        self.assertIn('id="level-list-language"', gui_app.HTML_TEMPLATE)
+        self.assertIn('id="level-list-grid"', gui_app.HTML_TEMPLATE)
+        self.assertIn('id="level-list-clear-selection"', gui_app.HTML_TEMPLATE)
+        self.assertIn("event.shiftKey", gui_app.HTML_TEMPLATE)
+        self.assertIn("pywebview.api.get_level_list_pages(language)", gui_app.HTML_TEMPLATE)
+        self.assertIn("pywebview.api.start_level_list_html_download", gui_app.HTML_TEMPLATE)
+
+    @patch("gui_app.get_level_list_languages", return_value=["JP", "EN"])
+    def test_level_list_languages_are_exposed_to_the_gui(self, get_languages):
+        result = self.api.get_level_list_languages()
+
+        self.assertEqual(result, {"languages": ["JP", "EN"]})
+        get_languages.assert_called_once_with()
+
+    @patch("gui_app.load_level_list_pages", return_value=[{"title": "Level 0"}])
+    def test_level_list_pages_are_loaded_for_the_selected_language(self, load_pages):
+        result = self.api.get_level_list_pages("JP")
+
+        self.assertEqual(result, {"pages": [{"title": "Level 0"}]})
+        load_pages.assert_called_once_with("JP")
+
+    @patch.object(gui_app.BackroomsAPI, "run_maintenance_task")
+    def test_level_list_download_rejects_external_pages_before_starting(self, run_task):
+        result = self.api.start_level_list_html_download(
+            [{"title": "External", "url": "https://example.com/wiki/Page"}]
+        )
+
+        self.assertEqual(result["status"], "error")
+        run_task.assert_not_called()
+
+    @patch.object(gui_app.BackroomsAPI, "run_maintenance_task")
+    def test_level_list_download_starts_with_selected_pages_and_overwrite(self, run_task):
+        run_task.return_value = {"status": "started"}
+        page = {
+            "title": "Level 0",
+            "url": "https://backrooms.fandom.com/wiki/Level_0",
+        }
+
+        result = self.api.start_level_list_html_download([page], overwrite=True)
+
+        self.assertEqual(result["status"], "started")
+        run_task.assert_called_once_with(
+            "download_level_list_html",
+            options={"pages": [page], "overwrite": True},
+        )
+
     def test_maintenance_panel_exposes_service_progress_and_stop_controls(self):
         self.assertIn("maintenance-update-mode", gui_app.HTML_TEMPLATE)
         self.assertIn("maintenance-progress", gui_app.HTML_TEMPLATE)

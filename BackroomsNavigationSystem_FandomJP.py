@@ -19,6 +19,7 @@ if getattr(sys, "frozen", False):
 
 from pathlib import Path
 
+from modules.runtime_paths import get_application_dir
 
 # =============================================================================
 # モジュール
@@ -58,11 +59,7 @@ from modules.update_database import main as run_update_database
 # 基本設定
 # =============================================================================
 
-BASE_DIR = (
-    Path(__file__)
-    .resolve()
-    .parent
-)
+BASE_DIR = get_application_dir()
 
 
 # =============================================================================
@@ -77,6 +74,15 @@ def pause():
     input(
         "\nEnterキーでメニューに戻ります..."
     )
+
+
+def configure_console_encoding():
+    if os.name == "nt" and sys.stdout.isatty():
+        os.system("chcp 65001 > nul")
+
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
 
 
 # =============================================================================
@@ -922,6 +928,8 @@ def main():
 # =============================================================================
 
 if __name__ == "__main__":
+
+    configure_console_encoding()
 
     try:
 

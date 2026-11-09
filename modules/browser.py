@@ -20,6 +20,7 @@ Level Browser Module
 from pathlib import Path
 import os
 
+from modules.runtime_paths import get_application_dir
 
 # =============================================================================
 # ローカルデータベース
@@ -50,7 +51,7 @@ from modules.navigator import (
 # 基本設定
 # =============================================================================
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = get_application_dir()
 
 IMAGE_DIR = BASE_DIR / "downloaded_images"
 

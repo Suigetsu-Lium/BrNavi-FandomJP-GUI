@@ -2,68 +2,97 @@
 chcp 65001 > nul
 setlocal
 
-cd /d "%~dp0"
+for %%I in ("%~dp0.") do set "ROOT=%%~fI"
+pushd "%ROOT%"
+
+set "PYTHON=python"
+if exist "%ROOT%\.venv\Scripts\python.exe" set "PYTHON=%ROOT%\.venv\Scripts\python.exe"
 
 echo ================================================
-echo   Backrooms Navigation System - Build
+echo   BrNavi Fandom JP - GUI / CLI Build
 echo ================================================
 echo.
 
-set DIST_DIR=dist\BackroomsNavigationSystem_FandomJP
+"%PYTHON%" -c "import PyInstaller, webview, groq, curl_cffi, bleach, markdown, pygments"
+if errorlevel 1 goto missing_dependencies
 
-:: 前回のゴミを削除
-if exist "%DIST_DIR%" (
-    echo 前回のビルドフォルダをクリーンアップ中...
-    rd /s /q "%DIST_DIR%"
+for %%D in ("dist\BrNavi-GUI" "dist\BrNavi-CLI") do (
+    if exist "%%~D" rmdir /s /q "%%~D"
+)
+
+echo [1/4] GUIアプリをビルドしています...
+"%PYTHON%" -m PyInstaller --clean --noconfirm --onedir --contents-directory . --windowed --name BrNavi-GUI --distpath "dist\BrNavi-GUI" --workpath "build\pyinstaller-gui" --specpath "build\spec-gui" --paths "%ROOT%" --collect-submodules modules --collect-all webview --collect-all groq --collect-all curl_cffi --collect-all bleach --collect-all markdown --collect-all pygments "gui_app.py"
+if errorlevel 1 goto build_failed
+
+echo.
+echo [2/4] CLIアプリをビルドしています...
+"%PYTHON%" -m PyInstaller --clean --noconfirm --onedir --contents-directory . --console --name BrNavi-CLI --distpath "dist\BrNavi-CLI" --workpath "build\pyinstaller-cli" --specpath "build\spec-cli" --paths "%ROOT%" --collect-submodules modules --collect-all curl_cffi "BackroomsNavigationSystem_FandomJP.py"
+if errorlevel 1 goto build_failed
+
+echo.
+echo [3/4] 配布データを配置しています...
+call :stage_data "dist\BrNavi-GUI\BrNavi-GUI"
+if errorlevel 1 goto staging_failed
+call :stage_data "dist\BrNavi-CLI\BrNavi-CLI"
+if errorlevel 1 goto staging_failed
+
+echo.
+echo [4/4] READMEとライセンスを配置しています...
+for %%T in ("dist\BrNavi-GUI\BrNavi-GUI" "dist\BrNavi-CLI\BrNavi-CLI") do (
+    copy /y "README.md" "%%~T\README.md" > nul
+    if errorlevel 1 goto staging_failed
+    copy /y "LICENSE" "%%~T\LICENSE" > nul
+    if errorlevel 1 goto staging_failed
 )
 
 echo.
-echo [1/3] PyInstallerでビルドしています...
-pyinstaller --clean --noconfirm --onedir --console ^
-    --name BackroomsNavigationSystem_FandomJP ^
-    --contents-directory . ^
-    --paths modules ^
-    --collect-submodules modules ^
-    BackroomsNavigationSystem_FandomJP.py
+echo ビルドが完了しました。
+echo GUI: dist\BrNavi-GUI\BrNavi-GUI\BrNavi-GUI.exe
+echo CLI: dist\BrNavi-CLI\BrNavi-CLI\BrNavi-CLI.exe
+echo.
+echo 各フォルダーをまとめて配布してください。exe単体では起動できません。
+popd
+exit /b 0
 
-if errorlevel 1 (
-    echo.
-    echo ❌ ビルドに失敗しました。
-    pause
-    exit /b 1
+:stage_data
+set "TARGET=%~1"
+for %%D in (parsed_index level_lists index_html downloaded_fandom_html extracted_fandom_levels downloaded_images) do (
+    if exist "%ROOT%\%%D\" (
+        robocopy "%ROOT%\%%D" "%TARGET%\%%D" /E /COPY:DAT /DCOPY:DAT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP > nul
+        if errorlevel 8 exit /b 1
+    ) else (
+        if not exist "%TARGET%\%%D" mkdir "%TARGET%\%%D"
+        if errorlevel 1 exit /b 1
+    )
 )
 
-echo.
-echo [2/3] 必要なデータフォルダを配置しています...
+if not exist "%TARGET%\database\ai" mkdir "%TARGET%\database\ai"
+if errorlevel 1 exit /b 1
 
-if exist "parsed_index" (
-    echo   - parsed_index をコピー中...
-    xcopy /E /I /Y "parsed_index" "%DIST_DIR%\parsed_index\" > nul
-) else (
-    mkdir "%DIST_DIR%\parsed_index" 2>nul
+for %%F in (wiki_list.txt extracted_fandom_levels_summary.csv backrooms_nodes.csv backrooms_edges.csv) do (
+    if exist "%ROOT%\%%F" (
+        copy /y "%ROOT%\%%F" "%TARGET%\%%F" > nul
+        if errorlevel 1 exit /b 1
+    )
 )
+exit /b 0
 
-if exist "level_lists" (
-    echo   - level_lists をコピー中...
-    xcopy /E /I /Y "level_lists" "%DIST_DIR%\level_lists\" > nul
-) else (
-    mkdir "%DIST_DIR%\level_lists" 2>nul
-)
-
-if exist "index_html" (
-    echo   - index_html をコピー中...
-    xcopy /E /I /Y "index_html" "%DIST_DIR%\index_html\" > nul
-) else (
-    mkdir "%DIST_DIR%\index_html" 2>nul
-)
-
-if not exist "%DIST_DIR%\data" mkdir "%DIST_DIR%\data" 2>nul
-if not exist "%DIST_DIR%\extracted_fandom_levels" mkdir "%DIST_DIR%\extracted_fandom_levels" 2>nul
-
+:missing_dependencies
 echo.
-echo [3/3] ビルドが正常に完了しました！
+echo 必要な依存パッケージがありません。
+echo Python環境で次を実行してから再試行してください:
+echo   python -m pip install -r requirements.txt
+popd
+exit /b 1
+
+:build_failed
 echo.
-echo 出力先:
-echo %DIST_DIR%\
+echo PyInstallerのビルドに失敗しました。上のエラーを確認してください。
+popd
+exit /b 1
+
+:staging_failed
 echo.
-pause
+echo 配布データの配置に失敗しました。ディスク容量と書き込み権限を確認してください。
+popd
+exit /b 1

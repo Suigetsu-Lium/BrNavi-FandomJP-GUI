@@ -64,6 +64,7 @@ from urllib.parse import (
 )
 
 from bs4 import BeautifulSoup
+from modules.runtime_paths import get_application_dir
 
 
 # =============================================================================
@@ -71,11 +72,7 @@ from bs4 import BeautifulSoup
 # =============================================================================
 
 # modules/ の1つ上 = BrNavi-FandomJP
-BASE_DIR = os.path.dirname(
-    os.path.dirname(
-        os.path.abspath(__file__)
-    )
-)
+BASE_DIR = str(get_application_dir())
 
 INDEX_HTML_DIR = os.path.join(
     BASE_DIR,

@@ -14,13 +14,14 @@ from urllib.parse import unquote
 from bs4 import BeautifulSoup
 import requests
 
+from modules.runtime_paths import get_application_dir
 
 # =============================================================================
 # 基本パス
 # =============================================================================
 
 # modules/ の1つ上 = BrNavi-FandomJP
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BASE_DIR = str(get_application_dir())
 
 LIST_FILE_PATH = os.path.join(
     BASE_DIR,

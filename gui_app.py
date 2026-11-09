@@ -4,6 +4,7 @@ import os
 import json
 import base64
 import re
+import sys
 import threading
 import warnings
 from pathlib import Path
@@ -28,6 +29,7 @@ from modules.online_wiki import fetch_page as fetch_online_wiki_page
 from modules.online_wiki import is_supported_wiki_url
 from modules.online_wiki import save_page as save_online_wiki_page
 from modules.online_wiki import search_pages as search_online_wiki_pages
+from modules.runtime_paths import get_application_dir
 
 # AI Assistant（Groq / ローカルWiki検索）
 try:
@@ -43,7 +45,7 @@ except Exception as e:
     AI_IMPORT_ERROR = e
     print(f"[AI] モジュールを読み込めません ({type(e).__name__}): {e}")
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = get_application_dir()
 IMAGE_DIR = BASE_DIR / "downloaded_images"
 TEXT_DIR = BASE_DIR / "extracted_fandom_levels"
 
@@ -2038,6 +2040,8 @@ HTML_TEMPLATE = r"""
 
 
 def main():
+    if getattr(sys, "frozen", False):
+        os.chdir(BASE_DIR)
     api = BackroomsAPI()
     html = HTML_TEMPLATE
     if syntax_highlight_css:

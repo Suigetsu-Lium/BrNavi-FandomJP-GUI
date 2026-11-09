@@ -17,6 +17,11 @@ DEFAULT_SETTINGS = {
     "max_context_chars": 26000,
 }
 
+NO_VERIFIED_SOURCE_RESPONSE = (
+    "該当する資料が見つかりませんでした。具体的なLevel番号（例：Level 16 η）を指定して質問するか、"
+    "『HTML取得・データ抽出』タブから対象ページのオフライン保存を行ってください。"
+)
+
 
 class AIAssistant:
     def __init__(self, text_dir, data_dir, model=None):
@@ -109,6 +114,21 @@ class AIAssistant:
         route_context = build_route_context(prompt)
         if route_context:
             context = (context + "\n\n" + "## 経路・場所の補足データ\n" + route_context).strip()
+            if route_context.startswith("ローカル経路グラフ"):
+                sources.append({
+                    "id": f"S{len(sources) + 1}",
+                    "name": "ローカル経路CSV",
+                    "title": "ローカル経路CSV",
+                    "url": "backrooms_nodes.csv / backrooms_edges.csv (local)",
+                    "language": "local",
+                    "source_kind": "route_data",
+                    "file": "backrooms_nodes.csv, backrooms_edges.csv",
+                    "file_modified_at": None,
+                    "retrieved_at": None,
+                    "retrieval_time_basis": "local_route_csv",
+                    "status": "retrieved_from_local_archive",
+                    "excerpt": route_context,
+                })
         system = build_system_prompt(context)
         history = self.store.get_messages(
             cid, limit=int(self.settings["history_messages"]) + 1
@@ -135,6 +155,8 @@ class AIAssistant:
         for source in sources:
             if source["source_kind"] == "japanese_wiki":
                 kind = "日本語Wiki"
+            elif source["source_kind"] == "route_data":
+                kind = "ローカル経路データ"
             elif source["source_kind"] == "web":
                 kind = "一般Web（オンライン取得）"
             elif source.get("status") == "retrieved_live":
@@ -143,18 +165,25 @@ class AIAssistant:
                 kind = "外部情報（ローカル保存の非日本語資料。オンラインで未確認）"
             title = source["title"].replace("|", "\\|").replace("[", "\\[").replace("]", "\\]")
             url = source["url"]
+            url_label = f"[{url}]({url})" if source.get("source_kind") != "route_data" else url
             excerpt = " ".join(source.get("excerpt", "").split())
             if len(excerpt) > 360:
                 excerpt = excerpt[:357].rstrip() + "..."
             retrieved_at = source.get("retrieved_at") or "不明"
-            if source.get("retrieval_time_basis") == "live_api_retrieval_time":
+            if source.get("retrieval_time_basis") == "local_route_csv":
+                lines.append(
+                    f"- [{kind}] {title} ({url_label}) - "
+                    f"参照ファイル: {source.get('file') or url}"
+                )
+            elif source.get("retrieval_time_basis") == "live_api_retrieval_time":
                 date_label = "取得日時"
             else:
                 date_label = "ローカルファイル更新日時"
-            lines.append(
-                f"- [{kind}] {title} ({url}) - "
-                f"{date_label}: {retrieved_at} UTC"
-            )
+            if source.get("retrieval_time_basis") != "local_route_csv":
+                lines.append(
+                    f"- [{kind}] {title} ({url_label}) - "
+                    f"{date_label}: {retrieved_at} UTC"
+                )
             if source.get("page_updated_at"):
                 lines.append(f"  - Wikiページ更新日時: {source['page_updated_at']} UTC")
             if excerpt:
@@ -216,6 +245,33 @@ class AIAssistant:
             cid, prompt, generation["operation"]
         )
         search_status = self.retriever.last_search_status
+        if not sources:
+            answer = NO_VERIFIED_SOURCE_RESPONSE
+            if on_delta:
+                on_delta(answer)
+            saved = self.store.finish_generation(
+                generation["request_id"], answer, []
+            )
+            if not saved:
+                return {
+                    "cancelled": True,
+                    "conversation_id": cid,
+                    "request_id": generation["request_id"],
+                    "operation": generation["operation"],
+                }
+            return {
+                "conversation_id": cid,
+                "request_id": generation["request_id"],
+                "operation": generation["operation"],
+                "message_id": saved["message_id"],
+                "version_number": saved["version_number"],
+                "response": answer,
+                "prompt": prompt,
+                "sources": [],
+                "search_status": search_status,
+                "model": self.llm.model,
+                "finish_reason": "no_verified_sources",
+            }
         try:
             result = await self.llm.stream_chat(messages, on_delta=on_delta)
         except RuntimeError as exc:
@@ -249,8 +305,6 @@ class AIAssistant:
         if sources:
             answer = await self._verify_answer(prompt, answer, sources)
             answer += "\n\n" + self._format_source_references(sources)
-        else:
-            answer += "\n\n## 確度について\n今回、引用できる資料を取得できませんでした。一般知識に基づく回答や推論を含むため、事実確認が必要な点はその旨を示しています。"
         warnings = self._format_search_warnings(search_status)
         if warnings:
             answer += "\n\n## 検索に関する注意\n" + warnings

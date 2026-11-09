@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import ipaddress
+import csv
 import re
 import unicodedata
 from collections import Counter
@@ -53,6 +54,11 @@ EXTERNAL_REQUEST_RE = re.compile(
 RESEARCH_QUERY_RE = re.compile(
     r"とは|について|どんな|何者|設定|生態|危険度|脱出条件|生存難易度|"
     r"存在する|実在|level|entity|backrooms|レベル|エンティティ",
+    re.IGNORECASE,
+)
+LEVEL_METADATA_QUERY_RE = re.compile(
+    r"おすすめ|オススメ|一覧|危険度|安全|危険|理解度|カテゴリ|カテゴリー|分類|条件|絞り|"
+    r"η|イータ|\beta\b|normal_eta|sublevel_eta|anomalous_eta",
     re.IGNORECASE,
 )
 
@@ -153,6 +159,8 @@ class WikiRetriever:
         self._online_page_errors = {"ja": [], "en": []}
         self._indexed_signature = None
         self._documents = []
+        self._metadata_signature = None
+        self._level_metadata = []
         self.last_search_status = {
             "status": "not_searched",
             "indexed_documents": 0,
@@ -217,6 +225,185 @@ class WikiRetriever:
             return load_master_database()
         except (OSError, ValueError):
             return []
+
+    def _load_level_metadata(self):
+        root = self.text_dir.parent
+        paths = [
+            root / "extracted_fandom_levels_summary.csv",
+            root / "parsed_index" / "pages_database_classified.csv",
+            root / "parsed_index" / "pages_master.csv",
+        ]
+        signature = []
+        for path in paths:
+            try:
+                stat = path.stat()
+                signature.append((str(path), stat.st_mtime_ns, stat.st_size))
+            except OSError:
+                signature.append((str(path), None, None))
+        signature = tuple(signature)
+        if signature == self._metadata_signature:
+            return self._level_metadata
+
+        records = {}
+        field_aliases = {
+            "title": ("メタタイトル", "title", "タイトル"),
+            "code": ("階層コード", "level_code", "code"),
+            "danger": ("危険度", "danger", "danger_level"),
+            "danger_search": ("危険度検索値", "danger_search", "danger_value"),
+            "understanding": ("理解度", "understanding"),
+            "understanding_search": ("理解度検索値", "understanding_search"),
+            "tags": ("タグ", "tags"),
+            "url": ("URL", "url"),
+            "category": ("カテゴリ", "category"),
+            "language": ("言語", "language"),
+            "indexes": ("インデックス", "indexes"),
+        }
+
+        def value_for(row, aliases):
+            return next((str(row.get(key, "") or "").strip() for key in aliases if row.get(key)), "")
+
+        for path in paths:
+            rows = None
+            for encoding in ("utf-8-sig", "cp932"):
+                try:
+                    with path.open("r", encoding=encoding, newline="") as stream:
+                        rows = list(csv.DictReader(stream))
+                    break
+                except (OSError, UnicodeError, csv.Error):
+                    rows = None
+            if not rows:
+                continue
+            for raw in rows:
+                item = {
+                    field: value_for(raw, aliases)
+                    for field, aliases in field_aliases.items()
+                }
+                title = item["title"] or item["code"]
+                if not title:
+                    continue
+                key = item["url"].casefold() or _normalize(title).replace(" ", "")
+                existing = records.setdefault(key, {"title": title})
+                if not existing.get("metadata_file_modified_at"):
+                    try:
+                        existing["metadata_file_modified_at"] = datetime.fromtimestamp(
+                            path.stat().st_mtime, timezone.utc
+                        ).isoformat(timespec="seconds")
+                    except OSError:
+                        pass
+                for field, value in item.items():
+                    if value and (not existing.get(field) or field in {"danger", "danger_search", "understanding", "understanding_search"}):
+                        existing[field] = value
+                existing["title"] = existing.get("title") or title
+
+        self._level_metadata = list(records.values())
+        self._metadata_signature = signature
+        return self._level_metadata
+
+    def _level_metadata_sources(self, query, limit=12):
+        if not LEVEL_METADATA_QUERY_RE.search(str(query or "")):
+            return []
+        query_text = str(query or "")
+        eta_query = bool(re.search(r"η|イータ|\beta\b|(?:normal|sublevel|anomalous)_eta", query_text, re.I))
+        has_filter_intent = bool(re.search(
+            r"おすすめ|オススメ|一覧|危険度|安全|危険|理解度|カテゴリ|カテゴリー|分類|条件|絞り",
+            query_text,
+            re.I,
+        ))
+        if eta_query and not has_filter_intent and re.search(
+            r"(?:Level|レベル)\s*-?\d+(?:\.\d+)?", query_text, re.I
+        ):
+            return []
+        self._index()
+        rows = self._load_level_metadata()
+        if not rows:
+            return []
+
+        normalized_query = _normalize(query)
+        wants_eta = bool(re.search(r"η|イータ|\beta\b|(?:normal|sublevel|anomalous)_eta", normalized_query, re.I))
+        danger_clause = re.search(r"(?:危険度|danger|安全|危険性)([^。！？\n]{0,24})", normalized_query, re.I)
+        requested_danger = set(re.findall(r"(?<!\d)(\d)(?!\d)", danger_clause.group(1))) if danger_clause else set()
+        wants_safe = bool(re.search(r"安全|低危険|危険度が低", normalized_query))
+        explicit_levels = {
+            "level" + number + ("η" if eta else "")
+            for number, eta in re.findall(
+                r"(?:Level|レベル)\s*(-?\d+(?:\.\d+)?)\s*(η)?",
+                normalized_query,
+                re.I,
+            )
+        }
+        docs_by_url = {doc["url"].casefold(): doc for doc in self._documents if doc.get("url")}
+        docs_by_title = {}
+        for document in self._documents:
+            for alias in (document.get("title", ""), *document.get("aliases", [])):
+                normalized_alias = _normalize(alias).replace(" ", "")
+                if normalized_alias:
+                    docs_by_title.setdefault(normalized_alias, document)
+        candidates = []
+
+        for row in rows:
+            title = row.get("title") or row.get("code") or ""
+            category = row.get("category", "")
+            code = row.get("code", "")
+            if not re.match(r"^(?:level|レベル)\s*[-0-9a-z.]", title, re.I) and not re.match(r"^(?:level|レベル)\s*[-0-9a-z.]", code, re.I):
+                continue
+            if explicit_levels and not any(
+                requested == _normalize(value).replace(" ", "")
+                for requested in explicit_levels
+                for value in (title, code)
+            ):
+                continue
+            category_key = _normalize(category).replace(" ", "")
+            eta_level = "eta" in category_key or "η" in title or "η" in code or "イータ" in title
+            if wants_eta and not eta_level:
+                continue
+            danger_text = row.get("danger_search") or row.get("danger", "")
+            danger_values = set(re.findall(r"(?<!\d)(\d+)(?:\.\d+)?", danger_text))
+            if requested_danger and not (requested_danger & danger_values):
+                continue
+            if wants_safe and (
+                not danger_values or min(int(value) for value in danger_values) > 1
+            ):
+                continue
+            url = row.get("url", "")
+            if not _is_valid_url(url):
+                continue
+            body_doc = docs_by_url.get(url.casefold()) or docs_by_title.get(
+                _normalize(title).replace(" ", "")
+            ) or docs_by_title.get(_normalize(code).replace(" ", ""))
+            overview = " ".join(body_doc["body"].split())[:420] if body_doc else ""
+            excerpt_parts = [f"階層名: {title}"]
+            if category:
+                excerpt_parts.append(f"カテゴリ: {category}")
+            if danger_text:
+                excerpt_parts.append(f"危険度: {danger_text}")
+            if row.get("understanding"):
+                excerpt_parts.append(f"理解度: {row['understanding']}")
+            if row.get("tags"):
+                excerpt_parts.append(f"タグ: {row['tags']}")
+            if overview:
+                excerpt_parts.append(f"概要の冒頭（ローカル本文）: {overview}")
+            candidates.append({
+                "name": title,
+                "title": title,
+                "url": url,
+                "language": row.get("language") or "JP",
+                "source_kind": _source_kind(row.get("language") or "JP", url),
+                "aliases": [code, category, row.get("indexes", "")],
+                "excerpt": "。".join(excerpt_parts),
+                "file": "extracted_fandom_levels_summary.csv / parsed_index/pages_master.csv",
+                "file_modified_at": row.get("metadata_file_modified_at"),
+                "retrieved_at": row.get("metadata_file_modified_at"),
+                "retrieval_time_basis": "local_file_modified_time",
+                "status": "retrieved_from_local_metadata",
+                "danger_sort": min((int(value) for value in danger_values), default=99),
+            })
+
+        candidates.sort(key=lambda item: (item["danger_sort"], item["title"].casefold()))
+        for index, item in enumerate(candidates[:max(1, min(limit, 15))], 1):
+            item["id"] = f"S{index}"
+            item.pop("danger_sort", None)
+        self.last_search_status["metadata_matches"] = len(candidates)
+        return candidates[:max(1, min(limit, 15))]
 
     @staticmethod
     def _metadata_from_master(master_pages):
@@ -468,7 +655,10 @@ class WikiRetriever:
             endpoint,
             params=params,
             timeout=self.request_timeout,
-            headers={"User-Agent": "BrNaviFandomJP/1.0 (local Wiki research assistant)"},
+            headers={
+                "User-Agent": "BrNaviFandomJP/1.0 (AI Wiki research assistant)",
+                "Accept": "application/json",
+            },
         )
         response.raise_for_status()
         data = response.json()
@@ -486,7 +676,7 @@ class WikiRetriever:
             if language == "ja"
             else "https://backrooms.fandom.com/api.php"
         )
-        async with AsyncSession() as session:
+        async with AsyncSession(impersonate="chrome") as session:
             search_data = await self._api_json(
                 session,
                 endpoint,
@@ -617,6 +807,34 @@ class WikiRetriever:
                 title = anchor.get_text(" ", strip=True)
                 results.append((title, url))
             for title, url in results:
+                parsed = urlparse(url)
+                if (
+                    parsed.hostname == "backrooms.fandom.com"
+                    and re.search(r"/wiki/", parsed.path, re.I)
+                ):
+                    page_title = unquote(parsed.path.split("/wiki/", 1)[1]).replace("_", " ")
+                    language = "ja" if re.search(r"^/ja/wiki/", parsed.path, re.I) else "en"
+                    try:
+                        api_documents = await self._online_search(page_title or title, language)
+                        requested_title = _normalize(page_title).replace(" ", "")
+                        exact = next(
+                            (
+                                item for item in api_documents
+                                if _normalize(item["title"]).replace(" ", "") == requested_title
+                            ),
+                            None,
+                        )
+                        if exact:
+                            documents.append(exact)
+                        elif api_documents:
+                            documents.append(api_documents[0])
+                        else:
+                            raise RuntimeError(f"MediaWiki APIで本文を取得できませんでした: {page_title or title}")
+                    except Exception as error:
+                        self.last_search_status.setdefault("online_errors", []).append(
+                            {"source": "Fandom MediaWiki API", "title": page_title or title, "error": str(error)}
+                        )
+                    continue
                 try:
                     page_response = await session.get(
                         url, timeout=self.request_timeout,
@@ -669,17 +887,38 @@ class WikiRetriever:
             }
         )
         self._online_page_errors = {"ja": [], "en": []}
+        metadata_sources = self._level_metadata_sources(
+            query, limit=max(10, min(15, top_k * 3))
+        )
+        if metadata_sources:
+            self.last_search_status["status"] = "found_local_metadata"
+            return metadata_sources
         if local_japanese and not external_requested and self.online_search:
+            fandom_results = []
             try:
-                web_results = await self._web_search(query, limit=max(1, min(2, top_k - 1)))
-                self.last_search_status["web_status"] = "found" if web_results else "no_results"
-                return self._deduplicate_sources(local_japanese[:max(1, top_k - 1)] + web_results, top_k)
+                fandom_results = await self._online_search(query, "ja")
+                self.last_search_status["japanese_online_status"] = (
+                    "found" if fandom_results else "no_results"
+                )
             except Exception as error:
+                self.last_search_status["japanese_online_status"] = "failed"
+                self.last_search_status.setdefault("online_errors", []).append(
+                    {"source": "日本語版Backrooms Wiki", "error": str(error)}
+                )
+            try:
+                web_results = await self._web_search(
+                    query, limit=max(1, min(2, top_k - 1))
+                )
+                self.last_search_status["web_status"] = "found" if web_results else "no_results"
+            except Exception as error:
+                web_results = []
                 self.last_search_status["web_status"] = "failed"
                 self.last_search_status.setdefault("online_errors", []).append(
                     {"source": "一般Web", "error": str(error)}
                 )
-                return local_japanese[:top_k]
+            return self._deduplicate_sources(
+                local_japanese[:1] + fandom_results + web_results, top_k
+            )
         if not self.online_search:
             return local_results[:top_k]
 
@@ -818,6 +1057,8 @@ class WikiRetriever:
         for index, item in enumerate(results, 1):
             if item["source_kind"] == "japanese_wiki":
                 classification = "日本語版Wiki"
+            elif item["source_kind"] == "route_data":
+                classification = "ローカル経路CSV"
             elif item["source_kind"] == "web":
                 classification = "一般Web（オンライン取得）"
             elif item.get("status") == "retrieved_live":

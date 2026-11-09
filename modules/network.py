@@ -2,7 +2,7 @@
 Backrooms Navigation System - Fandom JP
 Network Extraction Module
 
-extracted_fandom_levels_all.txt から
+downloaded_fandom_html/ の各記事HTMLから
 Level間の接続情報を解析し、
 
     backrooms_edges.csv
@@ -19,6 +19,13 @@ import tempfile
 
 from modules.operation_context import OperationCancelled
 from modules.runtime_paths import get_application_dir
+from modules.extractor import (
+    determine_level_information,
+    extract_danger,
+    extract_article_text,
+    extract_page_title_from_html,
+    extract_understanding,
+)
 
 # =============================================================================
 # 基本パス
@@ -27,10 +34,7 @@ from modules.runtime_paths import get_application_dir
 # modules/ の1つ上 = BrNavi-FandomJP
 BASE_DIR = str(get_application_dir())
 
-INPUT_FILE = os.path.join(
-    BASE_DIR,
-    "extracted_fandom_levels_all.txt"
-)
+HTML_DIR = os.path.join(BASE_DIR, "downloaded_fandom_html")
 
 EDGES_OUTPUT_FILE = os.path.join(
     BASE_DIR,
@@ -263,8 +267,10 @@ def _replace_csv_outputs(staged_outputs):
 
 def process_backrooms_data(context=None):
     """
-    extracted_fandom_levels_all.txt から
-    ノード・エッジ情報を抽出してCSVに保存する。
+    保存済みの各HTMLを直接解析し、ノード・エッジ情報をCSVに保存する。
+
+    CSVの列構成は従来形式を維持する。入力ページが解析できない場合は
+    既存CSVを空データで上書きせず失敗として返す。
 
     Returns
     -------
@@ -276,9 +282,26 @@ def process_backrooms_data(context=None):
     nodes_info = {}
     log = context.log if context else print
 
+    html_files = []
+    if os.path.isdir(HTML_DIR):
+        html_files = sorted(
+            (
+                os.path.join(HTML_DIR, name)
+                for name in os.listdir(HTML_DIR)
+                if name.lower().endswith((".html", ".htm"))
+                and os.path.isfile(os.path.join(HTML_DIR, name))
+            ),
+            key=lambda path: os.path.basename(path).casefold(),
+        )
+    if not html_files:
+        log(f"【エラー】解析対象のHTMLがありません: {HTML_DIR}")
+        log("「HTML取得・データ抽出」タブからLevel記事を保存してから再実行してください。")
+        return False
+
+    log(f"保存HTMLを直接解析します: {len(html_files)} 件")
+    parsed_pages = 0
     current_level = None
     current_section_type = None
-    processed_lines = 0
 
     # =========================================================================
     # 入力
@@ -286,23 +309,46 @@ def process_backrooms_data(context=None):
 
     try:
 
-        with open(
-            INPUT_FILE,
-            "r",
-            encoding="utf-8"
-        ) as f:
+        for page_index, html_path in enumerate(html_files, 1):
+            if context:
+                context.check_cancelled()
+                context.progress(page_index - 1, len(html_files), "保存HTMLを解析中")
+            try:
+                with open(html_path, "r", encoding="utf-8-sig", errors="replace") as html_file:
+                    html_text = html_file.read()
+                article_text = extract_article_text(html_text)
+                if not article_text.strip():
+                    log(f"本文を抽出できないためスキップ: {os.path.basename(html_path)}", "warning")
+                    continue
+                page_title = extract_page_title_from_html(html_text)
+                level_title, level_code, _ = determine_level_information(
+                    article_text, page_title, os.path.basename(html_path)
+                )
+                if not level_title or not level_code:
+                    continue
+                current_level = clean_level_name(level_code)
+                current_section_type = None
+                nodes_info.setdefault(current_level, {
+                    "Id": current_level,
+                    "Label": level_title,
+                    "Comprehension": extract_understanding(article_text)[0],
+                    "Danger": extract_danger(article_text)[0],
+                })
+                # 旧パーサーはTXT内のLevel見出しを開始点にしていた。
+                # HTML本文には記事タイトルが含まれないため、抽出したページ自身の
+                # タイトルを先頭に補って同じセクション解析へ渡す。
+                normalized_title_line = level_title.rstrip(":：") + ":"
+                page_lines = [normalized_title_line, *article_text.splitlines()]
+                parsed_pages += 1
+            except OperationCancelled:
+                raise
+            except Exception as error:
+                log(f"HTML解析をスキップ: {os.path.basename(html_path)} ({type(error).__name__}: {error})", "warning")
+                continue
 
-            for line in f:
+            for line in page_lines:
                 if context:
                     context.check_cancelled()
-                    processed_lines += 1
-                    if processed_lines % 1000 == 0:
-                        context.progress(
-                            processed_lines,
-                            None,
-                            "ネットワーク情報を解析中",
-                        )
-
                 line = line.strip()
 
                 if not line:
@@ -504,20 +550,6 @@ def process_backrooms_data(context=None):
 
     except OperationCancelled:
         raise
-    except FileNotFoundError:
-
-        log()
-        log(
-            f"【エラー】ファイル "
-            f"'{INPUT_FILE}' が見つかりません。"
-        )
-
-        log(
-            "先に情報データベースの更新を実行してください。"
-        )
-
-        return False
-
     except Exception as e:
 
         log()
@@ -530,6 +562,12 @@ def process_backrooms_data(context=None):
             f"{type(e).__name__}: {e}"
         )
 
+        return False
+
+    if not nodes_info or not unique_edges:
+        log("【エラー】保存HTMLからLevelノードと接続エッジを抽出できませんでした。")
+        log(f"本文を解析したLevelページ: {parsed_pages} 件")
+        log("既存の接続CSVは変更していません。HTML取得元と記事本文を確認してください。")
         return False
 
     # =========================================================================
@@ -616,6 +654,6 @@ def process_backrooms_data(context=None):
     )
     log("=" * 70)
     if context:
-        context.progress(processed_lines, None, "完了")
+        context.progress(len(html_files), len(html_files), "完了")
 
     return True

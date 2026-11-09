@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import asyncio
+import ipaddress
 import os
 import json
 import base64
@@ -23,6 +24,7 @@ from modules.database import (
 
 # 保守・更新サービス
 from modules.operation_context import OperationCancelled, OperationContext
+from modules.app_settings import AppSettingsStore
 from modules.operations import (
     get_level_list_languages,
     is_supported_level_list_url,
@@ -55,6 +57,7 @@ except Exception as e:
 BASE_DIR = get_application_dir()
 IMAGE_DIR = BASE_DIR / "downloaded_images"
 TEXT_DIR = BASE_DIR / "extracted_fandom_levels"
+APP_SETTINGS = AppSettingsStore(BASE_DIR / "database" / "app_settings.json")
 
 # 🌟 ご指定のカテゴリ優先順位（日本独自階層 η を最優先）
 CATEGORY_PRIORITY = {
@@ -80,6 +83,8 @@ class BackroomsAPI:
         self._maintenance_done_event = threading.Event()
         self._maintenance_done_event.set()
         self._current_online_wiki_url = ""
+        self._auto_update_lock = threading.Lock()
+        self._auto_update_scheduler_started = False
         if AI_AVAILABLE:
             try:
                 self.ai = AIAssistant(
@@ -96,6 +101,68 @@ class BackroomsAPI:
                 if AI_IMPORT_ERROR
                 else "AIモジュールを読み込めません。"
             )
+
+    def get_environment_settings(self):
+        settings = APP_SETTINGS.get()
+        due, next_due = APP_SETTINGS.is_due()
+        settings["update_due"] = due
+        settings["next_catalog_update_at"] = next_due.isoformat(timespec="seconds") if next_due else None
+        return settings
+
+    def save_environment_settings(self, values):
+        if not isinstance(values, dict):
+            return {"error": "環境設定の形式が正しくありません。"}
+        try:
+            APP_SETTINGS.update(values)
+            return self.get_environment_settings()
+        except OSError as error:
+            return {"error": f"環境設定を保存できません: {error}"}
+
+    def start_auto_database_update(self):
+        with self._auto_update_lock:
+            if self._auto_update_scheduler_started:
+                return {"status": "checked"}
+            self._auto_update_scheduler_started = True
+        scheduler = threading.Thread(
+            target=self._catalog_update_schedule_loop,
+            name="catalog-update-scheduler",
+            daemon=True,
+        )
+        scheduler.start()
+        return self._start_due_catalog_update()
+
+    def _catalog_update_schedule_loop(self):
+        while True:
+            threading.Event().wait(60)
+            self._start_due_catalog_update()
+
+    def _start_due_catalog_update(self):
+        due, next_due = APP_SETTINGS.is_due()
+        if not due:
+            return {
+                "status": "not_due",
+                "next_update_at": next_due.isoformat(timespec="seconds") if next_due else None,
+            }
+        if self._maintenance_lock.locked():
+            return {"status": "busy", "message": "他の処理の終了後に自動更新します。"}
+        try:
+            APP_SETTINGS.record_attempt()
+            result = self.run_maintenance_task(
+                "update_master", options={"mode": 1, "automatic": True}
+            )
+        except (OSError, RuntimeError) as error:
+            return {"status": "error", "message": f"自動更新を開始できません: {error}"}
+        if result.get("status") != "started":
+            self._record_catalog_update_result(False)
+            return result
+        return {"status": "started", "message": "一覧データの自動更新を開始しました。"}
+
+    @staticmethod
+    def _record_catalog_update_result(success, cancelled=False):
+        try:
+            APP_SETTINGS.record_result(success, cancelled=cancelled)
+        except OSError as error:
+            print(f"環境設定へ更新結果を保存できません: {error}")
 
     # --- AI Assistant API ---
     def ai_get_status(self):
@@ -680,6 +747,46 @@ class BackroomsAPI:
         self._current_online_wiki_url = url
         return {"status": "ok", "url": url}
 
+    def navigate_ai_answer_link(self, url):
+        url = str(url or "").strip()
+        try:
+            parsed = urlsplit(url)
+            host = (parsed.hostname or "").casefold()
+        except ValueError:
+            return {"status": "error", "message": "リンク先URLが正しくありません。"}
+        try:
+            address = ipaddress.ip_address(host.strip("[]")) if host else None
+        except ValueError:
+            address = None
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not host
+            or parsed.username
+            or parsed.password
+            or host == "localhost"
+            or host.endswith(".local")
+            or host.endswith((".localhost", ".internal", ".lan"))
+            or (not address and "." not in host)
+            or (address and not address.is_global)
+        ):
+            return {"status": "error", "message": "安全なWebリンクではありません。"}
+        self._current_online_wiki_url = url
+        return {"status": "ok", "url": url}
+
+    def start_ai_source_save(self, page, prompt, user_consented=False, flow_id=""):
+        if user_consented is not True:
+            return {"status": "error", "message": "資料の保存には利用者の承諾が必要です。"}
+        if not isinstance(page, dict) or not page.get("title") or not is_supported_wiki_url(page.get("url")):
+            return {"status": "error", "message": "保存対象は日本語版Backrooms Wikiの記事を指定してください。"}
+        return self.run_maintenance_task(
+            "save_online_wiki_page",
+            dict(page),
+            options={
+                "ai_prompt": str(prompt or "")[:12000],
+                "ai_flow_id": str(flow_id or "")[:100],
+            },
+        )
+
     def _on_main_window_response_received(self, response):
         url = str(getattr(response, "url", "") or "")
         headers = getattr(response, "headers", {}) or {}
@@ -831,7 +938,11 @@ class BackroomsAPI:
                         "results": results,
                     }
                 else:
-                    payload = results[0]
+                    payload = results[0] if results else {
+                        "ok": False,
+                        "cancelled": self._maintenance_cancel_event.is_set(),
+                        "error": "保存処理を開始できませんでした。",
+                    }
             finally:
                 self._maintenance_done_event.set()
                 try:
@@ -845,6 +956,16 @@ class BackroomsAPI:
                         main_window.evaluate_js(
                             f"{callback}({encoded})"
                         )
+                        if options and options.get("ai_flow_id"):
+                            save_payload = {
+                                **payload,
+                                "prompt": options.get("ai_prompt", ""),
+                                "flow_id": options.get("ai_flow_id", ""),
+                            }
+                            main_window.evaluate_js(
+                                "onAIMissingSourceSaveCompleted(" +
+                                json.dumps(save_payload, ensure_ascii=True) + ")"
+                            )
                 except Exception as error:
                     print(f"[GUI] Wiki保存完了通知に失敗: {error}")
                 self._maintenance_lock.release()
@@ -852,7 +973,7 @@ class BackroomsAPI:
 
         task_labels = {
             "save_level_list_offline": "Level情報のオフライン保存",
-            "update_master": "既存データベース更新",
+            "update_master": "Level一覧データ更新",
             "extract_info": "情報データベース更新",
             "update_network": "ネットワーク更新",
         }
@@ -879,6 +1000,8 @@ class BackroomsAPI:
                 options=options,
                 context=context,
             )
+            if task_name == "update_master":
+                self._record_catalog_update_result(result.success)
             print(f"保守タスクが完了しました: {task_label}")
             self._maintenance_done_event.set()
             self._notify_maintenance_task_completed(
@@ -886,6 +1009,8 @@ class BackroomsAPI:
                 result.message,
             )
         except OperationCancelled:
+            if task_name == "update_master":
+                self._record_catalog_update_result(False, cancelled=True)
             message = f"{task_label}を安全な停止位置で停止しました。"
             if task_name in {"extract_info", "update_network"}:
                 message += "既存の出力データは維持されています。"
@@ -897,6 +1022,8 @@ class BackroomsAPI:
                 False, message, cancelled=True
             )
         except Exception as error:
+            if task_name == "update_master":
+                self._record_catalog_update_result(False)
             print(f"保守タスクに失敗しました ({task_label}): {error}")
             context.log(f"{type(error).__name__}: {error}", "error")
             self._maintenance_done_event.set()
@@ -1146,7 +1273,7 @@ HTML_TEMPLATE = r"""
       <button onclick="switchTab('wiki')" id="tab-btn-wiki" class="px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition">🌐 Wiki閲覧・保存</button>
       <button onclick="switchTab('data-tools')" id="tab-btn-data-tools" class="px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition">⬇️ HTML取得・データ抽出</button>
       <button onclick="switchTab('routes')" id="tab-btn-routes" class="px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition">🧭 経路・フロー</button>
-      <button onclick="switchTab('maintenance')" id="tab-btn-maintenance" class="px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition">⚙️ データ保守</button>
+      <button onclick="switchTab('settings')" id="tab-btn-settings" class="px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition">⚙️ 環境設定</button>
       <button onclick="switchTab('ai')" id="tab-btn-ai" class="px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition">🤖 AI Assistant</button>
       <button onclick="showAbout()" id="about-button" class="px-3 py-1.5 rounded text-xs font-semibold bg-gray-700 text-gray-200 hover:bg-gray-600 transition">アプリ情報</button>
     </div>
@@ -1396,11 +1523,11 @@ HTML_TEMPLATE = r"""
       </div>
     </section>
 
-    <!-- 4. ⚙️ データベース保守タブ -->
+    <!-- 4. 🧭 経路・視覚フロー -->
     <section id="view-routes" class="hidden flex-1 min-h-0 flex flex-col p-4 bg-[#fbf6de] overflow-y-auto">
       <div class="w-full max-w-6xl mx-auto bg-white border border-[#e2d8b5] p-5 rounded shadow-sm space-y-4">
-        <div class="flex flex-wrap justify-between items-start gap-3"><div><h2 class="text-lg font-bold">🧭 Level経路と視覚フロー</h2><p class="text-xs text-gray-600 mt-1">ローカルの有向接続CSVから経路候補を検索します。経路が見つからない場合はデータ保守からネットワークを更新してください。</p></div>
-          <button onclick="switchTab('maintenance'); runTask('update_network')" class="px-3 py-2 rounded bg-[#f5eed3] border border-[#d6c79a] text-xs font-semibold">接続CSVを再取得</button></div>
+        <div class="flex flex-wrap justify-between items-start gap-3"><div><h2 class="text-lg font-bold">🧭 Level経路と視覚フロー</h2><p class="text-xs text-gray-600 mt-1">ローカルの有向接続CSVから経路候補を検索します。経路が見つからない場合は環境設定から接続CSVを生成してください。</p></div>
+          <button onclick="switchTab('settings'); runTask('update_network')" class="px-3 py-2 rounded bg-[#f5eed3] border border-[#d6c79a] text-xs font-semibold">接続CSVを生成・更新</button></div>
         <div class="flex flex-wrap items-end gap-3"><label class="text-xs font-semibold">出発Level<input id="route-start" class="block mt-1 border border-[#d6c79a] rounded px-3 py-2 text-sm" placeholder="Level 20"></label>
           <span class="pb-2 text-gray-400">→</span><label class="text-xs font-semibold">目的Level<input id="route-goal" class="block mt-1 border border-[#d6c79a] rounded px-3 py-2 text-sm" placeholder="Level 4"></label>
           <button onclick="searchRoutes()" class="px-4 py-2 rounded bg-[#b45309] text-white text-xs font-semibold">経路を検索</button><span id="route-status" class="text-xs text-gray-600" role="status"></span></div>
@@ -1408,31 +1535,31 @@ HTML_TEMPLATE = r"""
       </div>
     </section>
 
-    <!-- 5. ⚙️ データベース保守タブ -->
-    <div id="view-maintenance" class="hidden flex-1 flex flex-col p-8 bg-[#fbf6de] overflow-y-auto">
+    <!-- 5. ⚙️ 環境設定 -->
+    <section id="view-settings" class="hidden flex-1 flex flex-col p-8 bg-[#fbf6de] overflow-y-auto">
       <div class="max-w-3xl mx-auto w-full bg-white border border-[#e2d8b5] p-6 rounded shadow-sm space-y-5">
-        <h2 class="text-lg font-bold text-gray-800 border-b border-gray-200 pb-2">⚙️ データ保守</h2>
-        <label class="flex items-center gap-2 text-xs text-gray-700">
-          Master Database更新方法
-          <select id="maintenance-update-mode" class="border border-[#d6c79a] rounded px-2 py-1 bg-white">
-            <option value="1">一覧HTMLを再取得して全更新</option>
-            <option value="2">保存済みHTMLからDBを再構築</option>
-          </select>
-        </label>
-        <div class="grid grid-cols-2 gap-3 pt-2">
-          <button onclick="runTask('update_master', {mode: Number(document.getElementById('maintenance-update-mode').value)})" class="p-3 bg-[#f5eed3] hover:bg-[#eadfae] border border-[#d6c79a] rounded text-xs font-semibold text-gray-800 text-left">
-            <span class="text-sm block">🔄 既存データベース更新</span>
-            <span class="text-[10px] text-gray-500">図鑑・ルート機能の互換用（オンライン閲覧・保存には不要）</span>
-          </button>
-          <button onclick="runTask('extract_info')" class="p-3 bg-[#f5eed3] hover:bg-[#eadfae] border border-[#d6c79a] rounded text-xs font-semibold text-gray-800 text-left">
-            <span class="text-sm block">📑 情報データベース更新</span>
-            <span class="text-[10px] text-gray-500">ローカルHTMLから本文やタグを抽出</span>
-          </button>
-          <button onclick="runTask('update_network')" class="p-3 bg-[#f5eed3] hover:bg-[#eadfae] border border-[#d6c79a] rounded text-xs font-semibold text-gray-800 text-left">
-            <span class="text-sm block">🕸️ ネットワーク更新</span>
-            <span class="text-[10px] text-gray-500">Level間の出入口・接続グラフを生成</span>
-          </button>
-        </div>
+        <h2 class="text-lg font-bold text-gray-800 border-b border-gray-200 pb-2">⚙️ 環境設定</h2>
+        <section class="space-y-3">
+          <h3 class="text-sm font-bold text-gray-800">一般設定</h3>
+          <label class="flex items-start gap-2 text-xs text-gray-700">
+            <input id="auto-update-catalog" type="checkbox" class="mt-0.5">
+            <span><b>Level一覧データを自動更新</b><br>初回起動時と前回の更新試行から1か月後以降に、一覧HTMLを取得してデータベースを更新します。更新はバックグラウンドで行います。</span>
+          </label>
+          <p id="catalog-update-history" class="text-[11px] text-gray-500">最終更新状態を確認中...</p>
+        </section>
+        <section class="space-y-3 border-t border-[#e2d8b5] pt-4">
+          <h3 class="text-sm font-bold text-gray-800">一覧データの手動更新</h3>
+          <p class="text-xs text-gray-600">Level一覧HTMLを再取得し、Master Databaseと各言語のLevel Listを作り直します。更新中も画面を操作できます。</p>
+          <div class="flex flex-wrap gap-2">
+            <button onclick="runTask('update_master', {mode: 1})" class="px-4 py-2 rounded bg-[#b45309] text-white text-xs font-semibold">一覧HTMLを取得して全更新</button>
+            <button onclick="runTask('update_master', {mode: 2})" class="px-4 py-2 rounded border border-[#d6c79a] bg-[#fffdf5] text-xs font-semibold">保存済みHTMLから再構築</button>
+          </div>
+        </section>
+        <section class="space-y-2 border-t border-[#e2d8b5] pt-4">
+          <h3 class="text-sm font-bold text-gray-800">接続CSVの生成</h3>
+          <p class="text-xs text-gray-600">保存済みのLevel記事HTMLを直接解析します。出力CSVの列形式は変更しません。HTMLが未取得の場合は「HTML取得・データ抽出」タブでLevel記事を保存してください。</p>
+          <button onclick="runTask('update_network')" class="px-4 py-2 rounded border border-[#d6c79a] bg-[#fffdf5] text-xs font-semibold">接続CSVを生成・更新</button>
+        </section>
         <div id="maintenance-task-status" role="status" aria-live="polite"
           class="min-h-10 rounded border border-[#dfd3a8] bg-[#fffdf5] px-3 py-2 text-xs text-gray-600">
           保守タスクを選択してください。
@@ -1446,7 +1573,7 @@ HTML_TEMPLATE = r"""
         <pre id="maintenance-log" aria-label="保守タスクログ"
           class="max-h-56 overflow-auto whitespace-pre-wrap break-words rounded border border-[#e2d8b5] bg-[#fffdf5] p-3 text-[11px] text-gray-700"></pre>
       </div>
-    </div>
+    </section>
 
     <!-- 5. BrNavi AI Assistant -->
     <section id="view-ai" class="hidden flex-1 min-w-0 flex flex-col bg-[#fbf6de]">
@@ -1512,6 +1639,9 @@ HTML_TEMPLATE = r"""
 
   <script>
     let onlineWikiDefaultOpened = false;
+    document.getElementById('ai-chat-messages').addEventListener(
+      'click', openAIAnswerLinkFromEvent
+    );
 
     async function showAbout() {
       try {
@@ -1539,7 +1669,7 @@ HTML_TEMPLATE = r"""
     }
 
     function switchTab(tab) {
-      ['explorer', 'wiki', 'data-tools', 'routes', 'maintenance', 'ai'].forEach(t => {
+      ['explorer', 'wiki', 'data-tools', 'routes', 'settings', 'ai'].forEach(t => {
         document.getElementById('view-' + t).classList.add('hidden');
         document.getElementById('tab-btn-' + t).className = "px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition";
       });
@@ -1550,6 +1680,53 @@ HTML_TEMPLATE = r"""
       }
       if (tab === 'data-tools' && !levelListLanguagesLoaded) {
         loadLevelListLanguages();
+      }
+    }
+
+    function renderEnvironmentSettings(settings) {
+      const toggle = document.getElementById('auto-update-catalog');
+      toggle.checked = Boolean(settings.auto_update_catalog);
+      const history = document.getElementById('catalog-update-history');
+      const lastAttempt = settings.last_catalog_update_attempt_at
+        ? new Date(settings.last_catalog_update_attempt_at).toLocaleString('ja-JP') : 'なし';
+      const lastSuccess = settings.last_catalog_update_success_at
+        ? new Date(settings.last_catalog_update_success_at).toLocaleString('ja-JP') : 'なし';
+      const states = {never: '未実行', running: '実行中', success: '成功', failed: '失敗', cancelled: '停止'};
+      const next = settings.next_catalog_update_at
+        ? new Date(settings.next_catalog_update_at).toLocaleString('ja-JP') : '初回起動時';
+      history.textContent = `状態: ${states[settings.last_catalog_update_status] || '不明'} / 最終試行: ${lastAttempt} / 最終成功: ${lastSuccess}`
+        + (settings.auto_update_catalog ? ` / 次回自動更新: ${settings.update_due ? 'まもなく開始' : next}` : ' / 自動更新は無効');
+    }
+
+    async function initializeEnvironmentSettings() {
+      const toggle = document.getElementById('auto-update-catalog');
+      try {
+        renderEnvironmentSettings(await pywebview.api.get_environment_settings());
+      } catch (error) {
+        document.getElementById('catalog-update-history').textContent = `環境設定を読み込めません: ${error}`;
+      }
+      toggle.addEventListener('change', async () => {
+        toggle.disabled = true;
+        try {
+          const result = await pywebview.api.save_environment_settings({auto_update_catalog: toggle.checked});
+          if (result.error) throw new Error(result.error);
+          renderEnvironmentSettings(result);
+        } catch (error) {
+          document.getElementById('catalog-update-history').textContent = `設定を保存できません: ${error}`;
+          toggle.checked = !toggle.checked;
+        } finally { toggle.disabled = false; }
+      });
+      try {
+        const result = await pywebview.api.start_auto_database_update();
+        if (result.status === 'started') {
+          document.getElementById('maintenance-task-status').textContent = result.message;
+          document.getElementById('maintenance-log').textContent = '';
+          setMaintenanceBusy(true);
+          setLevelListTaskBusy(true);
+        }
+        renderEnvironmentSettings(await pywebview.api.get_environment_settings());
+      } catch (error) {
+        document.getElementById('catalog-update-history').textContent = `自動更新を開始できません: ${error}`;
       }
     }
 
@@ -1866,7 +2043,7 @@ HTML_TEMPLATE = r"""
           select.appendChild(option);
         });
         if (!result.languages || result.languages.length === 0) {
-          status.textContent = "言語別レベルリストがありません。データ保守からLevel Listを生成してください。";
+          status.textContent = "言語別レベルリストがありません。環境設定でLevel一覧データを更新してください。";
           return;
         }
         levelListLanguagesLoaded = true;
@@ -2754,6 +2931,7 @@ HTML_TEMPLATE = r"""
       document.getElementById('level-list-progress').classList.add('hidden');
       setMaintenanceBusy(false);
       setLevelListTaskBusy(false);
+      pywebview.api.get_environment_settings().then(renderEnvironmentSettings).catch(() => {});
       onSearchInput();
     }
 
@@ -3149,10 +3327,139 @@ HTML_TEMPLATE = r"""
       document.getElementById('ai-chat-messages').appendChild(wrap);
     }
 
-    async function sendAIMessage() {
+    function aiAppendMissingSourceActions(prompt, conversationId) {
+      const wrap = document.createElement('div');
+      wrap.className = "ai-message max-w-4xl mx-auto flex justify-start";
+      const panel = document.createElement('div');
+      panel.className = "max-w-[90%] rounded border border-[#dfd3a8] bg-[#fffdf5] p-3 text-xs space-y-2";
+      const explanation = document.createElement('p');
+      explanation.textContent = "対象の日本語版Wiki記事を検索できます。保存前に記事名と内容を確認し、保存操作ごとに承諾を求めます。";
+      const searchButton = document.createElement('button');
+      searchButton.type = "button";
+      searchButton.className = "rounded bg-[#91520f] px-3 py-1.5 text-white font-semibold";
+      searchButton.textContent = "Wiki資料を検索";
+      const status = document.createElement('div');
+      status.className = "text-gray-600 whitespace-pre-wrap break-words";
+      panel.append(explanation, searchButton, status);
+      wrap.appendChild(panel);
+      document.getElementById('ai-chat-messages').appendChild(wrap);
+      searchButton.onclick = async () => {
+        searchButton.disabled = true;
+        status.textContent = "日本語版Backrooms Wikiを検索中...";
+        try {
+          const result = await pywebview.api.search_online_wiki(prompt);
+          if (result.error) throw new Error(result.error);
+          const pages = (result.pages || []).slice(0, 8);
+          if (!pages.length) {
+            status.textContent = "記事候補が見つかりませんでした。Level番号や記事名を具体的に指定してください。";
+            searchButton.disabled = false;
+            return;
+          }
+          status.textContent = "";
+          pages.forEach(page => {
+            const card = document.createElement('div');
+            card.className = "rounded border border-[#e2d8b5] bg-white p-2 space-y-1";
+            const title = document.createElement('div');
+            title.className = "font-semibold";
+            title.textContent = page.title || page.url;
+            const link = document.createElement('a');
+            link.href = page.url;
+            link.textContent = page.url;
+            link.className = "block break-all text-[#9b3d06] underline";
+            const snippet = document.createElement('div');
+            snippet.className = "text-gray-600";
+            snippet.textContent = page.snippet || "検索抜粋はありません。";
+            const save = document.createElement('button');
+            save.type = "button";
+            save.className = "rounded border border-[#d6c79a] px-2 py-1 font-semibold";
+            save.textContent = "この記事を保存して回答に使う";
+            save.onclick = async () => {
+              const approved = window.confirm(
+                `「${page.title}」の記事本文と画像をダウンロードしてローカル保存します。よろしいですか？\n${page.url}`
+              );
+              if (!approved) return;
+              save.disabled = true;
+              status.textContent = `${page.title} を保存中です...`;
+              const flowId = aiRequestId();
+              aiMissingSourceFlows.set(flowId, {prompt, conversationId, status});
+              try {
+                const started = await pywebview.api.start_ai_source_save(
+                  page, prompt, true, flowId
+                );
+                if (started.status !== "started") {
+                  aiMissingSourceFlows.delete(flowId);
+                  status.textContent = started.message || "保存を開始できませんでした。";
+                  save.disabled = false;
+                }
+              } catch (error) {
+                aiMissingSourceFlows.delete(flowId);
+                status.textContent = `保存を開始できません: ${error}`;
+                save.disabled = false;
+              }
+            };
+            card.append(title, link, snippet, save);
+            panel.appendChild(card);
+          });
+        } catch (error) {
+          status.textContent = `Wiki検索に失敗しました: ${error}`;
+          searchButton.disabled = false;
+        }
+      };
+    }
+
+    const aiMissingSourceFlows = new Map();
+
+    function onAIMissingSourceSaveCompleted(result) {
+      const flow = aiMissingSourceFlows.get(result.flow_id);
+      if (!flow) return;
+      aiMissingSourceFlows.delete(result.flow_id);
+      if (!result.ok) {
+        flow.status.textContent = `資料を保存できませんでした: ${result.error || '詳細不明'}`;
+        return;
+      }
+      flow.status.textContent = `${result.title} を保存しました。質問を再確認します。`;
+      if (flow.conversationId === aiConversationId && !aiBusy) {
+        sendAIMessage(flow.prompt);
+      } else {
+        flow.status.textContent += " 同じ会話を開いて、もう一度質問してください。";
+      }
+    }
+
+    async function openAIAnswerLink(url) {
+      try {
+        const result = await pywebview.api.navigate_ai_answer_link(url);
+        if (result.status !== "ok") throw new Error(result.message || "リンクを開けません。");
+        switchTab('wiki');
+        onlineWikiBrowserBusy = true;
+        onlineWikiNavigationPending = true;
+        if (onlineWikiNavigationTimeout) clearTimeout(onlineWikiNavigationTimeout);
+        document.getElementById('online-wiki-url').value = result.url;
+        document.getElementById('html-download-status').textContent = "AI回答のリンクを内蔵ブラウザーで開いています...";
+        document.getElementById('online-wiki-current-url').textContent = result.url;
+        document.getElementById('online-wiki-save-current').disabled = true;
+        document.getElementById('online-wiki-frame').src = result.url;
+        onlineWikiNavigationTimeout = setTimeout(() => {
+          if (!onlineWikiNavigationPending) return;
+          onlineWikiNavigationPending = false;
+          onlineWikiBrowserBusy = false;
+          document.getElementById('html-download-status').textContent = "ページの読み込みを確認できませんでした。";
+        }, 45000);
+      } catch (error) {
+        aiSetStatus(`リンクを開けませんでした: ${error}`, true);
+      }
+    }
+
+    function openAIAnswerLinkFromEvent(event) {
+      const anchor = event.target.closest && event.target.closest('.ai-answer-content a[href]');
+      if (!anchor) return;
+      event.preventDefault();
+      openAIAnswerLink(anchor.href);
+    }
+
+    async function sendAIMessage(forcedMessage = null) {
       if (aiBusy) return;
       const input = document.getElementById('ai-message-input');
-      const message = input.value.trim();
+      const message = String(forcedMessage === null ? input.value : forcedMessage).trim();
       if (!message) return;
       if (!aiConversationId) {
         await aiNewConversation();
@@ -3239,9 +3546,21 @@ HTML_TEMPLATE = r"""
                   sources: data.sources || [],
                 }],
               });
+              if (data.finish_reason === "no_verified_sources" && data.prompt) {
+                aiAppendMissingSourceActions(data.prompt, cid);
+              }
             }
-            aiSetStatus("接続中: Groq / " + (data.model || "モデル不明")
-              + (data.finish_reason === "length" ? " / 出力上限に到達（回答が途中の可能性があります）" : ""));
+            const searchErrors = data.search_status && data.search_status.online_errors || [];
+            if (data.finish_reason === "no_verified_sources" && searchErrors.length) {
+              aiSetStatus("資料検索エラー: " + searchErrors.map(item =>
+                `${item.source || '検索'} ${item.title ? '(' + item.title + ') ' : ''}${item.error || ''}`
+              ).join(" / "), true);
+            } else if (data.finish_reason === "no_verified_sources") {
+              aiSetStatus("出典資料がありません。必要な記事を選び、承諾後に保存できます。");
+            } else {
+              aiSetStatus("接続中: Groq / " + (data.model || "モデル不明")
+                + (data.finish_reason === "length" ? " / 出力上限に到達（回答が途中の可能性があります）" : ""));
+            }
           } else if (!data.cancelled) {
             aiSetStatus("APIエラー: " + (data.error || "不明なエラー"), true);
             aiAppendError("回答を生成できませんでした: " + (data.error || "不明なエラー"));
@@ -3266,6 +3585,7 @@ HTML_TEMPLATE = r"""
     window.addEventListener('pywebviewready', () => {
       onSearchInput();
       initializeAI();
+      initializeEnvironmentSettings();
       updateOnlineWikiCurrentUrl();
     });
   </script>

@@ -136,26 +136,36 @@ class OnlineWikiTests(unittest.TestCase):
             )
             self.assertEqual(get_image.call_count, 1)
 
-    @patch("modules.online_wiki.download_url")
+    @patch("modules.online_wiki.fetch_page")
     @patch("modules.online_wiki._localize_images")
-    def test_save_page_archives_only_supported_wiki_urls(self, localize, download):
+    def test_save_page_archives_mediawiki_api_body_without_direct_html_request(
+        self, localize, fetch
+    ):
         with tempfile.TemporaryDirectory() as directory:
-            html_path = Path(directory) / "Level_0.html"
-            html_path.write_text("<html></html>", encoding="utf-8")
-            download.return_value = html_path
+            output_dir = Path(directory)
+            fetch.return_value = {
+                "title": "Level 0",
+                "url": "https://backrooms.fandom.com/ja/wiki/Level_0",
+                "html": '<div class="mw-parser-output"><p>API本文</p></div>',
+            }
             localize.return_value = {"saved": 2, "failed": 0}
-
-            result = online_wiki.save_page(
-                {
-                    "title": "Level 0",
-                    "url": "https://backrooms.fandom.com/ja/wiki/Level_0",
-                    "categories": ["通常階層"],
-                }
-            )
+            with (
+                patch("modules.online_wiki.OUTPUT_DIR", output_dir),
+                patch("modules.downloader.OUTPUT_DIR", output_dir),
+            ):
+                result = online_wiki.save_page(
+                    {
+                        "title": "Level 0",
+                        "url": "https://backrooms.fandom.com/ja/wiki/Level_0",
+                        "categories": ["通常階層"],
+                    }
+                )
 
             self.assertEqual(result["images_saved"], 2)
-            self.assertEqual(download.call_args.kwargs["page_info"]["language"], "JP")
-            self.assertEqual(download.call_args.kwargs["delay"], 0)
+            fetch.assert_called_once_with("https://backrooms.fandom.com/ja/wiki/Level_0")
+            saved_html = Path(result["path"]).read_text(encoding="utf-8")
+            self.assertIn("BRNAVI_META_INFO", saved_html)
+            self.assertIn("API本文", saved_html)
             with self.assertRaises(ValueError):
                 online_wiki.save_page(
                     {"title": "Bad", "url": "https://example.test/article"}

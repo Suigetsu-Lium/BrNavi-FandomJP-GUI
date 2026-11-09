@@ -1,4 +1,5 @@
 import asyncio
+import csv
 import tempfile
 import unittest
 from pathlib import Path
@@ -87,6 +88,56 @@ class WikiRetrieverTests(unittest.TestCase):
 
         self.assertEqual(results, [])
 
+    def test_condition_query_uses_local_level_metadata_and_body_opening(self):
+        self.add_page(
+            "level-16-eta.html",
+            "Level 16 η",
+            "https://backrooms.fandom.com/ja/wiki/Level_16_%CE%B7",
+            "JP",
+            "概要: Level 16 ηは静かな駅として記録されている。",
+        )
+        summary = self.root / "extracted_fandom_levels_summary.csv"
+        fields = [
+            "階層コード", "メタタイトル", "危険度", "危険度検索値", "理解度",
+            "理解度検索値", "タグ", "URL", "カテゴリ", "言語", "ソース", "インデックス",
+        ]
+        with summary.open("w", encoding="utf-8-sig", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows([
+                {
+                    "階層コード": "Level 16 η", "メタタイトル": "Level 16 η",
+                    "危険度": "1/5", "危険度検索値": "1/5", "理解度": "80%",
+                    "URL": "https://backrooms.fandom.com/ja/wiki/Level_16_%CE%B7",
+                    "カテゴリ": "normal_eta", "言語": "JP",
+                },
+                {
+                    "階層コード": "Level 17 η", "メタタイトル": "Level 17 η",
+                    "危険度": "3/5", "危険度検索値": "3/5",
+                    "URL": "https://backrooms.fandom.com/ja/wiki/Level_17_%CE%B7",
+                    "カテゴリ": "normal_eta", "言語": "JP",
+                },
+                {
+                    "階層コード": "Level 1", "メタタイトル": "Level 1",
+                    "危険度": "0/5", "危険度検索値": "0/5",
+                    "URL": "https://backrooms.fandom.com/ja/wiki/Level_1",
+                    "カテゴリ": "normal", "言語": "JP",
+                },
+            ])
+
+        retriever = self.retriever()
+        results = asyncio.run(
+            retriever.search_with_fallback(
+                "危険度が0または1のLevel ηのおすすめ", top_k=4
+            )
+        )
+
+        self.assertEqual([item["title"] for item in results], ["Level 16 η"])
+        self.assertIn("カテゴリ: normal_eta", results[0]["excerpt"])
+        self.assertIn("危険度: 1/5", results[0]["excerpt"])
+        self.assertIn("概要の冒頭", results[0]["excerpt"])
+        self.assertEqual(results[0]["status"], "retrieved_from_local_metadata")
+
     def test_non_japanese_archive_is_not_used_when_japanese_match_exists(self):
         self.add_page(
             "jp.html",
@@ -174,7 +225,7 @@ class WikiRetrieverTests(unittest.TestCase):
 
         class FakeSession:
             async def get(self, endpoint, params, **kwargs):
-                requests.append((endpoint, params))
+                requests.append((endpoint, params, kwargs))
                 if params.get("list") == "search":
                     return FakeResponse(
                         {
@@ -217,6 +268,9 @@ class WikiRetrieverTests(unittest.TestCase):
                 )
 
         class FakeAsyncSession:
+            def __init__(self, **kwargs):
+                pass
+
             async def __aenter__(self):
                 return FakeSession()
 
@@ -237,6 +291,7 @@ class WikiRetrieverTests(unittest.TestCase):
         self.assertIn("二月駅はLevel 20 η", results[0]["excerpt"])
         self.assertNotIn("検索スニペット", results[0]["excerpt"])
         self.assertEqual(requests[0][1]["srsearch"], "二月駅")
+        self.assertIn("BrNaviFandomJP", requests[0][2]["headers"]["User-Agent"])
         self.assertEqual(results[0]["status"], "retrieved_live")
         self.assertEqual(results[0]["retrieval_time_basis"], "live_api_retrieval_time")
 
@@ -260,7 +315,10 @@ class WikiRetrieverTests(unittest.TestCase):
                 }
             ]
 
-        with patch.object(retriever, "_online_search", side_effect=fake_online_search):
+        with (
+            patch.object(retriever, "_online_search", side_effect=fake_online_search),
+            patch.object(retriever, "_web_search", return_value=[]),
+        ):
             results = asyncio.run(retriever.search_with_fallback("Level 999とは"))
 
         self.assertEqual(calls, ["ja", "en"])
@@ -287,7 +345,10 @@ class WikiRetrieverTests(unittest.TestCase):
                 }
             ]
 
-        with patch.object(retriever, "_online_search", side_effect=fake_online_search):
+        with (
+            patch.object(retriever, "_online_search", side_effect=fake_online_search),
+            patch.object(retriever, "_web_search", return_value=[]),
+        ):
             results = asyncio.run(retriever.search_with_fallback("二月駅とは"))
 
         self.assertEqual(calls, ["ja"])
@@ -351,6 +412,54 @@ class WikiRetrieverTests(unittest.TestCase):
         self.assertIn("検索にも失敗", response)
         self.assertIn("connection timed out", response)
         self.assertNotIn("ページを確認できませんでした。", response)
+
+    def test_web_search_uses_fandom_api_instead_of_fetching_fandom_html(self):
+        requests = []
+
+        class FakeResponse:
+            text = (
+                '<a class="result__a" href="'
+                'https://backrooms.fandom.com/ja/wiki/Level_0">Level 0</a>'
+            )
+
+            def raise_for_status(self):
+                return None
+
+        class FakeSession:
+            async def get(self, endpoint, **kwargs):
+                requests.append(endpoint)
+                return FakeResponse()
+
+        class FakeAsyncSession:
+            async def __aenter__(self):
+                return FakeSession()
+
+            async def __aexit__(self, *args):
+                return None
+
+        retriever = self.retriever()
+        api_source = {
+            "title": "Level 0",
+            "url": "https://backrooms.fandom.com/ja/wiki/Level_0",
+            "language": "JP",
+            "source_kind": "japanese_wiki",
+            "aliases": ["Level 0"],
+            "body": "Level 0の確認済み本文です。",
+            "excerpt": "Level 0の確認済み本文です。",
+            "file": "オンラインAPI",
+            "retrieved_at": "2026-01-01T00:00:00+00:00",
+            "status": "retrieved_live",
+        }
+        with (
+            patch("modules.ai.wiki_retriever.AsyncSession", FakeAsyncSession),
+            patch.object(retriever, "_online_search", return_value=[api_source]) as api_search,
+        ):
+            results = asyncio.run(retriever._web_search("Level 0", limit=1))
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["status"], "retrieved_live")
+        self.assertEqual(requests, ["https://html.duckduckgo.com/html/"])
+        api_search.assert_awaited_once_with("Level 0", "ja")
 
 
 if __name__ == "__main__":

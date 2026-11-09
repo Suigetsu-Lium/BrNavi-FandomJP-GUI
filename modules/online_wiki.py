@@ -1,13 +1,15 @@
 """Live Fandom page search, reading, and local archival."""
 
 import re
+import os
+import tempfile
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 from curl_cffi import requests
 
-from modules.downloader import download_url
+from modules.downloader import OUTPUT_DIR, find_existing_html, make_filename, modify_html
 
 
 API_URL = "https://backrooms.fandom.com/ja/api.php"
@@ -264,16 +266,35 @@ def save_page(page):
         "indexes": "",
     }
     print(f"オンラインWikiページを保存します: {title} ({url})")
-    saved_path = download_url(
-        url,
-        page_info=metadata,
-        delay=0,
-        overwrite=False,
-        show_detail=True,
+    saved_path = find_existing_html(metadata)
+    if saved_path is not None:
+        print(f"スキップ（取得済み）: {saved_path.name}")
+        return {
+            "path": str(saved_path),
+            "title": title,
+            "images_saved": 0,
+            "images_failed": 0,
+        }
+
+    # Save the content already retrieved through MediaWiki API. A second request
+    # to the public article HTML can be rejected with HTTP 403 by Fandom.
+    fetched_page = fetch_page(url)
+    html_content = modify_html(fetched_page["html"], metadata)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    used_names = {path.name for path in OUTPUT_DIR.glob("*.html")}
+    saved_path = OUTPUT_DIR / make_filename(metadata, used_names)
+    descriptor, staging_path = tempfile.mkstemp(
+        prefix=f".{saved_path.stem}-", suffix=saved_path.suffix, dir=OUTPUT_DIR
     )
-    if saved_path is None:
-        raise RuntimeError("Wiki本文をHTMLとして保存できませんでした。")
-    image_result = _localize_images(saved_path.read_text(encoding="utf-8"), saved_path)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(html_content)
+        os.replace(staging_path, saved_path)
+    except Exception:
+        if os.path.exists(staging_path):
+            os.unlink(staging_path)
+        raise
+    image_result = _localize_images(html_content, saved_path)
     print(
         f"保存完了: {saved_path.name} / "
         f"画像 {image_result['saved']} 件"

@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from modules.ai.assistant import AIAssistant
+from modules.ai.assistant import AIAssistant, NO_VERIFIED_SOURCE_RESPONSE
 from modules.ai.wiki_retriever import WikiRetriever
 
 
@@ -38,22 +38,41 @@ class AssistantTests(unittest.TestCase):
         assistant.retriever.online_search = False
         return assistant
 
+    @staticmethod
+    def attach_source(assistant):
+        async def search_with_source(*args, **kwargs):
+            assistant.retriever.last_search_status = {"online_errors": []}
+            return [{
+                "id": "S1",
+                "title": "Level 0",
+                "url": "https://backrooms.fandom.com/ja/wiki/Level_0",
+                "source_kind": "japanese_wiki",
+                "excerpt": "Level 0の確認済み資料。",
+                "status": "retrieved_from_local_archive",
+            }]
+        assistant.retriever.search_with_fallback = search_with_source
+
     def test_chat_persists_response_version_and_stream_delta(self):
         with tempfile.TemporaryDirectory() as directory:
             assistant = self.create_assistant(
-                directory, [{"content": "# 回答", "finish_reason": "stop"}]
+                directory,
+                [
+                    {"content": "# 回答", "finish_reason": "stop"},
+                    {"content": "# 回答", "finish_reason": "stop"},
+                ],
             )
+            self.attach_source(assistant)
             cid = assistant.new_conversation()
             generation = assistant.store.begin_generation(cid, "質問")
             deltas = []
             result = asyncio.run(assistant.chat(generation, deltas.append))
 
             self.assertEqual(deltas, ["# 回答"])
-            self.assertEqual(result["response"], "# 回答")
+            self.assertTrue(result["response"].startswith("# 回答"))
             self.assertEqual(result["version_number"], 1)
             history = assistant.get_history(cid)
-            self.assertEqual(history[1]["content"], "# 回答")
-            self.assertEqual(history[1]["versions"][0]["content"], "# 回答")
+            self.assertEqual(history[1]["content"], result["response"])
+            self.assertEqual(history[1]["versions"][0]["content"], result["response"])
 
     def test_live_external_source_is_labeled_and_online_errors_are_visible(self):
         source = {
@@ -80,7 +99,7 @@ class AssistantTests(unittest.TestCase):
             }
         )
 
-        self.assertIn("英語版Wiki・オンライン取得", reference)
+        self.assertIn("英語版Wiki（オンライン取得）", reference)
         self.assertIn("取得日時:", reference)
         self.assertIn("Wikiページ更新日時:", reference)
         self.assertIn("connection timed out", warning)
@@ -92,12 +111,14 @@ class AssistantTests(unittest.TestCase):
                 [
                     {"content": "途中", "finish_reason": "length"},
                     {"content": "の続き", "finish_reason": "stop"},
+                    {"content": "途中の続き", "finish_reason": "stop"},
                 ],
             )
+            self.attach_source(assistant)
             cid = assistant.new_conversation()
             generation = assistant.store.begin_generation(cid, "質問")
             result = asyncio.run(assistant.chat(generation))
-            self.assertEqual(result["response"], "途中の続き")
+            self.assertTrue(result["response"].startswith("途中の続き"))
             self.assertEqual(result["finish_reason"], "stop")
             self.assertEqual(len(assistant.get_history(cid)[1]["versions"]), 1)
 
@@ -107,9 +128,11 @@ class AssistantTests(unittest.TestCase):
                 directory,
                 [
                     {"content": "回答1", "finish_reason": "stop"},
+                    {"content": "回答1", "finish_reason": "stop"},
                     RuntimeError("API error"),
                 ],
             )
+            self.attach_source(assistant)
             cid = assistant.new_conversation()
             initial = assistant.store.begin_generation(cid, "質問")
             asyncio.run(assistant.chat(initial))
@@ -121,7 +144,7 @@ class AssistantTests(unittest.TestCase):
                 asyncio.run(assistant.chat(regeneration))
             assistant.store.finish_generation_error(regeneration["request_id"])
             current = assistant.get_history(cid)[1]
-            self.assertEqual(current["content"], "回答1")
+            self.assertTrue(current["content"].startswith("回答1"))
             self.assertEqual(len(current["versions"]), 1)
 
     def test_wiki_lookup_without_sources_returns_uncertainty_without_groq(self):
@@ -138,8 +161,7 @@ class AssistantTests(unittest.TestCase):
 
             result = asyncio.run(assistant.chat(generation))
 
-            self.assertIn("確認できませんでした", result["response"])
-            self.assertIn("具体的な設定は断定できません", result["response"])
+            self.assertEqual(result["response"], NO_VERIFIED_SOURCE_RESPONSE)
             self.assertEqual(result["finish_reason"], "no_verified_sources")
             self.assertEqual(result["sources"], [])
 

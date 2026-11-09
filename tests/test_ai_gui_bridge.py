@@ -4,6 +4,7 @@ import tempfile
 import threading
 import unittest
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from gui_app import BackroomsAPI
 from modules.ai.conversation import ConversationStore
@@ -20,6 +21,43 @@ class BlockingAssistant:
 
 
 class GUIBridgeTests(unittest.TestCase):
+    def test_ai_answer_links_stay_in_app_and_reject_local_addresses(self):
+        api = BackroomsAPI.__new__(BackroomsAPI)
+
+        result = api.navigate_ai_answer_link("https://example.com/reference")
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(api._current_online_wiki_url, "https://example.com/reference")
+        for url in (
+            "javascript:alert(1)",
+            "file:///C:/secret.txt",
+            "http://127.0.0.1/admin",
+            "http://192.168.1.2/",
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(api.navigate_ai_answer_link(url)["status"], "error")
+
+    def test_ai_source_download_requires_explicit_consent(self):
+        api = BackroomsAPI.__new__(BackroomsAPI)
+        api.run_maintenance_task = Mock(return_value={"status": "started"})
+        page = {
+            "title": "Level 16 η",
+            "url": "https://backrooms.fandom.com/ja/wiki/Level_16_%CE%B7",
+            "categories": [],
+        }
+
+        rejected = api.start_ai_source_save(page, "Level 16 ηについて", False)
+        self.assertEqual(rejected["status"], "error")
+        api.run_maintenance_task.assert_not_called()
+
+        accepted = api.start_ai_source_save(page, "Level 16 ηについて", True, "flow-1")
+        self.assertEqual(accepted["status"], "started")
+        api.run_maintenance_task.assert_called_once_with(
+            "save_online_wiki_page",
+            page,
+            options={"ai_prompt": "Level 16 ηについて", "ai_flow_id": "flow-1"},
+        )
+
     def test_cancelled_request_keeps_user_message_without_answer(self):
         with tempfile.TemporaryDirectory() as directory:
             store = ConversationStore(directory)

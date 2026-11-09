@@ -101,7 +101,7 @@ def search_routes(start_query, goal_query, *, base_dir=None, max_results=8, max_
     except (OSError, csv.Error, UnicodeError) as error:
         return {"error": f"経路CSVを読み込めません: {error}", "start_candidates": [], "goal_candidates": [], "routes": []}
     if not graph:
-        return {"error": "経路CSVが見つからないか、接続データが空です。データ保守タブでネットワークを更新してください。", "start_candidates": [], "goal_candidates": [], "routes": []}
+        return {"error": "経路CSVが見つからないか、接続データが空です。環境設定タブで接続CSVを生成してください。", "start_candidates": [], "goal_candidates": [], "routes": []}
     starts, goals = _resolve(start_query, nodes), _resolve(goal_query, nodes)
     result = {"start_candidates": [_node(key, nodes) for key in starts[:30]], "goal_candidates": [_node(key, nodes) for key in goals[:30]], "routes": [], "edge_info": {}}
     if len(starts) != 1 or len(goals) != 1:
@@ -141,7 +141,12 @@ def search_routes(start_query, goal_query, *, base_dir=None, max_results=8, max_
 def build_route_context(query, *, base_dir=None):
     """Return route evidence only when a query mentions a route or location."""
     text = str(query or "")
-    if not re.search(r"経路|ルート|出口|脱出|移動|行き方|到達|どこに|Level\s*[-0-9A-Za-z.]+", text, re.I):
+    if not re.search(
+        r"経路|ルート|出口|脱出|移動|行き方|到達|どこに|放浪者|トラベラー|"
+        r"特異点|召喚|瞬間移動|テレポート|移動条件|Level\s*[-0-9A-Za-z.]+",
+        text,
+        re.I,
+    ):
         return ""
     try:
         nodes, graph, edge_info = load_route_graph(base_dir)
@@ -154,6 +159,24 @@ def build_route_context(query, *, base_dir=None):
     for match in pattern.finditer(text):
         mentions.extend(_resolve(match.group(0), nodes))
     mentions = list(dict.fromkeys(mentions))
+    normalized_query = re.sub(r"\s+", "", _clean(text).casefold())
+    condition_matches = []
+    for (source, target), infos in edge_info.items():
+        if mentions and not ({source, target} & set(mentions)):
+            continue
+        for info in infos:
+            condition = _clean(info.get("condition"))
+            normalized_condition = re.sub(r"\s+", "", condition.casefold())
+            if len(normalized_condition) >= 4 and normalized_condition in normalized_query:
+                condition_matches.append((source, target, info))
+    if condition_matches:
+        rows = ["ローカル経路グラフ（質問に含まれる接続条件と一致。CSV記載に限る）:"]
+        for source, target, info in condition_matches[:12]:
+            rows.append(f"- {source} → {target}")
+            detail = ", ".join(f"{key}={value}" for key, value in info.items() if value)
+            if detail:
+                rows.append(f"  接続情報: {detail}")
+        return "\n".join(rows)
     if len(mentions) == 1:
         current = mentions[0]
         choices = graph.get(current, [])

@@ -10,6 +10,7 @@ import os
 import sys
 import time
 import traceback
+import csv
 
 from modules.runtime_paths import get_application_dir
 from modules.operation_context import OperationCancelled
@@ -152,6 +153,72 @@ def show_database_status(log=print):
         log("  生成済みDBはありません。")
 
 
+def _validate_step_output(name, started_at):
+    parsed_dir = os.path.join(BASE_DIR, "parsed_index")
+    if name == "Fandom JP 一覧HTML取得":
+        expected = [
+            os.path.join(INDEX_HTML_DIR, filename)
+            for filename in (
+                "hierarchy.html", "translation.html", "normal_eta.html",
+                "anomalous.html", "sublevel.html",
+            )
+        ]
+        require_rows = False
+    elif name == "一覧HTML解析・ページDB作成":
+        expected = [
+            os.path.join(parsed_dir, "all_links.csv"),
+            os.path.join(parsed_dir, "pages_database.csv"),
+        ]
+        require_rows = True
+    elif name == "ページ分類":
+        expected = [os.path.join(parsed_dir, "pages_database_classified.csv")]
+        require_rows = True
+    elif name == "翻訳一覧HTML解析":
+        expected = [os.path.join(parsed_dir, "translation_structure.txt")]
+        require_rows = False
+    elif name == "翻訳記事分類":
+        expected = [os.path.join(parsed_dir, "translation_database.csv")]
+        require_rows = True
+    elif name == "Master Database統合":
+        expected = [os.path.join(parsed_dir, "pages_master.csv")]
+        require_rows = True
+    elif name == "言語別Level List生成":
+        try:
+            expected = [
+                os.path.join(LEVEL_LIST_DIR, filename)
+                for filename in os.listdir(LEVEL_LIST_DIR)
+                if filename.casefold().endswith(".txt")
+                and not filename.startswith("_")
+            ]
+        except OSError:
+            expected = []
+        require_rows = False
+    else:
+        return True, []
+
+    if not expected:
+        return False, [LEVEL_LIST_DIR if name == "言語別Level List生成" else parsed_dir]
+
+    invalid = []
+    for path in expected:
+        try:
+            if not os.path.isfile(path) or os.path.getsize(path) == 0:
+                invalid.append(path)
+                continue
+            if os.path.getmtime(path) < started_at - 2:
+                invalid.append(path)
+                continue
+            if require_rows and path.casefold().endswith(".csv"):
+                with open(path, "r", encoding="utf-8-sig", newline="") as stream:
+                    reader = csv.reader(stream)
+                    next(reader, None)
+                    if next(reader, None) is None:
+                        invalid.append(path)
+        except (OSError, csv.Error, UnicodeError):
+            invalid.append(path)
+    return not invalid, invalid
+
+
 def run_step(number, name, function, context=None):
     log = context.log if context else print
     log()
@@ -168,6 +235,13 @@ def run_step(number, name, function, context=None):
         result = function()
         if context:
             context.check_cancelled()
+        valid, invalid_outputs = _validate_step_output(name, start_time)
+        if not valid:
+            log(f"\n【FAILED】[{number}] {name}")
+            log("処理後に必要な出力が確認できませんでした:")
+            for path in invalid_outputs:
+                log(f"  - {path}", "error")
+            return False
         elapsed = time.time() - start_time
 
         if result is False:

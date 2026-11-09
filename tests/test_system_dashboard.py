@@ -4,7 +4,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from modules.app_settings import AppSettingsStore
-from modules.system_dashboard import format_clock, get_network_kind, get_power_status, list_local_images, storage_summary
+from modules.system_dashboard import (
+    filter_local_images,
+    format_clock,
+    get_network_kind,
+    get_power_status,
+    list_local_images,
+    local_saved_level_list,
+    storage_summary,
+)
 
 
 class SystemDashboardTests(unittest.TestCase):
@@ -50,6 +58,26 @@ class SystemDashboardTests(unittest.TestCase):
             self.assertEqual(len(images), 1)
             self.assertEqual(images[0]["level_id"], "Level 12 η")
             self.assertEqual(images[0]["name"], "Level_12_η_photo.jpg")
+
+    def test_local_saved_level_list_counts_only_unique_saved_levels(self):
+        candidates = [
+            {"title": "Level 2", "saved": True},
+            {"title": "Level 2", "saved": True, "subtitle": "duplicate"},
+            {"title": "Level 10 η", "saved": True},
+            {"title": "Level 3", "saved": False},
+            {"title": "The Hub", "saved": True},
+        ]
+        result = local_saved_level_list(candidates)
+        self.assertEqual([item["title"] for item in result], ["Level 2", "Level 10 η"])
+
+    def test_local_image_filter_matches_level_or_filename_case_insensitively(self):
+        images = [
+            {"name": "Level_12_eta_hall.jpg", "level_id": "Level 12 η"},
+            {"name": "Level_4_lobby.png", "level_id": "Level 4"},
+        ]
+        self.assertEqual(len(filter_local_images(images, "LEVEL 12")), 1)
+        self.assertEqual(filter_local_images(images, "lobby"), [images[1]])
+        self.assertEqual(filter_local_images(images, "missing"), [])
 
     def test_status_helpers_return_safe_ui_values(self):
         self.assertIn(get_network_kind(), {"有線LAN", "Wi-Fi", "オフライン"})

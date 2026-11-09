@@ -105,6 +105,34 @@ def list_local_images(image_dir):
     return items
 
 
+def local_saved_level_list(candidates):
+    """Return one row per locally saved Level article from a candidate catalog."""
+    unique = []
+    seen = set()
+    for item in candidates or []:
+        if not isinstance(item, dict) or not item.get("saved"):
+            continue
+        title = str(item.get("title") or "").strip()
+        if not re.match(r"^(?:Level|レベル)\s+-?\d", title, re.IGNORECASE):
+            continue
+        key = re.sub(r"[_\s]+", " ", title).casefold()
+        if key not in seen:
+            unique.append(dict(item))
+            seen.add(key)
+    return unique
+
+
+def filter_local_images(images, query=""):
+    """Filter image gallery records by their inferred Level or file name."""
+    needle = str(query or "").strip().casefold()
+    if not needle:
+        return list(images or [])
+    return [
+        item for item in images or []
+        if needle in f"{item.get('level_id', '')} {item.get('name', '')}".casefold()
+    ]
+
+
 def get_network_kind():
     """Best-effort network type detection; never raises into the UI."""
     try:

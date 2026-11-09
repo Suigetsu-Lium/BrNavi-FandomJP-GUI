@@ -24,7 +24,12 @@ from modules.database import (
 
 # 保守・更新サービス
 from modules.operation_context import OperationCancelled, OperationContext
-from modules.operations import run_maintenance_operation
+from modules.operations import (
+    get_level_list_languages,
+    is_supported_level_list_url,
+    load_level_list_pages,
+    run_maintenance_operation,
+)
 from modules.online_wiki import fetch_page as fetch_online_wiki_page
 from modules.online_wiki import is_supported_wiki_url
 from modules.online_wiki import save_page as save_online_wiki_page
@@ -614,6 +619,38 @@ class BackroomsAPI:
             return {"status": "success"}
         return {"status": "error", "message": "ローカルHTMLがありません。"}
 
+    def get_level_list_languages(self):
+        try:
+            return {"languages": get_level_list_languages()}
+        except OSError as error:
+            return {"error": str(error)}
+
+    def get_level_list_pages(self, language):
+        try:
+            return {"pages": load_level_list_pages(language)}
+        except (OSError, ValueError) as error:
+            return {"error": str(error)}
+
+    def start_level_list_html_download(self, pages, overwrite=False):
+        if not isinstance(pages, list) or not pages:
+            return {"status": "error", "message": "HTML取得するレベルを選択してください。"}
+        validated_pages = []
+        for page in pages:
+            if (
+                not isinstance(page, dict)
+                or not page.get("title")
+                or not is_supported_level_list_url(page.get("url"))
+            ):
+                return {"status": "error", "message": "選択リストに不正なページが含まれています。"}
+            validated_pages.append(dict(page))
+        return self.run_maintenance_task(
+            "download_level_list_html",
+            options={
+                "pages": validated_pages,
+                "overwrite": bool(overwrite),
+            },
+        )
+
     # --- 保守・更新タスク ---
     def search_online_wiki(self, query):
         try:
@@ -672,6 +709,21 @@ class BackroomsAPI:
         except Exception as error:
             print(f"[GUI] WikiブラウザーURLの画面通知に失敗: {error}")
 
+    def _notify_online_wiki_batch_progress(self, current, total, result):
+        main_window = getattr(self, "_main_window", None)
+        if main_window is None:
+            return
+        payload = json.dumps(
+            {"current": current, "total": total, **result},
+            ensure_ascii=True,
+        )
+        try:
+            main_window.evaluate_js(
+                f"onOnlineWikiBatchSaveProgress({payload})"
+            )
+        except Exception as error:
+            print(f"[GUI] Wiki一括保存の進捗通知に失敗: {error}")
+
     def get_current_online_wiki_url(self):
         url = self._current_online_wiki_url
         return {
@@ -697,6 +749,8 @@ class BackroomsAPI:
             return {"status": "error", "message": "保存するWikiページが不正です。"}
         if not page.get("title") or not page.get("url"):
             return {"status": "error", "message": "ページ名またはURLがありません。"}
+        if not is_supported_wiki_url(page["url"]):
+            return {"status": "error", "message": "日本語版Backrooms WikiのURLを指定してください。"}
         return self.run_maintenance_task("save_online_wiki_page", page)
 
     def run_maintenance_task(self, task_name, selected_urls=None, options=None):
@@ -732,27 +786,59 @@ class BackroomsAPI:
         return {"status": "cancelling", "message": "安全な停止位置で処理を停止します。"}
 
     def _execute_task(self, task_name, selected_urls=None, options=None):
-        if task_name == "save_online_wiki_page":
+        if task_name in {"save_online_wiki_page", "save_online_wiki_pages"}:
+            batch = task_name == "save_online_wiki_pages"
+            pages = selected_urls if batch else [selected_urls]
             payload = {"ok": False}
+            results = []
             try:
-                page = selected_urls
-                print(
-                    f"GUIから選択されたWikiページを保存します: "
-                    f"{page.get('title', '')}"
-                )
-                result = save_online_wiki_page(page)
-                payload = {"ok": True, **result}
-            except Exception as error:
-                print(f"Wikiページ保存エラー: {error}")
-                payload["error"] = str(error)
+                for index, page in enumerate(pages, 1):
+                    if self._maintenance_cancel_event.is_set():
+                        break
+                    print(
+                        f"GUIから選択されたWikiページを保存します: "
+                        f"{page.get('title', '')}"
+                    )
+                    try:
+                        result = save_online_wiki_page(page)
+                        results.append({"ok": True, **result})
+                    except Exception as error:
+                        print(f"Wikiページ保存エラー: {error}")
+                        results.append({
+                            "ok": False,
+                            "title": page.get("title", ""),
+                            "error": str(error),
+                        })
+                    if batch:
+                        self._notify_online_wiki_batch_progress(
+                            index,
+                            len(pages),
+                            results[-1],
+                        )
+                if batch:
+                    succeeded = sum(1 for result in results if result["ok"])
+                    payload = {
+                        "ok": succeeded == len(pages),
+                        "cancelled": self._maintenance_cancel_event.is_set(),
+                        "saved": succeeded,
+                        "failed": len(results) - succeeded,
+                        "total": len(pages),
+                        "results": results,
+                    }
+                else:
+                    payload = results[0]
             finally:
                 self._maintenance_done_event.set()
                 try:
                     encoded = json.dumps(payload, ensure_ascii=True)
                     main_window = getattr(self, "_main_window", None)
                     if main_window is not None:
+                        callback = (
+                            "onOnlineWikiBatchSaveCompleted"
+                            if batch else "onOnlineWikiSaveCompleted"
+                        )
                         main_window.evaluate_js(
-                            f"onOnlineWikiSaveCompleted({encoded})"
+                            f"{callback}({encoded})"
                         )
                 except Exception as error:
                     print(f"[GUI] Wiki保存完了通知に失敗: {error}")
@@ -760,6 +846,7 @@ class BackroomsAPI:
             return
 
         task_labels = {
+            "download_level_list_html": "レベルリストからHTML取得",
             "update_master": "既存データベース更新",
             "extract_info": "情報データベース更新",
             "update_network": "ネットワーク更新",
@@ -1052,6 +1139,7 @@ HTML_TEMPLATE = r"""
     <div class="flex space-x-2">
       <button onclick="switchTab('explorer')" id="tab-btn-explorer" class="px-4 py-1.5 rounded text-xs font-semibold bg-[#b45309] text-white transition shadow">📖 Level 図鑑・検索</button>
       <button onclick="switchTab('wiki')" id="tab-btn-wiki" class="px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition">🌐 Wiki閲覧・保存</button>
+      <button onclick="switchTab('data-tools')" id="tab-btn-data-tools" class="px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition">⬇️ HTML取得・データ抽出</button>
       <button onclick="switchTab('maintenance')" id="tab-btn-maintenance" class="px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition">⚙️ データ保守</button>
       <button onclick="switchTab('ai')" id="tab-btn-ai" class="px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition">🤖 AI Assistant</button>
       <button onclick="showAbout()" id="about-button" class="px-3 py-1.5 rounded text-xs font-semibold bg-gray-700 text-gray-200 hover:bg-gray-600 transition">アプリ情報</button>
@@ -1223,7 +1311,7 @@ HTML_TEMPLATE = r"""
           <span id="online-wiki-save-status" class="shrink-0 text-[11px] text-gray-600">保存先: downloaded_fandom_html</span>
         </div>
         <div class="flex-1 min-h-0 overflow-hidden rounded border border-[#d6c79a] bg-white">
-          <iframe id="online-wiki-frame"
+          <iframe id="online-wiki-frame" onload="onOnlineWikiFrameLoaded()"
             title="日本語版Backrooms Wiki"
             class="w-full h-full border-0 bg-white"
             referrerpolicy="strict-origin-when-cross-origin"></iframe>
@@ -1235,7 +1323,59 @@ HTML_TEMPLATE = r"""
       </div>
     </div>
 
-    <!-- 3. ⚙️ データベース保守タブ -->
+    <!-- 3. ⬇️ レベルリスト基準のHTML取得・データ抽出 -->
+    <section id="view-data-tools" class="hidden flex-1 min-h-0 flex flex-col p-4 bg-[#fbf6de] overflow-hidden">
+      <div class="w-full max-w-6xl mx-auto flex-1 min-h-0 flex flex-col bg-white border border-[#e2d8b5] p-4 rounded shadow-sm gap-3">
+        <div class="flex items-center justify-between gap-3">
+          <div>
+            <h2 class="text-base font-bold text-gray-800">⬇️ HTML取得・データ抽出</h2>
+            <p class="text-[11px] text-gray-500">level_listsフォルダーの言語別レベルリストを使います。検索結果は使用しません。</p>
+          </div>
+          <span id="level-list-status" class="text-[11px] text-gray-600" aria-live="polite">レベルリストを読み込み中...</span>
+        </div>
+        <div class="flex flex-wrap items-center gap-2">
+          <label for="level-list-language" class="text-xs font-semibold text-gray-700">リスト</label>
+          <select id="level-list-language" onchange="loadLevelListPages()"
+            class="min-w-24 border border-[#d6c79a] rounded px-2 py-1.5 text-xs bg-white"></select>
+          <input id="level-list-filter" type="search" oninput="filterLevelListTiles()"
+            class="min-w-48 flex-1 border border-[#d6c79a] rounded px-3 py-1.5 text-xs"
+            placeholder="タイトル・カテゴリで絞り込み">
+          <label class="flex items-center gap-1.5 text-xs text-gray-700">
+            <input id="level-list-overwrite" type="checkbox">
+            取得済みHTMLを上書き
+          </label>
+        </div>
+        <div class="flex flex-wrap items-center justify-between gap-2 border-y border-[#e2d8b5] py-2">
+          <div class="text-xs text-gray-700">
+            <span id="level-list-total">0件</span>
+            <span class="mx-1">/</span>
+            <span id="level-list-selection-count" aria-live="polite">0件選択中</span>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            <button id="level-list-download-button" onclick="downloadSelectedLevelListPages()" disabled
+              class="px-3 py-1.5 rounded bg-[#b45309] text-white text-xs font-semibold disabled:opacity-40">選択項目のHTMLを取得</button>
+            <button onclick="runLevelListExtraction()"
+              class="px-3 py-1.5 rounded bg-[#91520f] text-white text-xs font-semibold">取得済みHTMLからデータ抽出</button>
+            <button id="level-list-clear-selection" onclick="clearLevelListSelection()" disabled
+              class="px-3 py-1.5 rounded border border-[#d6c79a] text-xs disabled:opacity-40">選択解除</button>
+            <button id="level-list-cancel-button" onclick="cancelMaintenanceTask()" disabled
+              class="px-3 py-1.5 rounded bg-red-700 text-white text-xs disabled:opacity-40">処理停止</button>
+          </div>
+        </div>
+        <div id="level-list-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2 flex-1 min-h-0 overflow-y-auto p-1 select-none"
+          aria-label="レベルリスト"></div>
+        <div class="border-t border-[#e2d8b5] pt-2 space-y-2">
+          <div id="level-list-task-status" class="text-xs text-gray-600" role="status" aria-live="polite">HTML取得またはデータ抽出を選択してください。</div>
+          <div class="flex items-center gap-2">
+            <progress id="level-list-progress" max="100" value="0" class="hidden flex-1 h-2"></progress>
+            <span id="level-list-progress-label" class="text-[11px] text-gray-500">待機中</span>
+          </div>
+          <pre id="level-list-log" class="max-h-32 overflow-auto whitespace-pre-wrap break-words rounded border border-[#e2d8b5] bg-[#fffdf5] p-2 text-[10px] text-gray-700"></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- 4. ⚙️ データベース保守タブ -->
     <div id="view-maintenance" class="hidden flex-1 flex flex-col p-8 bg-[#fbf6de] overflow-y-auto">
       <div class="max-w-3xl mx-auto w-full bg-white border border-[#e2d8b5] p-6 rounded shadow-sm space-y-5">
         <h2 class="text-lg font-bold text-gray-800 border-b border-gray-200 pb-2">⚙️ データ保守</h2>
@@ -1275,7 +1415,7 @@ HTML_TEMPLATE = r"""
       </div>
     </div>
 
-    <!-- 4. BrNavi AI Assistant -->
+    <!-- 5. BrNavi AI Assistant -->
     <section id="view-ai" class="hidden flex-1 min-w-0 flex flex-col bg-[#fbf6de]">
       <div class="flex items-center justify-between px-5 py-3 bg-[#f2e8c5] border-b border-[#e2d8b5]">
         <div>
@@ -1360,7 +1500,7 @@ HTML_TEMPLATE = r"""
     }
 
     function switchTab(tab) {
-      ['explorer', 'wiki', 'maintenance', 'ai'].forEach(t => {
+      ['explorer', 'wiki', 'data-tools', 'maintenance', 'ai'].forEach(t => {
         document.getElementById('view-' + t).classList.add('hidden');
         document.getElementById('tab-btn-' + t).className = "px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition";
       });
@@ -1368,6 +1508,9 @@ HTML_TEMPLATE = r"""
       document.getElementById('tab-btn-' + tab).className = "px-4 py-1.5 rounded text-xs font-semibold bg-[#b45309] text-white transition shadow";
       if (tab === 'wiki' && !onlineWikiDefaultOpened) {
         openDirectWikiUrl();
+      }
+      if (tab === 'data-tools' && !levelListLanguagesLoaded) {
+        loadLevelListLanguages();
       }
     }
 
@@ -1507,8 +1650,216 @@ HTML_TEMPLATE = r"""
       }
     }
 
+    let levelListLanguagesLoaded = false;
+    let levelListPages = [];
+    let visibleLevelListPages = [];
+    let selectedLevelPages = new Map();
+    let levelListAnchorUrl = null;
+    let levelListTaskBusy = false;
+
+    async function loadLevelListLanguages() {
+      const status = document.getElementById('level-list-status');
+      status.textContent = "level_listsフォルダーを確認しています...";
+      try {
+        const result = await pywebview.api.get_level_list_languages();
+        if (result.error) throw new Error(result.error);
+        const select = document.getElementById('level-list-language');
+        select.replaceChildren();
+        (result.languages || []).forEach(language => {
+          const option = document.createElement('option');
+          option.value = language;
+          option.textContent = language;
+          select.appendChild(option);
+        });
+        if (!result.languages || result.languages.length === 0) {
+          status.textContent = "言語別レベルリストがありません。データ保守からLevel Listを生成してください。";
+          return;
+        }
+        levelListLanguagesLoaded = true;
+        select.value = result.languages.includes("JP") ? "JP" : result.languages[0];
+        await loadLevelListPages();
+      } catch (error) {
+        status.textContent = "レベルリストを読み込めません: " + error;
+      }
+    }
+
+    async function loadLevelListPages() {
+      const language = document.getElementById('level-list-language').value;
+      if (!language) return;
+      const status = document.getElementById('level-list-status');
+      selectedLevelPages.clear();
+      levelListAnchorUrl = null;
+      updateLevelListSelectionControls();
+      status.textContent = `${language}.txtを読み込み中...`;
+      try {
+        const result = await pywebview.api.get_level_list_pages(language);
+        if (result.error) throw new Error(result.error);
+        levelListPages = result.pages || [];
+        filterLevelListTiles();
+        status.textContent = `${language}.txtから${levelListPages.length}件を読み込みました。`;
+      } catch (error) {
+        levelListPages = [];
+        filterLevelListTiles();
+        status.textContent = "レベルリストを読み込めません: " + error;
+      }
+    }
+
+    function filterLevelListTiles() {
+      const query = document.getElementById('level-list-filter').value.trim().toLocaleLowerCase();
+      visibleLevelListPages = levelListPages.filter(page =>
+        !query || `${page.title} ${page.category_label || ""} ${page.category || ""}`
+          .toLocaleLowerCase().includes(query)
+      );
+      const grid = document.getElementById('level-list-grid');
+      grid.replaceChildren();
+      visibleLevelListPages.forEach(page => {
+        const selected = selectedLevelPages.has(page.url);
+        const tile = document.createElement('div');
+        tile.className = "relative min-h-20 p-3 pr-9 rounded border cursor-pointer select-none transition " +
+          (selected ? "border-[#b45309] bg-[#fff4d6] ring-1 ring-[#b45309]" : "border-[#dfd3a8] bg-white hover:border-[#b45309]");
+        tile.dataset.url = page.url;
+        tile.setAttribute("role", "checkbox");
+        tile.setAttribute("aria-checked", String(selected));
+        tile.setAttribute("aria-label", `${page.title}をHTML取得対象に選択`);
+        tile.tabIndex = 0;
+        tile.onclick = event => selectLevelListTile(page, event.shiftKey);
+        tile.onkeydown = event => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            selectLevelListTile(page, event.shiftKey);
+          }
+        };
+        const mark = document.createElement('span');
+        mark.className = "absolute right-3 top-2 text-base font-bold " +
+          (selected ? "text-[#b45309]" : "text-transparent");
+        mark.textContent = "✓";
+        const title = document.createElement('div');
+        title.className = "font-semibold text-xs text-gray-800 break-words";
+        title.textContent = page.title;
+        const details = document.createElement('div');
+        details.className = "mt-2 flex flex-wrap gap-1";
+        [page.category_label, page.language].filter(Boolean).forEach(value => {
+          const tag = document.createElement('span');
+          tag.className = "px-1.5 py-0.5 rounded bg-[#f5eed3] text-[10px] text-gray-600";
+          tag.textContent = value;
+          details.appendChild(tag);
+        });
+        tile.append(mark, title, details);
+        grid.appendChild(tile);
+      });
+      document.getElementById('level-list-total').textContent =
+        `${visibleLevelListPages.length}件表示 / 全${levelListPages.length}件`;
+      updateLevelListSelectionControls();
+    }
+
+    function selectLevelListTile(page, extendRange) {
+      if (extendRange && levelListAnchorUrl) {
+        const anchorIndex = visibleLevelListPages.findIndex(item => item.url === levelListAnchorUrl);
+        const targetIndex = visibleLevelListPages.findIndex(item => item.url === page.url);
+        if (anchorIndex >= 0 && targetIndex >= 0) {
+          const range = visibleLevelListPages.slice(
+            Math.min(anchorIndex, targetIndex),
+            Math.max(anchorIndex, targetIndex) + 1
+          );
+          selectedLevelPages = new Map(range.map(item => [item.url, item]));
+        } else {
+          selectedLevelPages = new Map([[page.url, page]]);
+          levelListAnchorUrl = page.url;
+        }
+      } else {
+        selectedLevelPages = new Map([[page.url, page]]);
+        levelListAnchorUrl = page.url;
+      }
+      updateLevelListSelectionControls();
+    }
+
+    function updateLevelListSelectionControls() {
+      const count = selectedLevelPages.size;
+      document.getElementById('level-list-selection-count').textContent = `${count}件選択中`;
+      document.getElementById('level-list-clear-selection').disabled = count === 0;
+      document.getElementById('level-list-download-button').disabled =
+        count === 0 || levelListTaskBusy;
+      document.querySelectorAll('#level-list-grid [role="checkbox"]').forEach(tile => {
+        const selected = selectedLevelPages.has(tile.dataset.url);
+        tile.setAttribute("aria-checked", String(selected));
+        tile.classList.toggle("border-[#b45309]", selected);
+        tile.classList.toggle("bg-[#fff4d6]", selected);
+        tile.classList.toggle("ring-1", selected);
+        tile.classList.toggle("ring-[#b45309]", selected);
+        const mark = tile.querySelector("span.absolute");
+        if (mark) {
+          mark.classList.toggle("text-[#b45309]", selected);
+          mark.classList.toggle("text-transparent", !selected);
+        }
+      });
+    }
+
+    function clearLevelListSelection() {
+      selectedLevelPages.clear();
+      levelListAnchorUrl = null;
+      updateLevelListSelectionControls();
+    }
+
+    function setLevelListTaskBusy(busy) {
+      levelListTaskBusy = busy;
+      document.getElementById('level-list-cancel-button').disabled = !busy;
+      document.getElementById('level-list-download-button').disabled =
+        busy || selectedLevelPages.size === 0;
+      document.getElementById('level-list-language').disabled = busy;
+      document.getElementById('level-list-filter').disabled = busy;
+      document.getElementById('level-list-overwrite').disabled = busy;
+      document.querySelectorAll('#view-data-tools button').forEach(button => {
+        if (button.id !== "level-list-cancel-button" &&
+            button.id !== "level-list-clear-selection" &&
+            button.id !== "level-list-download-button") {
+          button.disabled = busy;
+        }
+      });
+    }
+
+    async function downloadSelectedLevelListPages() {
+      if (levelListTaskBusy || selectedLevelPages.size === 0) return;
+      const pages = Array.from(selectedLevelPages.values());
+      setLevelListTaskBusy(true);
+      document.getElementById('level-list-log').textContent = "";
+      document.getElementById('level-list-task-status').textContent =
+        `${pages.length}件のHTML取得を開始しています...`;
+      try {
+        const result = await pywebview.api.start_level_list_html_download(
+          pages,
+          document.getElementById('level-list-overwrite').checked
+        );
+        if (result.status !== "started") {
+          setLevelListTaskBusy(false);
+          document.getElementById('level-list-task-status').textContent =
+            result.message || "HTML取得を開始できませんでした。";
+        }
+      } catch (error) {
+        setLevelListTaskBusy(false);
+        document.getElementById('level-list-task-status').textContent =
+          "HTML取得開始エラー: " + error;
+      }
+    }
+
+    function runLevelListExtraction() {
+      if (levelListTaskBusy) return;
+      document.getElementById('level-list-log').textContent = "";
+      setLevelListTaskBusy(true);
+      runTask('extract_info');
+    }
+
+    function appendLevelListLog(entry) {
+      const log = document.getElementById('level-list-log');
+      log.textContent += (entry.message || "") + "\n";
+      const lines = log.textContent.split("\n");
+      if (lines.length > 300) log.textContent = lines.slice(-300).join("\n");
+      log.scrollTop = log.scrollHeight;
+    }
+
     let htmlDownloadPages = [];
     let onlineWikiBrowserBusy = false;
+    let onlineWikiNavigationPending = false;
+    let onlineWikiNavigationTimeout = null;
     let onlineWikiSearchBusy = false;
     let onlineWikiCurrentUrl = "";
     let onlineWikiCurrentIsWiki = false;
@@ -1596,6 +1947,8 @@ HTML_TEMPLATE = r"""
       const url = document.getElementById('online-wiki-url').value.trim();
       const status = document.getElementById('html-download-status');
       onlineWikiBrowserBusy = true;
+      onlineWikiNavigationPending = true;
+      if (onlineWikiNavigationTimeout) clearTimeout(onlineWikiNavigationTimeout);
       status.textContent = "埋め込みブラウザーでFandomを開いています...";
       onlineWikiCurrentUrl = "";
       onlineWikiCurrentIsWiki = false;
@@ -1606,17 +1959,21 @@ HTML_TEMPLATE = r"""
         onlineWikiDefaultOpened = true;
         status.textContent = "Wikiページをアプリ内に表示しています。";
         document.getElementById('online-wiki-frame').src = result.url;
-        onOnlineWikiBrowserUrlChanged({url: result.url, is_wiki_page: true});
+        onlineWikiNavigationTimeout = setTimeout(() => {
+          if (!onlineWikiNavigationPending) return;
+          onlineWikiNavigationPending = false;
+          onlineWikiBrowserBusy = false;
+          onlineWikiCurrentIsWiki = false;
+          document.getElementById('online-wiki-current-url').textContent =
+            "ページの読み込みを確認できませんでした。URLを再確認してください。";
+          document.getElementById('online-wiki-save-current').disabled = true;
+          status.textContent = "ページの読み込みがタイムアウトしました。";
+        }, 45000);
       } catch (error) {
-        status.textContent = "Fandomを開けませんでした: " + error;
-      } finally {
+        onlineWikiNavigationPending = false;
         onlineWikiBrowserBusy = false;
-        if (onlineWikiCurrentUrl) {
-          onOnlineWikiBrowserUrlChanged({
-            url: onlineWikiCurrentUrl,
-            is_wiki_page: onlineWikiCurrentIsWiki
-          });
-        }
+        status.textContent = "Fandomを開けませんでした: " + error;
+        updateOnlineWikiSelectionControls();
       }
     }
 
@@ -1629,9 +1986,18 @@ HTML_TEMPLATE = r"""
       document.getElementById('online-wiki-current-url').textContent =
         onlineWikiCurrentUrl || "Fandomページはまだ開かれていません。";
       document.getElementById('online-wiki-current-url').title = onlineWikiCurrentUrl;
-      document.getElementById('online-wiki-save-current').disabled =
-        !result.is_wiki_page || onlineWikiBrowserBusy;
+    document.getElementById('online-wiki-save-current').disabled =
+      !result.is_wiki_page || onlineWikiBrowserBusy;
     }
+
+    async function onOnlineWikiFrameLoaded() {
+    if (onlineWikiNavigationPending) {
+      onlineWikiNavigationPending = false;
+      if (onlineWikiNavigationTimeout) clearTimeout(onlineWikiNavigationTimeout);
+      onlineWikiNavigationTimeout = null;
+      onlineWikiBrowserBusy = false;
+    }
+    await updateOnlineWikiCurrentUrl();
 
     async function updateOnlineWikiCurrentUrl() {
       try {
@@ -1684,6 +2050,7 @@ HTML_TEMPLATE = r"""
 
     function setMaintenanceBusy(busy) {
       document.getElementById('maintenance-cancel').disabled = !busy;
+      document.getElementById('level-list-cancel-button').disabled = !busy;
     }
 
     async function runTask(taskName, options = {}) {
@@ -1696,15 +2063,18 @@ HTML_TEMPLATE = r"""
       progressBar.classList.add('hidden');
       document.getElementById('maintenance-progress-label').textContent = "開始中";
       setMaintenanceBusy(true);
+      setLevelListTaskBusy(true);
       try {
         const result = await pywebview.api.run_maintenance_task(taskName, null, options);
         if (result.status !== "started") {
           setMaintenanceBusy(false);
+          setLevelListTaskBusy(false);
           status.textContent = result.message || "タスクを開始できませんでした。";
           status.className = "min-h-10 rounded border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-800";
         }
       } catch (error) {
         setMaintenanceBusy(false);
+        setLevelListTaskBusy(false);
         status.textContent = "タスク開始エラー: " + error;
         status.className = "min-h-10 rounded border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-800";
       }
@@ -1720,7 +2090,10 @@ HTML_TEMPLATE = r"""
         if (result.status === "idle") setMaintenanceBusy(false);
       } catch (error) {
         button.disabled = false;
+        document.getElementById('level-list-cancel-button').disabled = false;
         document.getElementById('maintenance-task-status').textContent =
+          "停止要求エラー: " + error;
+        document.getElementById('level-list-task-status').textContent =
           "停止要求エラー: " + error;
       }
     }
@@ -1731,6 +2104,7 @@ HTML_TEMPLATE = r"""
       const lines = log.textContent.split("\n");
       if (lines.length > 300) log.textContent = lines.slice(-300).join("\n");
       log.scrollTop = log.scrollHeight;
+      appendLevelListLog(entry);
     }
 
     function onMaintenanceProgress(progress) {
@@ -1744,6 +2118,16 @@ HTML_TEMPLATE = r"""
         bar.classList.add('hidden');
         label.textContent = progress.message || "処理中";
       }
+      const listBar = document.getElementById('level-list-progress');
+      const listLabel = document.getElementById('level-list-progress-label');
+      if (Number.isFinite(progress.current) && Number.isFinite(progress.total) && progress.total > 0) {
+        listBar.classList.remove('hidden');
+        listBar.value = Math.min(100, Math.round(progress.current * 100 / progress.total));
+        listLabel.textContent = `${progress.current}/${progress.total} ${progress.message || ""}`;
+      } else {
+        listBar.classList.add('hidden');
+        listLabel.textContent = progress.message || "処理中";
+      }
     }
 
     function onMaintenanceTaskCompleted(result) {
@@ -1754,10 +2138,16 @@ HTML_TEMPLATE = r"""
         : result.ok
         ? "min-h-10 rounded border border-green-300 bg-green-50 px-3 py-2 text-xs text-green-800"
         : "min-h-10 rounded border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-800";
+      const listStatus = document.getElementById('level-list-task-status');
+      listStatus.textContent = status.textContent;
       document.getElementById('maintenance-progress-label').textContent =
         result.cancelled ? "停止しました" : (result.ok ? "完了" : "失敗");
       document.getElementById('maintenance-progress').classList.add('hidden');
+      document.getElementById('level-list-progress-label').textContent =
+        result.cancelled ? "停止しました" : (result.ok ? "完了" : "失敗");
+      document.getElementById('level-list-progress').classList.add('hidden');
       setMaintenanceBusy(false);
+      setLevelListTaskBusy(false);
       onSearchInput();
     }
 

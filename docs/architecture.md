@@ -8,7 +8,7 @@
 
 | ファイル / モジュール | 責務 |
 | --- | --- |
-| `gui_app.py` | GUIのHTML/CSS/JavaScript、pywebview APIブリッジ、Level検索、保守タスクの起動 |
+| `gui_app.py` | GUIのHTML/CSS/JavaScript、pywebview APIブリッジ、Level検索、レベルリストHTML取得、保守タスクの起動 |
 | `modules/runtime_paths.py` | ソース実行時と凍結実行ファイル実行時のアプリケーションデータルート解決 |
 | `modules/version.py` | GUI/CLI/ビルド処理で共用する `VERSION` 定数 |
 | `modules/online_wiki.py` | Fandom MediaWiki API検索、ページ本文取得、URL検証、画像付きHTML保存 |
@@ -18,7 +18,7 @@
 | `modules/ai/markdown_renderer.py` | Markdown変換、Pygmentsコードハイライト、HTMLサニタイズ |
 | `modules/ai/conversation.py` | SQLiteスキーマ、会話・メッセージ・回答バージョンの永続化 |
 | `modules/database.py` | 既存Master Database、LevelデータやローカルHTMLへのアクセス |
-| `modules/downloader.py` | 従来のMaster DBベースのHTMLダウンロードとURLダウンロード |
+| `modules/downloader.py` | Master DBベースのHTMLダウンロードとURLダウンロード。保存は同一ディレクトリの一時ファイルから置換 |
 | `modules/extractor.py` | 保存済みHTMLから本文・タグなどを抽出 |
 | `modules/network.py` / `modules/navigator.py` | 抽出データから接続ネットワークを生成し、経路を検索 |
 | `modules/operation_context.py` / `modules/operations.py` | GUI・CLIから利用する保守操作の実行文脈、ログ・進捗・協調キャンセル、サービス入口 |
@@ -59,6 +59,14 @@ Windowsでは `webview.start(gui="edgechromium")` を使い、WebView2をレン�
 5. HTML内の許可されたFandom画像ホストを調べて画像を取得し、記事名に対応する `_assets` フォルダーへ相対パスで保存します。1ページあたり最大40画像、1画像あたり20 MiBまでです。
 
 閲覧ではFandom本来のページ表示を保ち、保存では既存ダウンローダーとの互換性を保つ設計です。画面に描画されたiframeのDOMそのものは保存しません。Fandomのページ構造・レスポンスヘッダー・画像ホストの変更により表示や保存が影響を受けることがあります。
+
+## レベルリストHTML取得・データ抽出
+
+- GUIの「HTML取得・データ抽出」タブは `level_lists/*.txt` を読み込みます。各ファイルのカテゴリ見出し、番号付きタイトル、URL、および `SOURCE` / `INDEX` / `TRANSLATION_SECTION` を解析し、利用可能な言語を選べるようにします。`_summary.txt` は言語リストから除外します。
+- タイトル・カテゴリを含むレスポンシブなCSS Gridを使い、単一選択、アンカーからのShift範囲選択、選択解除を画面内で管理します。言語切り替え時は選択とアンカーをリセットします。検索結果タイルとWiki閲覧・保存の動作は共有しません。
+- GUI APIは選択データを再検証し、HTTPSかつ `backrooms.fandom.com` のWiki記事URLだけを保守サービスへ渡します。HTML取得は既存の `download_page()` を利用し、取得済みファイルは上書き指定がなければスキップします。
+- `download_url()` は取得したHTMLを同一ディレクトリの一時ファイルに書き、キャンセル確認後に `os.replace()` で切り替えます。キャンセルや書き込み失敗時に既存ファイルを途中まで上書きしないための処理です。キャンセルはページ間と保存前に確認し、進行中のHTTP要求は強制終了せずタイムアウト後に処理を止めます。
+- 「取得済みHTMLからデータ抽出」は既存の `extract_info` 操作を呼び出し、`downloaded_fandom_html/` にあるHTML全体を対象にします。選択タイルはHTML取得対象を決めるもので、抽出時のページ絞り込みには使いません。
 
 ## 保守操作と共有サービス層
 
@@ -180,7 +188,8 @@ erDiagram
 | `extracted_fandom_levels/` | HTMLから抽出したLevel本文TXT。図鑑・AI検索に利用 |
 | `downloaded_images/` | Level図鑑用画像 |
 | `database/ai/` | SQLite会話DB、マイグレーションバックアップ、AI設定JSON |
-| `level_lists/`, `index_html/` | コンソール版の既存データ／配布用ビルドで扱うデータ |
+| `level_lists/` | コンソール版の生成データ。GUIの言語別HTML取得タブも参照 |
+| `index_html/` | コンソール版の既存データ／配布用ビルドで扱うデータ |
 
 Wikiのオンライン閲覧・保存以外の機能は、対応するローカルデータが必要です。データは常にリポジトリや配布物へ同梱されるとは限りません。
 

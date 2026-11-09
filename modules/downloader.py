@@ -74,13 +74,16 @@ HTMLには管理用BRNAVI_META_INFOコメントを埋め込む。
 """
 
 import csv
+import os
 import re
+import tempfile
 import time
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from bs4 import BeautifulSoup
 from curl_cffi import requests
+from modules.operation_context import OperationCancelled
 from modules.runtime_paths import get_application_dir
 
 
@@ -849,11 +852,18 @@ def download_url(
     page_info=None,
     delay=DEFAULT_DELAY,
     overwrite=False,
-    show_detail=True
+    show_detail=True,
+    context=None,
 ):
     """
     URLを直接ダウンロードする。
     """
+
+    def log(message="", level="info"):
+        if context:
+            context.log(message, level)
+        else:
+            print(message)
 
     url = clean_value(
         url
@@ -861,7 +871,7 @@ def download_url(
 
     if not url:
 
-        print(
+        log(
             "【エラー】URLが指定されていません。"
         )
 
@@ -913,7 +923,7 @@ def download_url(
 
         if show_detail:
 
-            print(
+            log(
                 f"スキップ（取得済み）: "
                 f"{existing.name}"
             )
@@ -962,42 +972,42 @@ def download_url(
 
     if show_detail:
 
-        print()
-        print(
+        log()
+        log(
             "-" * 70
         )
 
-        print(
+        log(
             f"タイトル : "
             f"{page_info.get('title', '') or '(タイトルなし)'}"
         )
 
-        print(
+        log(
             f"言語     : "
             f"{page_info.get('language', '') or '-'}"
         )
 
-        print(
+        log(
             f"カテゴリ : "
             f"{page_info.get('category', '') or '-'}"
         )
 
-        print(
+        log(
             f"ソース   : "
             f"{page_info.get('source_type', '') or '-'}"
         )
 
-        print(
+        log(
             f"URL      : "
             f"{url}"
         )
 
-        print(
+        log(
             f"保存先   : "
             f"{file_path.name}"
         )
 
-        print(
+        log(
             "-" * 70
         )
 
@@ -1005,7 +1015,10 @@ def download_url(
     # HTTP
     # -------------------------------------------------------------------------
 
+    staging_path = None
     try:
+        if context:
+            context.check_cancelled()
 
         response = requests.get(
             url,
@@ -1024,49 +1037,54 @@ def download_url(
                 page_info
             )
 
-            with open(
-                file_path,
-                "w",
-                encoding="utf-8"
-            ) as file:
+            file_descriptor, staging_path = tempfile.mkstemp(
+                prefix=f".{file_path.stem}-",
+                suffix=file_path.suffix,
+                dir=OUTPUT_DIR,
+            )
+            with os.fdopen(file_descriptor, "w", encoding="utf-8") as file:
+                file.write(modified_html)
+            if context:
+                context.check_cancelled()
+            os.replace(staging_path, file_path)
+            staging_path = None
 
-                file.write(
-                    modified_html
-                )
+            if show_detail or context:
 
-            if show_detail:
-
-                print(
+                log(
                     f"成功: "
                     f"{file_path.name}"
                 )
 
             return file_path
 
-        if show_detail:
+        if show_detail or context:
 
-            print(
-                f"エラー "
-                f"(ステータスコード: "
-                f"{response.status_code})"
+            log(
+                f"HTTPエラー (ステータスコード: {response.status_code})",
+                "error",
             )
 
         return None
 
+    except OperationCancelled:
+        raise
     except Exception as e:
 
-        if show_detail:
+        if show_detail or context:
 
-            print(
-                f"通信エラー: "
-                f"{e}"
+            log(
+                f"通信エラー: {e}",
+                "error",
             )
 
         return None
 
     finally:
+        if staging_path and os.path.exists(staging_path):
+            os.unlink(staging_path)
 
-        if delay > 0:
+        if delay > 0 and not context:
 
             time.sleep(
                 delay
@@ -1081,7 +1099,8 @@ def download_page(
     page,
     overwrite=False,
     delay=DEFAULT_DELAY,
-    show_detail=True
+    show_detail=True,
+    context=None,
 ):
     """
     Master DBの1ページをダウンロードする。
@@ -1089,9 +1108,12 @@ def download_page(
 
     if not page:
 
-        print(
-            "【エラー】ページ情報がありません。"
-        )
+        if context:
+            context.log("【エラー】ページ情報がありません。", "error")
+        else:
+            print(
+                "【エラー】ページ情報がありません。"
+            )
 
         return None
 
@@ -1104,9 +1126,12 @@ def download_page(
 
     if not url:
 
-        print(
-            "【エラー】このページにはURLがありません。"
-        )
+        if context:
+            context.log("【エラー】このページにはURLがありません。", "error")
+        else:
+            print(
+                "【エラー】このページにはURLがありません。"
+            )
 
         return None
 
@@ -1115,7 +1140,8 @@ def download_page(
         page_info=page,
         delay=delay,
         overwrite=overwrite,
-        show_detail=show_detail
+        show_detail=show_detail,
+        context=context,
     )
 
 

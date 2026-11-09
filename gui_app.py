@@ -2391,22 +2391,7 @@ HTML_TEMPLATE = r"""
       const host = document.getElementById('explorer-category-tiles');
       if (!host || !Array.isArray(levelListCategoryDefinitions)) return;
       host.replaceChildren();
-      const sourcePages = explorerIndexPages.length ? explorerIndexPages : levelSearchResults;
-      const categories = [...getLevelListCategories(sourcePages)];
-      const savedPages = uniqueLevelListPages(sourcePages.filter(page => Boolean(page.saved)));
-      const savedCard = {
-        id: "saved_local",
-        title: "ローカル保存済み階層の一覧",
-        visual: "💾",
-        wikiTitle: "",
-        imageUrl: "https://nocookie.net",
-        pages: savedPages,
-      };
-      if (categories.length >= 6) {
-        categories.splice(6, 0, savedCard);
-      } else {
-        categories.push(savedCard);
-      }
+      const categories = getLevelListCategories(explorerIndexPages.length ? explorerIndexPages : levelSearchResults);
       categories.forEach((category, index) => {
         const card = document.createElement('div');
         card.className = 'overflow-hidden border border-[#dfd09f] bg-[#fff1b2] shadow-sm transition hover:-translate-y-0.5 hover:shadow-md';

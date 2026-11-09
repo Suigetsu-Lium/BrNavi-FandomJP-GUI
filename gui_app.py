@@ -18,7 +18,6 @@ import webview
 # modules ディレクトリから既存ロジックを読み込み
 from modules.database import (
     load_master_database,
-    open_fandom_page,
     open_local_html
 )
 
@@ -607,11 +606,10 @@ class BackroomsAPI:
             "images": images_base64
         }
 
-    def open_external_fandom(self):
+    def get_current_fandom_url(self):
         if self.current_info and self.current_info.get("url"):
-            open_fandom_page(self.current_info["url"])
-            return {"status": "success"}
-        return {"status": "error", "message": "URLがありません。"}
+            return {"url": self.current_info["url"]}
+        return {"error": "FandomページのURLがありません。"}
 
     def open_local_browser_html(self):
         if self.current_info and self.current_info.get("html_file") and self.current_info["html_file"].exists():
@@ -1213,7 +1211,7 @@ HTML_TEMPLATE = r"""
               <div id="view-meta-title" class="text-base font-semibold text-[#b45309] mt-0.5"></div>
             </div>
             <div class="flex space-x-2 select-none">
-              <button onclick="pywebview.api.open_external_fandom()" class="px-2.5 py-1 text-xs bg-[#f4e7b8] hover:bg-[#e8d89f] text-[#784f00] rounded font-medium border border-[#d9c78d]">🌐 Fandomを開く</button>
+              <button onclick="openCurrentFandomInApp()" class="px-2.5 py-1 text-xs bg-[#f4e7b8] hover:bg-[#e8d89f] text-[#784f00] rounded font-medium border border-[#d9c78d]">🌐 内蔵ブラウザーでFandomを開く</button>
               <button onclick="pywebview.api.open_local_browser_html()" class="px-2.5 py-1 text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 rounded font-medium border border-gray-300">📄 ローカルHTML</button>
             </div>
           </div>
@@ -1486,6 +1484,12 @@ HTML_TEMPLATE = r"""
 
   </main>
 
+  <div id="app-context-menu" class="hidden fixed z-[100] min-w-40 overflow-hidden rounded border border-[#d3c29a] bg-white py-1 text-xs shadow-xl"
+    role="menu" aria-label="テキスト操作">
+    <button id="app-context-copy" type="button" class="block w-full px-4 py-2 text-left text-gray-800 hover:bg-[#fff3cf]" role="menuitem">コピー</button>
+    <button id="app-context-ask-ai" type="button" class="block w-full px-4 py-2 text-left text-gray-800 hover:bg-[#fff3cf]" role="menuitem">AIに聞く</button>
+  </div>
+
   <script>
     let onlineWikiDefaultOpened = false;
 
@@ -1528,6 +1532,130 @@ HTML_TEMPLATE = r"""
         loadLevelListLanguages();
       }
     }
+
+    async function openCurrentFandomInApp() {
+      try {
+        const result = await pywebview.api.get_current_fandom_url();
+        if (!result || !result.url) {
+          document.getElementById('html-download-status').textContent =
+            (result && result.error) || "FandomページのURLがありません。";
+          return;
+        }
+        await openLevelListPage({url: result.url});
+      } catch (error) {
+        document.getElementById('html-download-status').textContent =
+          "内蔵ブラウザーでFandomを開けませんでした: " + error;
+      }
+    }
+
+    let appContextCopyText = "";
+    let appContextSelectionText = "";
+
+    function getContextSelectionText() {
+      const active = document.activeElement;
+      if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA") &&
+          Number.isInteger(active.selectionStart) && active.selectionEnd > active.selectionStart) {
+        return active.value.slice(active.selectionStart, active.selectionEnd).trim();
+      }
+      return String(window.getSelection ? window.getSelection() : "").trim();
+    }
+
+    function getContextTargetText(event) {
+      const target = event.target instanceof Element ? event.target : event.target.parentElement;
+      if (!target) return "";
+      const field = target.closest("input, textarea");
+      if (field) return String(field.value || "").trim();
+
+      let textNode = null;
+      if (document.caretRangeFromPoint) {
+        const range = document.caretRangeFromPoint(event.clientX, event.clientY);
+        if (range && range.startContainer.nodeType === Node.TEXT_NODE) {
+          textNode = range.startContainer;
+        }
+      } else if (document.caretPositionFromPoint) {
+        const position = document.caretPositionFromPoint(event.clientX, event.clientY);
+        if (position && position.offsetNode.nodeType === Node.TEXT_NODE) {
+          textNode = position.offsetNode;
+        }
+      }
+      const textElement = textNode ? textNode.parentElement : target;
+      const block = textElement.closest(
+        "p, li, td, th, blockquote, h1, h2, h3, h4, h5, h6, button, a, label, pre, figcaption"
+      ) || textElement;
+      return String(block.innerText || block.textContent || "").trim();
+    }
+
+    function hideAppContextMenu() {
+      document.getElementById('app-context-menu').classList.add("hidden");
+    }
+
+    function showAppContextMenu(event) {
+      const selectedText = getContextSelectionText();
+      const target = event.target instanceof Element ? event.target : event.target.parentElement;
+      if (target && target.closest("input, textarea, [contenteditable='true']") && !selectedText) {
+        return;
+      }
+      const clickedText = selectedText || getContextTargetText(event);
+      if (!clickedText) return;
+      event.preventDefault();
+      appContextCopyText = clickedText;
+      appContextSelectionText = selectedText;
+      const menu = document.getElementById('app-context-menu');
+      document.getElementById('app-context-ask-ai').classList.toggle("hidden", !selectedText);
+      menu.classList.remove("hidden");
+      const bounds = menu.getBoundingClientRect();
+      menu.style.left = `${Math.max(4, Math.min(event.clientX, window.innerWidth - bounds.width - 4))}px`;
+      menu.style.top = `${Math.max(4, Math.min(event.clientY, window.innerHeight - bounds.height - 4))}px`;
+    }
+
+    async function copyContextText() {
+      const text = appContextCopyText;
+      hideAppContextMenu();
+      if (!text) return;
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch (error) {
+        const area = document.createElement('textarea');
+        area.value = text;
+        area.style.position = "fixed";
+        area.style.opacity = "0";
+        document.body.appendChild(area);
+        area.select();
+        const copied = document.execCommand('copy');
+        area.remove();
+        if (!copied) console.error("クリップボードへのコピーに失敗しました。", error);
+      }
+    }
+
+    async function askAIAboutSelection() {
+      const text = appContextSelectionText;
+      hideAppContextMenu();
+      if (!text) return;
+      const prompt = "次の選択テキストについて説明してください。必要なら重要な点を要約してください。\n\n" + text;
+      if (prompt.length > 12000) {
+        switchTab('ai');
+        aiSetStatus("選択範囲が長すぎます。12,000文字以内にしてください。", true);
+        return;
+      }
+      switchTab('ai');
+      await initializeAI();
+      if (!await aiNewConversation()) return;
+      document.getElementById('ai-message-input').value = prompt;
+      await sendAIMessage();
+    }
+
+    document.addEventListener('contextmenu', showAppContextMenu);
+    document.addEventListener('pointerdown', event => {
+      if (!event.target.closest || !event.target.closest('#app-context-menu')) hideAppContextMenu();
+    });
+    document.addEventListener('keydown', event => {
+      if (event.key === "Escape") hideAppContextMenu();
+    });
+    document.getElementById('app-context-menu').addEventListener('mousedown', event => {
+      event.preventDefault();
+    });
+    document.getElementById('app-context-copy').addEventListener('click', copyContextText);
+    document.getElementById('app-context-ask-ai').addEventListener('click', askAIAboutSelection);
 
     async function onSearchInput() {
       const q = document.getElementById('search-input').value;
@@ -2660,7 +2788,7 @@ HTML_TEMPLATE = r"""
         const result = await pywebview.api.ai_new_conversation();
         if (!result || !result.conversation_id) {
           aiSetStatus("新しい会話を作成できません: " + ((result && result.error) || ""), true);
-          return;
+          return false;
         }
         aiConversationId = result.conversation_id;
         aiViewToken++;
@@ -2672,8 +2800,10 @@ HTML_TEMPLATE = r"""
         welcome.textContent = "新しい会話です。Backroomsについて質問してみましょう。";
         container.appendChild(welcome);
         await aiLoadConversationList();
+        return true;
       } catch (e) {
         aiSetStatus("会話作成エラー: " + e, true);
+        return false;
       }
     }
 

@@ -20,6 +20,7 @@ if getattr(sys, "frozen", False):
 from pathlib import Path
 
 from modules.runtime_paths import get_application_dir
+from modules.version import APP_VERSION
 
 # =============================================================================
 # モジュール
@@ -98,7 +99,7 @@ def show_menu():
     print("=" * 80)
 
     print(
-        "        Backrooms Navigation System - Fandom JP"
+        f"        Backrooms Navigation System - Fandom JP v{APP_VERSION}"
     )
 
     print("=" * 80)

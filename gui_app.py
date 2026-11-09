@@ -30,6 +30,7 @@ from modules.online_wiki import is_supported_wiki_url
 from modules.online_wiki import save_page as save_online_wiki_page
 from modules.online_wiki import search_pages as search_online_wiki_pages
 from modules.runtime_paths import get_application_dir
+from modules.version import APP_VERSION
 
 # AI Assistant（Groq / ローカルWiki検索）
 try:
@@ -936,7 +937,7 @@ HTML_TEMPLATE = r"""
         ♾️
       </div>
       <div>
-        <h1 class="text-sm font-bold tracking-wide">Backrooms Wiki (Fandom JP)</h1>
+        <h1 class="text-sm font-bold tracking-wide">Backrooms Wiki (Fandom JP) <span class="ml-1 text-[10px] font-medium text-gray-400">v__APP_VERSION__</span></h1>
         <p class="text-[10px] text-gray-400">Navigation & Database System</p>
       </div>
     </div>
@@ -2043,7 +2044,7 @@ def main():
     if getattr(sys, "frozen", False):
         os.chdir(BASE_DIR)
     api = BackroomsAPI()
-    html = HTML_TEMPLATE
+    html = HTML_TEMPLATE.replace("__APP_VERSION__", APP_VERSION)
     if syntax_highlight_css:
         html = html.replace(
             "</style>",
@@ -2051,7 +2052,7 @@ def main():
             1,
         )
     api._main_window = webview.create_window(
-        title="Backrooms Navigation System - Fandom JP (Wiki Explorer)",
+        title=f"Backrooms Navigation System - Fandom JP v{APP_VERSION} (Wiki Explorer)",
         html=html,
         js_api=api,
         width=1320,

@@ -56,6 +56,20 @@ class DataMetadataTests(unittest.TestCase):
             retriever._indexed_signature = None
             self.assertIsNone(retriever.find_missing_local_level("Level 200 ηの移動条件を教えて"))
 
+    def test_missing_level_detection_accepts_archived_html_without_extracted_text(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            text_dir = root / "extracted_fandom_levels"
+            html_dir = root / "downloaded_fandom_html"
+            html_dir.mkdir(parents=True)
+            (html_dir / "Level_200_η.html").write_text(
+                "<html><head><title>Level 200 η</title></head><body><p>記事本文</p></body></html>",
+                encoding="utf-8",
+            )
+            retriever = WikiRetriever(text_dir, html_dir=html_dir, online_search=False)
+
+            self.assertIsNone(retriever.find_missing_local_level("Level 200 ηの移動条件を教えて"))
+
 
 class WebViewFallbackTests(unittest.TestCase):
     def test_fetch_reads_dom_from_the_supported_public_wiki(self):

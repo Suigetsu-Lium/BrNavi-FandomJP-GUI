@@ -94,6 +94,59 @@ class OnlineWikiGuiTests(unittest.TestCase):
         self.assertNotIn("function appendLog", gui_app.HTML_TEMPLATE)
         self.assertNotIn("open_online_wiki_browser", gui_app.HTML_TEMPLATE)
 
+    def test_explorer_has_keyboard_suggestions_and_grouped_link_index(self):
+        self.assertIn('role="combobox"', gui_app.HTML_TEMPLATE)
+        self.assertIn('id="level-search-suggestions"', gui_app.HTML_TEMPLATE)
+        self.assertIn("function onLevelSearchKeydown(event)", gui_app.HTML_TEMPLATE)
+        self.assertIn("function levelGroupKey(item)", gui_app.HTML_TEMPLATE)
+        self.assertIn("item.saved ? '📖' : '↗'", gui_app.HTML_TEMPLATE)
+        self.assertIn("item.subtitle", gui_app.HTML_TEMPLATE)
+
+    @patch("gui_app.load_master_database")
+    @patch("gui_app.TEXT_DIR")
+    def test_search_candidates_includes_unsaved_master_pages(self, text_dir, load_master):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "html").mkdir()
+            (root / "Level_0_η.txt").write_text("保存済み", encoding="utf-8")
+            text_dir.exists.return_value = True
+            text_dir.glob.return_value = root.glob("*.txt")
+            load_master.return_value = {
+                "url0": {"title": "Level 0 η", "category": "通常階層 η", "language": "JP"},
+                "url1": {"title": "Level 1 η", "category": "通常階層 η", "language": "JP"},
+            }
+            (root / "extracted_fandom_levels_summary.csv").write_text(
+                "階層コード,メタタイトル,別名\nLevel 1 η,二月駅,二月駅別称\n",
+                encoding="utf-8-sig",
+            )
+
+            with patch("gui_app.BASE_DIR", root), patch("gui_app.HTML_DIR", root / "html"):
+                results = self.api.search_candidates("")
+                subtitle_match = self.api.search_candidates("二月駅")
+                alias_match = self.api.search_candidates("二月駅別称")
+
+        self.assertEqual([item["saved"] for item in results], [True, False])
+        self.assertEqual(results[1]["subtitle"], "二月駅")
+        self.assertEqual([item["title"] for item in subtitle_match], ["Level 1 η"])
+        self.assertEqual([item["title"] for item in alias_match], ["Level 1 η"])
+
+    def test_embedded_frame_ignores_html_subresource_urls(self):
+        self.api._current_online_wiki_url = "https://backrooms.fandom.com/ja/wiki/Level_334_%CE%B7"
+        response = unittest.mock.Mock()
+        response.url = "https://backrooms.fandom.com/ja/controller.php?action=JWPlayer.js"
+        response.headers = {"Content-Type": "text/html"}
+
+        self.api._on_main_window_response_received(response)
+
+        self.assertEqual(self.api.get_current_online_wiki_url()["url"], self.api._current_online_wiki_url)
+
+    def test_embedded_browser_home_button_is_available(self):
+        self.assertIn("resetOnlineWikiHome()", gui_app.HTML_TEMPLATE)
+        self.assertIn(">ホーム</button>", gui_app.HTML_TEMPLATE)
+
     def test_wiki_frame_load_handler_closes_before_url_refresh_function(self):
         self.assertIn(
             "await updateOnlineWikiCurrentUrl();\n"

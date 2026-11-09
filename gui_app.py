@@ -60,6 +60,7 @@ except Exception as e:
 BASE_DIR = get_application_dir()
 IMAGE_DIR = BASE_DIR / "downloaded_images"
 TEXT_DIR = BASE_DIR / "extracted_fandom_levels"
+HTML_DIR = BASE_DIR / "downloaded_fandom_html"
 APP_SETTINGS = AppSettingsStore(BASE_DIR / "database" / "app_settings.json")
 
 # 🌟 ご指定のカテゴリ優先順位（日本独自階層 η を最優先）
@@ -86,6 +87,7 @@ class BackroomsAPI:
         self._maintenance_done_event = threading.Event()
         self._maintenance_done_event.set()
         self._current_online_wiki_url = ""
+        self._candidate_catalog = None
         self._auto_update_lock = threading.Lock()
         self._auto_update_scheduler_started = False
         if AI_AVAILABLE:
@@ -491,60 +493,98 @@ class BackroomsAPI:
         return match.group(1) if match else None
 
     def search_candidates(self, query):
-        """extracted_fandom_levels内のTXTファイル名を基準にLevelを検索。
-
-        Master Databaseはカテゴリ・言語などの補助情報にのみ使用する。
-        本文やURLは検索対象にしない。
-        """
-        if not TEXT_DIR.exists():
-            return []
-
-        query = (query or "").strip().casefold()
+        """Master Database全体を検索し、ローカル保存状態を添えて返す。"""
+        query = re.sub(r"\s+", " ", str(query or "")).strip().casefold()
         number_query = self._normalize_level_number_query(query) if query else None
+        catalog = getattr(self, "_candidate_catalog", None)
+        if catalog is not None:
+            return self._filter_candidate_catalog(catalog, query, number_query)
 
-        # Master Databaseは表示用メタデータの取得にだけ利用
-        master = load_master_database() or {}
-        master_map = {
-            str(page.get("title", "")).casefold(): page
-            for page in master.values()
-            if page.get("title")
-        }
+        saved_titles = {}
+        for directory, suffix in ((TEXT_DIR, ".txt"), (HTML_DIR, ".html")):
+            if directory.exists():
+                for local_file in directory.glob(f"*{suffix}"):
+                    level_id = self._extract_level_id_from_filename(local_file)
+                    if level_id:
+                        saved_titles[level_id.casefold()] = local_file
 
-        results = []
-        for text_file in TEXT_DIR.glob("*.txt"):
-            level_id = self._extract_level_id_from_filename(text_file)
-            if not level_id:
-                continue
-
-            if query:
-                if number_query is not None:
-                    # 数字検索はLevel番号を完全一致させる（20で200を拾わない）
-                    number_match = re.match(
-                        r"^Level\s+(-?\d+(?:\.\d+)?)",
-                        level_id,
-                        re.IGNORECASE
-                    )
-                    if not number_match or number_match.group(1) != number_query:
-                        continue
-                elif query not in text_file.stem.casefold():
-                    # キーワード検索もTXTファイル名だけを対象にする
-                    continue
-
-            info = master_map.get(level_id.casefold(), {})
-            results.append({
-                "title": level_id,
-                "category": info.get("category", ""),
-                "language": info.get("language", "JP")
-            })
-
-        # 同じLevel IDのTXTが複数あっても一覧に重複表示しない
+        pages = load_master_database() or {}
+        metadata_by_title = {}
+        summary_path = BASE_DIR / "extracted_fandom_levels_summary.csv"
+        if summary_path.exists():
+            try:
+                with summary_path.open("r", encoding="utf-8-sig", newline="") as stream:
+                    for row in csv.DictReader(stream):
+                        code = str(row.get("階層コード") or row.get("code") or "").strip()
+                        if code:
+                            metadata_by_title[code.casefold()] = row
+            except (OSError, csv.Error):
+                pass
         unique_results = {}
-        for item in results:
-            unique_results[item["title"].casefold()] = item
+        for page in pages.values():
+            title = str(page.get("title", "") or "").strip()
+            if not title or not re.match(r"^(?:Level|レベル)\b", title, re.I):
+                continue
+            metadata = metadata_by_title.get(title.casefold(), {})
+            aliases = page.get("aliases", metadata.get("別名", metadata.get("aliases", []))) or []
+            if isinstance(aliases, str):
+                aliases = re.split(r"[|,、]", aliases)
+            aliases = [str(value).strip() for value in aliases if str(value).strip()]
+            category = str(page.get("category", metadata.get("カテゴリ", "")) or "")
+            subtitle = str(page.get("subtitle", page.get("meta_title", metadata.get("メタタイトル", ""))) or "")
+            saved_file = saved_titles.get(title.casefold())
+            if not saved_file:
+                saved_file = next(
+                    (path for key, path in saved_titles.items()
+                     if re.match(re.escape(title.casefold()) + r"(?:\s|$)", key)),
+                    None,
+                )
+            unique_results[title.casefold()] = {
+                "title": title,
+                "subtitle": subtitle,
+                "aliases": aliases,
+                "category": category,
+                "language": page.get("language", "JP"),
+                "saved": bool(saved_file),
+            }
 
-        filtered = list(unique_results.values())
-        filtered.sort(key=self._get_sort_key)
-        return filtered
+        # Master Database未生成の環境でも保存済み記事を一覧できる。
+        for title_key, path in saved_titles.items():
+            if title_key in unique_results:
+                continue
+            title = self._extract_level_id_from_filename(path)
+            if title:
+                unique_results[title_key] = {
+                    "title": title, "subtitle": "", "aliases": [],
+                    "category": "", "language": "JP", "saved": True,
+                }
+
+        catalog = list(unique_results.values())
+        catalog.sort(key=self._get_sort_key)
+        self._candidate_catalog = catalog[:2000]
+        return self._filter_candidate_catalog(self._candidate_catalog, query, number_query)
+
+    @staticmethod
+    def _filter_candidate_catalog(catalog, query, number_query=None):
+        if not query:
+            return list(catalog)
+        results = []
+        wants_eta = bool(re.search(r"η|イータ", query, re.I))
+        for item in catalog:
+            if number_query is not None:
+                match = re.match(r"^(?:Level|レベル)\s*(-?\d+(?:\.\d+)?)", item["title"], re.I)
+                is_eta = bool(re.search(r"η|イータ", item["title"], re.I))
+                if match and match.group(1) == number_query and (not wants_eta or is_eta):
+                    results.append(item)
+                continue
+            values = [item.get("title", ""), item.get("subtitle", ""), item.get("category", "")]
+            aliases = item.get("aliases") or []
+            if isinstance(aliases, str):
+                aliases = [aliases]
+            values.extend(aliases)
+            if any(query in str(value).casefold() for value in values):
+                results.append(item)
+        return results
 
     def _find_images_flexible(self, level_id):
         """スペースやアンダースコアの差異を吸収して画像を確実に取得"""
@@ -764,6 +804,22 @@ class BackroomsAPI:
         self._current_online_wiki_url = url
         return {"status": "ok", "url": url}
 
+    @staticmethod
+    def _is_article_wiki_url(url):
+        if not is_supported_wiki_url(url):
+            return False
+        parsed = urlsplit(url)
+        title = unquote(parsed.path.split("/ja/wiki/", 1)[-1]).strip("/")
+        namespace = title.split(":", 1)[0].casefold() if ":" in title else ""
+        if not title or namespace in {
+            "special", "category", "file", "image", "user", "template", "help",
+            "mediawiki", "talk", "カテゴリ", "ファイル", "利用者", "テンプレート", "トーク",
+        }:
+            return False
+        if title.casefold().endswith((".js", ".css", ".json", ".php", ".png", ".jpg", ".svg")):
+            return False
+        return True
+
     def navigate_ai_answer_link(self, url):
         url = str(url or "").strip()
         try:
@@ -817,12 +873,12 @@ class BackroomsAPI:
             "",
         )
         if (
-            not url.startswith("https://backrooms.fandom.com/")
+            not self._is_article_wiki_url(url)
             or "text/html" not in content_type.lower()
         ):
             return
         self._current_online_wiki_url = url
-        self._notify_online_wiki_url(url, is_supported_wiki_url(url))
+        self._notify_online_wiki_url(url, self._is_article_wiki_url(url))
 
     def _notify_online_wiki_url(self, url, is_wiki_page):
         main_window = getattr(self, "_main_window", None)
@@ -858,7 +914,7 @@ class BackroomsAPI:
         url = self._current_online_wiki_url
         return {
             "url": url,
-            "is_wiki_page": is_supported_wiki_url(url),
+            "is_wiki_page": self._is_article_wiki_url(url),
         }
 
     def save_current_online_wiki_page(self):
@@ -1097,6 +1153,7 @@ class BackroomsAPI:
     def _notify_maintenance_task_completed(
         self, succeeded, message, cancelled=False
     ):
+        self._candidate_catalog = None
         main_window = getattr(self, "_main_window", None)
         if main_window is None:
             return
@@ -1352,19 +1409,20 @@ HTML_TEMPLATE = r"""
     <!-- 1. 📖 Level 図鑑 ＆ 検索タブ -->
     <div id="view-explorer" class="flex-1 flex overflow-hidden">
 
-      <!-- 左ペイン：検索 ＆ 全件縦スライダースクロール一覧 -->
+      <!-- 左ペイン：予測検索とカテゴリ別リンクインデックス -->
       <aside class="w-80 border-r border-[#e2d8b5] bg-[#f7f0d4] flex flex-col select-none">
-        <div class="p-3 border-b border-[#e2d8b5] bg-[#f2e8c5]">
-          <input type="text" id="search-input" placeholder="Level名・番号・キーワードで検索..."
-            oninput="onSearchInput()"
+        <div class="relative z-20 p-3 border-b border-[#e2d8b5] bg-[#f2e8c5]">
+          <input type="search" id="search-input" role="combobox" aria-autocomplete="list" aria-controls="level-search-suggestions" aria-expanded="false" placeholder="階層・副題・別名・カテゴリを検索..."
+            oninput="onSearchInput()" onfocus="showLevelSearchSuggestions()"
+            onkeydown="onLevelSearchKeydown(event)" autocomplete="off"
             class="w-full px-3 py-2 bg-white border border-[#d6c79a] rounded text-xs focus:outline-none focus:border-[#b45309] shadow-inner">
+          <div id="level-search-suggestions" role="listbox" class="hidden absolute left-3 right-3 top-full max-h-80 overflow-y-auto rounded-b-lg border border-[#d6c79a] bg-white shadow-xl"></div>
         </div>
         <div class="px-3 py-1.5 text-[11px] font-bold text-gray-600 bg-[#eee3bc] border-b border-[#e2d8b5] flex justify-between">
-          <span>階層一覧（通常η優先順）</span>
+          <span>階層の一覧</span>
           <span><strong id="candidate-count">0</strong> 件</span>
         </div>
-        <!-- 🌟 スライダー（縦スクロールバー）で全件閲覧可能なコンテナ -->
-        <div id="candidate-list" class="flex-1 overflow-y-auto p-2 space-y-1.5 text-xs"></div>
+        <div id="candidate-list" class="flex-1 overflow-y-auto p-3 text-xs"></div>
       </aside>
 
       <!-- 右ペイン：Wiki 詳細ビュー -->
@@ -1472,6 +1530,8 @@ HTML_TEMPLATE = r"""
             class="shrink-0 px-3 py-1.5 text-xs font-semibold bg-[#91520f] text-white rounded">
             移動
           </button>
+          <button onclick="resetOnlineWikiHome()"
+            class="shrink-0 px-3 py-1.5 text-xs font-semibold border border-[#d6c79a] bg-[#f7f0d4] rounded">ホーム</button>
           <button id="online-wiki-save-current" onclick="saveCurrentOnlineWikiPage()" disabled
             class="shrink-0 px-3 py-1.5 text-xs font-semibold bg-[#b45309] text-white rounded disabled:opacity-50">
             表示中を保存
@@ -1678,6 +1738,7 @@ HTML_TEMPLATE = r"""
 
   <script>
     let onlineWikiDefaultOpened = false;
+    const onlineWikiHomeUrl = 'https://backrooms.fandom.com/ja/wiki/Backrooms_Wiki';
     document.getElementById('ai-chat-messages').addEventListener(
       'click', openAIAnswerLinkFromEvent
     );
@@ -1893,38 +1954,148 @@ HTML_TEMPLATE = r"""
     document.getElementById('app-context-copy').addEventListener('click', copyContextText);
     document.getElementById('app-context-ask-ai').addEventListener('click', askAIAboutSelection);
 
+    let levelSearchResults = [];
+    let levelSearchRequestId = 0;
+    let levelSearchActiveIndex = -1;
+
     async function onSearchInput() {
-      const q = document.getElementById('search-input').value;
-      const candidates = await pywebview.api.search_candidates(q);
-      renderCandidates(candidates);
+      const requestId = ++levelSearchRequestId;
+      const candidates = await pywebview.api.search_candidates(document.getElementById('search-input').value);
+      if (requestId !== levelSearchRequestId) return;
+      levelSearchResults = candidates || [];
+      renderCandidates(levelSearchResults);
+      renderLevelSearchSuggestions();
     }
 
-    // 🌟 全件リストを描画（スライダー対応）
-    function renderCandidates(list) {
-      const cList = document.getElementById('candidate-list');
-      cList.innerHTML = '';
-      document.getElementById('candidate-count').innerText = list.length;
+    function levelGroupKey(item) {
+      const name = `${item.title || ''} ${item.category || ''}`;
+      const eta = /η|イータ|_eta\b/i.test(name);
+      const category = /亜階層|サブレベル|sublevel/i.test(name) ? '亜階層'
+        : /番外|アノマリー|anomalous/i.test(name) ? '番外階層' : '通常階層';
+      const number = String(item.title || '').match(/(?:Level|レベル)\s*(-?\d+(?:\.\d+)?)/i);
+      let band = 'その他';
+      if (number) {
+        const value = Number(number[1]);
+        if (Number.isInteger(value) && value >= 0) {
+          const lower = value < 10 ? 0 : 10 ** Math.floor(Math.log10(value));
+          band = lower === 0 ? '0〜9' : `${lower}〜${lower * 10 - 1}`;
+        } else band = '小数・負数';
+      }
+      return {key: `${category}|${eta ? 'η' : '通常'}|${band}`, label: `${category}${eta ? ' η' : ''} · ${band}`};
+    }
 
-      list.forEach(c => {
-        const item = document.createElement('div');
-        item.className = "p-2 rounded bg-white border border-[#dfd3a8] hover:border-[#b45309] hover:bg-[#fffdf2] cursor-pointer transition shadow-sm";
-        const title = document.createElement('div');
-        title.className = "font-bold text-gray-800 truncate";
-        title.textContent = c.title || "";
-        const meta = document.createElement('div');
-        meta.className = "text-[10px] text-gray-400 mt-0.5 flex space-x-1.5";
-        const lang = document.createElement('span');
-        lang.className = "px-1 bg-yellow-100 text-yellow-800 rounded font-mono";
-        lang.textContent = c.language || 'JP';
-        const category = document.createElement('span');
-        category.className = "truncate text-gray-500";
-        category.textContent = c.category || '階層';
-        meta.append(lang, category);
-        item.append(title, meta);
-        item.onclick = () => loadLevelDetail(c.title);
-        cList.appendChild(item);
+    function selectLevelCandidate(item) {
+      document.getElementById('search-input').value = item.title;
+      hideLevelSearchSuggestions();
+      try {
+        const recent = JSON.parse(localStorage.getItem('brnavi-recent-levels') || '[]');
+        localStorage.setItem('brnavi-recent-levels', JSON.stringify([item.title, ...recent.filter(title => title !== item.title)].slice(0, 8)));
+      } catch (_) {}
+      openRouteLevel(item.title);
+    }
+
+    function renderCandidates(list) {
+      const host = document.getElementById('candidate-list');
+      host.replaceChildren();
+      document.getElementById('candidate-count').textContent = list.length;
+      const groups = new Map();
+      list.forEach(item => {
+        const group = levelGroupKey(item);
+        if (!groups.has(group.key)) groups.set(group.key, {label: group.label, items: []});
+        groups.get(group.key).items.push(item);
+      });
+      if (!list.length) {
+        host.innerHTML = '<p class="p-3 text-gray-500">該当する階層がありません。取得済みの一覧を環境設定から更新できます。</p>';
+        return;
+      }
+      groups.forEach(group => {
+        const section = document.createElement('section');
+        section.className = 'mb-4';
+        const heading = document.createElement('h3');
+        heading.className = 'sticky top-0 mb-2 border-b border-[#e2d8b5] bg-[#f7f0d4] py-1 font-bold text-[#784f00]';
+        heading.textContent = group.label;
+        const links = document.createElement('div');
+        links.className = 'grid grid-cols-2 gap-x-3 gap-y-1';
+        group.items.forEach(item => {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'truncate rounded px-1.5 py-1 text-left text-[#1558a6] hover:bg-white hover:underline';
+          button.title = [item.title, item.subtitle, item.category].filter(Boolean).join(' · ');
+          button.innerHTML = `${item.saved ? '📖' : '↗'} <span>${escapeHTML(item.title)}</span>`;
+          button.onclick = () => selectLevelCandidate(item);
+          links.appendChild(button);
+        });
+        section.append(heading, links);
+        host.appendChild(section);
       });
     }
+
+    function showLevelSearchSuggestions() {
+      renderLevelSearchSuggestions();
+    }
+
+    function hideLevelSearchSuggestions() {
+      const panel = document.getElementById('level-search-suggestions');
+      panel.classList.add('hidden');
+      document.getElementById('search-input').setAttribute('aria-expanded', 'false');
+      levelSearchActiveIndex = -1;
+    }
+
+    function renderLevelSearchSuggestions() {
+      const input = document.getElementById('search-input');
+      const panel = document.getElementById('level-search-suggestions');
+      if (document.activeElement !== input) return;
+      const query = input.value.trim().toLocaleLowerCase();
+      const items = levelSuggestionItems(query);
+      panel.replaceChildren();
+      if (!items.length) {
+        panel.innerHTML = `<div class="px-3 py-2 text-xs text-gray-500">${query ? '一致する階層はありません' : '階層名を入力して検索'}</div>`;
+      } else {
+        items.forEach((item, index) => {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.role = 'option';
+          button.setAttribute('aria-selected', String(index === levelSearchActiveIndex));
+          button.className = `block w-full border-b border-[#eee5ce] px-3 py-2 text-left hover:bg-[#fff8df] ${index === levelSearchActiveIndex ? 'bg-[#fff2c4]' : ''}`;
+          button.innerHTML = `<span class="mr-2">${item.saved ? '📖' : '🌐'}</span><strong class="text-sm text-gray-800">${escapeHTML(item.title)}</strong><span class="ml-2 text-[10px] text-gray-500">${item.saved ? '保存済み' : '未保存'} · ${escapeHTML(item.category || '階層')}</span>${item.subtitle ? `<span class="block pl-7 text-[11px] text-gray-600">${escapeHTML(item.subtitle)}</span>` : ''}`;
+          button.onmousedown = event => event.preventDefault();
+          button.onclick = () => selectLevelCandidate(item);
+          panel.appendChild(button);
+        });
+      }
+      panel.classList.remove('hidden');
+      input.setAttribute('aria-expanded', 'true');
+    }
+
+    function levelSuggestionItems(query = document.getElementById('search-input').value.trim().toLocaleLowerCase()) {
+      if (query) return levelSearchResults.slice(0, 10);
+      let recent = [];
+      try { recent = JSON.parse(localStorage.getItem('brnavi-recent-levels') || '[]'); } catch (_) {}
+      return [...recent.map(title => levelSearchResults.find(item => item.title === title)).filter(Boolean), ...levelSearchResults]
+        .filter((item, index, all) => all.findIndex(other => other.title === item.title) === index)
+        .slice(0, 8);
+    }
+
+    function onLevelSearchKeydown(event) {
+      const panel = document.getElementById('level-search-suggestions');
+      if (event.key === 'Escape') { hideLevelSearchSuggestions(); return; }
+      if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp' && event.key !== 'Enter') return;
+      const items = levelSuggestionItems();
+      if (!items.length) return;
+      event.preventDefault();
+      if (event.key === 'Enter') {
+        selectLevelCandidate(items[Math.max(0, levelSearchActiveIndex)]);
+        return;
+      }
+      levelSearchActiveIndex = event.key === 'ArrowDown'
+        ? (levelSearchActiveIndex + 1) % items.length
+        : (levelSearchActiveIndex <= 0 ? items.length - 1 : levelSearchActiveIndex - 1);
+      renderLevelSearchSuggestions();
+    }
+
+    document.addEventListener('pointerdown', event => {
+      if (!event.target.closest('#search-input') && !event.target.closest('#level-search-suggestions')) hideLevelSearchSuggestions();
+    });
 
     // 本文TXTのマークダウン・見出し整形
     function escapeHTML(value) {
@@ -2865,6 +3036,11 @@ HTML_TEMPLATE = r"""
       }
     }
 
+    async function resetOnlineWikiHome() {
+      document.getElementById('online-wiki-url').value = onlineWikiHomeUrl;
+      await openDirectWikiUrl();
+    }
+
     function onOnlineWikiBrowserUrlChanged(result) {
       onlineWikiCurrentUrl = result.url || "";
       onlineWikiCurrentIsWiki = Boolean(result.is_wiki_page);
@@ -3643,7 +3819,15 @@ HTML_TEMPLATE = r"""
         if (cid === aiConversationId) {
           if (data.ok) {
             if (data.operation === "regenerate") {
-              aiOpenConversation(cid);
+              aiOpenConversation(cid).then(() => {
+                if (data.missing_level && data.prompt) {
+                  aiAppendMissingSourceActions(data.prompt, cid, {
+                    missingLevel: data.missing_level.level_id,
+                    searchQuery: data.missing_level.query,
+                    rebuildNetwork: true,
+                  });
+                }
+              });
             } else {
               aiAppendHistoryMessage({
                 id: data.message_id,

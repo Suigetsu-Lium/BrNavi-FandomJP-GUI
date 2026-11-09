@@ -336,7 +336,10 @@ class WikiRetriever:
         docs_by_url = {doc["url"].casefold(): doc for doc in self._documents if doc.get("url")}
         docs_by_title = {}
         for document in self._documents:
-            for alias in (document.get("title", ""), *document.get("aliases", [])):
+            aliases = document.get("aliases") or []
+            if isinstance(aliases, str):
+                aliases = [aliases]
+            for alias in (document.get("title", ""), *aliases):
                 normalized_alias = _normalize(alias).replace(" ", "")
                 if normalized_alias:
                     docs_by_title.setdefault(normalized_alias, document)
@@ -506,7 +509,10 @@ class WikiRetriever:
                     "retrieval_time_basis": "local_file_modified_time",
                 }
             else:
-                document["aliases"] = list(dict.fromkeys(document["aliases"] + aliases))
+                existing_aliases = document.get("aliases") or []
+                if isinstance(existing_aliases, str):
+                    existing_aliases = [existing_aliases]
+                document["aliases"] = list(dict.fromkeys(existing_aliases + aliases))
                 if len(body) > len(document["body"]):
                     document["body"] = body
                     document["file"] = path.name
@@ -529,10 +535,28 @@ class WikiRetriever:
         )
         if not match:
             return None
-        level_id = f"Level {match.group(1)}" + (" η" if match.group(2) else "")
+        number = match.group(1)
+        has_eta = bool(match.group(2))
+        level_id = f"Level {number}" + (" η" if has_eta else "")
+        local_pattern = re.compile(
+            r"^Level[_\s]+" + re.escape(number)
+            + (r"[_\s]*η" if has_eta else r"(?![_\s]*η)")
+            + r"(?:[_\s]|$)",
+            re.I,
+        )
+        for directory, suffix in ((self.html_dir, ".html"), (self.text_dir, ".txt")):
+            try:
+                local_files = directory.glob(f"*{suffix}")
+                if any(local_pattern.match(path.stem.replace("_", " ")) for path in local_files):
+                    return None
+            except OSError:
+                pass
         self._index()
         for document in self._documents:
-            for alias in (document.get("title", ""), *document.get("aliases", [])):
+            aliases = document.get("aliases") or []
+            if isinstance(aliases, str):
+                aliases = [aliases]
+            for alias in (document.get("title", ""), *aliases):
                 alias = re.sub(r"[_\s]+", " ", str(alias or "")).strip()
                 if re.match(re.escape(level_id) + r"(?:\s|[:：]|$)", alias, re.I):
                     return None
@@ -544,8 +568,15 @@ class WikiRetriever:
         document_frequency = Counter()
         indexed = []
         for document in documents:
-            title_text = " ".join([document["title"], *document["aliases"]])
+            aliases = document.get("aliases") or []
+            if isinstance(aliases, str):
+                aliases = [aliases]
+            title = str(document.get("title") or "")
+            title_text = " ".join([title, *[str(alias) for alias in aliases]])
             title_tokens = _tokens(title_text)
+            document["aliases"] = aliases
+            document["title"] = title
+            document["body"] = str(document.get("body") or "")
             body_tokens = _tokens(document["body"])
             all_tokens = title_tokens | body_tokens
             document_frequency.update(all_tokens)

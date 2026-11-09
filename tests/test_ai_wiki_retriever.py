@@ -487,6 +487,20 @@ class WikiRetrieverTests(unittest.TestCase):
         self.assertEqual(requests, ["https://html.duckduckgo.com/html/"])
         api_search.assert_awaited_once_with("Level 0", "ja")
 
+    def test_rank_accepts_documents_without_optional_aliases(self):
+        retriever = self.retriever()
+        result = retriever._rank("Level 0", [{
+            "title": "Level 0",
+            "url": "https://backrooms.fandom.com/ja/wiki/Level_0",
+            "language": "JP",
+            "source_kind": "japanese_wiki",
+            "body": "Level 0の確認済み本文です。",
+            "file": "test",
+        }])
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["title"], "Level 0")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -33,6 +33,7 @@ from modules.online_wiki import fetch_page as fetch_online_wiki_page
 from modules.online_wiki import is_supported_wiki_url
 from modules.online_wiki import save_page as save_online_wiki_page
 from modules.online_wiki import search_pages as search_online_wiki_pages
+from modules.route_service import search_routes as search_local_routes
 from modules.runtime_paths import get_application_dir
 from modules.version import VERSION
 
@@ -611,6 +612,12 @@ class BackroomsAPI:
             return {"url": self.current_info["url"]}
         return {"error": "FandomページのURLがありません。"}
 
+    def search_routes(self, start, goal):
+        try:
+            return search_local_routes(start, goal)
+        except Exception as error:
+            return {"error": f"経路検索に失敗しました: {error}", "routes": [], "start_candidates": [], "goal_candidates": []}
+
     def open_local_browser_html(self):
         if self.current_info and self.current_info.get("html_file") and self.current_info["html_file"].exists():
             open_local_html(self.current_info["html_file"])
@@ -1134,10 +1141,11 @@ HTML_TEMPLATE = r"""
         <p class="text-[10px] text-gray-400">Navigation & Database System</p>
       </div>
     </div>
-    <div class="flex space-x-2">
+    <div class="flex space-x-1 overflow-x-auto">
       <button onclick="switchTab('explorer')" id="tab-btn-explorer" class="px-4 py-1.5 rounded text-xs font-semibold bg-[#b45309] text-white transition shadow">📖 Level 図鑑・検索</button>
       <button onclick="switchTab('wiki')" id="tab-btn-wiki" class="px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition">🌐 Wiki閲覧・保存</button>
       <button onclick="switchTab('data-tools')" id="tab-btn-data-tools" class="px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition">⬇️ HTML取得・データ抽出</button>
+      <button onclick="switchTab('routes')" id="tab-btn-routes" class="px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition">🧭 経路・フロー</button>
       <button onclick="switchTab('maintenance')" id="tab-btn-maintenance" class="px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition">⚙️ データ保守</button>
       <button onclick="switchTab('ai')" id="tab-btn-ai" class="px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition">🤖 AI Assistant</button>
       <button onclick="showAbout()" id="about-button" class="px-3 py-1.5 rounded text-xs font-semibold bg-gray-700 text-gray-200 hover:bg-gray-600 transition">アプリ情報</button>
@@ -1389,6 +1397,18 @@ HTML_TEMPLATE = r"""
     </section>
 
     <!-- 4. ⚙️ データベース保守タブ -->
+    <section id="view-routes" class="hidden flex-1 min-h-0 flex flex-col p-4 bg-[#fbf6de] overflow-y-auto">
+      <div class="w-full max-w-6xl mx-auto bg-white border border-[#e2d8b5] p-5 rounded shadow-sm space-y-4">
+        <div class="flex flex-wrap justify-between items-start gap-3"><div><h2 class="text-lg font-bold">🧭 Level経路と視覚フロー</h2><p class="text-xs text-gray-600 mt-1">ローカルの有向接続CSVから経路候補を検索します。経路が見つからない場合はデータ保守からネットワークを更新してください。</p></div>
+          <button onclick="switchTab('maintenance'); runTask('update_network')" class="px-3 py-2 rounded bg-[#f5eed3] border border-[#d6c79a] text-xs font-semibold">接続CSVを再取得</button></div>
+        <div class="flex flex-wrap items-end gap-3"><label class="text-xs font-semibold">出発Level<input id="route-start" class="block mt-1 border border-[#d6c79a] rounded px-3 py-2 text-sm" placeholder="Level 20"></label>
+          <span class="pb-2 text-gray-400">→</span><label class="text-xs font-semibold">目的Level<input id="route-goal" class="block mt-1 border border-[#d6c79a] rounded px-3 py-2 text-sm" placeholder="Level 4"></label>
+          <button onclick="searchRoutes()" class="px-4 py-2 rounded bg-[#b45309] text-white text-xs font-semibold">経路を検索</button><span id="route-status" class="text-xs text-gray-600" role="status"></span></div>
+        <div id="route-results" class="space-y-4"></div>
+      </div>
+    </section>
+
+    <!-- 5. ⚙️ データベース保守タブ -->
     <div id="view-maintenance" class="hidden flex-1 flex flex-col p-8 bg-[#fbf6de] overflow-y-auto">
       <div class="max-w-3xl mx-auto w-full bg-white border border-[#e2d8b5] p-6 rounded shadow-sm space-y-5">
         <h2 class="text-lg font-bold text-gray-800 border-b border-gray-200 pb-2">⚙️ データ保守</h2>
@@ -1519,7 +1539,7 @@ HTML_TEMPLATE = r"""
     }
 
     function switchTab(tab) {
-      ['explorer', 'wiki', 'data-tools', 'maintenance', 'ai'].forEach(t => {
+      ['explorer', 'wiki', 'data-tools', 'routes', 'maintenance', 'ai'].forEach(t => {
         document.getElementById('view-' + t).classList.add('hidden');
         document.getElementById('tab-btn-' + t).className = "px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition";
       });
@@ -1695,6 +1715,36 @@ HTML_TEMPLATE = r"""
       return String(value).replace(/[&<>"']/g, ch => ({
         '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
       })[ch]);
+    }
+
+    async function searchRoutes() {
+      const start = document.getElementById('route-start').value.trim();
+      const goal = document.getElementById('route-goal').value.trim();
+      const status = document.getElementById('route-status');
+      const output = document.getElementById('route-results');
+      output.innerHTML = '';
+      if (!start || !goal) { status.textContent = '出発地と目的地を入力してください。'; return; }
+      status.textContent = '経路を検索しています…';
+      try {
+        const result = await pywebview.api.search_routes(start, goal);
+        if (result.error) {
+          const groups = [['出発地の候補', result.start_candidates], ['目的地の候補', result.goal_candidates]];
+          const candidates = groups.filter(([, values]) => values && values.length).map(([label, values]) => `<div class="mt-2"><b>${label}</b><div class="flex flex-wrap gap-2 mt-1">${values.map(n => `<button type="button" data-route-field="${label.startsWith('出発') ? 'route-start' : 'route-goal'}" data-route-id="${escapeHTML(n.id)}" class="px-2 py-1 border rounded text-xs hover:bg-amber-50">${escapeHTML(n.id)}${n.title ? ` — ${escapeHTML(n.title)}` : ''}</button>`).join('')}</div></div>`).join('');
+          output.innerHTML = `<div class="rounded border border-amber-300 bg-amber-50 p-3 text-sm">${escapeHTML(result.error)}${candidates}</div>`;
+          output.querySelectorAll('[data-route-field]').forEach(button => button.addEventListener('click', () => { document.getElementById(button.dataset.routeField).value = button.dataset.routeId; }));
+          status.textContent = ''; return;
+        }
+        status.textContent = result.message || `${result.routes.length}件の経路`;
+        output.innerHTML = (result.routes || []).map((route, routeIndex) => {
+          const cards = route.map((node, index) => {
+            const meta = [node.danger ? `危険度 ${node.danger}` : '危険度 未登録', node.comprehension ? `理解度 ${node.comprehension}` : '理解度 未登録'].join(' · ');
+            const edge = index < route.length - 1 ? (result.edge_info?.[`${node.id}\n${route[index + 1].id}`] || []) : [];
+            const conditions = edge.flatMap(info => Object.entries(info).filter(([, value]) => value).map(([key, value]) => `${key}: ${value}`)).join(' / ');
+            return `<div class="flex items-center gap-3 min-w-max"><article class="w-52 rounded-lg border-2 border-[#d6c79a] bg-[#fffdf5] p-3 shadow-sm"><div class="font-bold text-sm">${escapeHTML(node.id)}</div><div class="text-xs text-[#91520f] mt-1">${escapeHTML(node.title || '題名なし')}</div><div class="text-[10px] text-gray-600 mt-2">${escapeHTML(meta)}</div></article>${index < route.length - 1 ? `<div class="flex flex-col items-center text-[#b45309]"><span class="text-2xl leading-5">→</span>${conditions ? `<span class="max-w-40 text-center text-[10px] text-gray-600">${escapeHTML(conditions)}</span>` : ''}</div>` : ''}</div>`;
+          }).join('');
+          return `<section class="rounded-lg border border-[#e2d8b5] p-3"><h3 class="text-xs font-bold mb-3">ルート ${routeIndex + 1} · ${route.length - 1} 接続</h3><div class="flex items-center gap-2 overflow-x-auto pb-2">${cards}</div></section>`;
+        }).join('') || '<div class="p-3 text-sm text-gray-600">到達可能な経路がありません。</div>';
+      } catch (error) { status.textContent = `検索に失敗しました: ${error}`; }
     }
 
     function formatWikiContent(text) {

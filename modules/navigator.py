@@ -1499,3 +1499,36 @@ def run_navigation():
                 "検索結果は保存せず、"
                 "そのまま続行します。"
             )
+
+
+# Shared route data and candidate matching used by the GUI, AI and CLI.
+from modules.route_service import load_route_graph as _load_shared_route_graph
+from modules.route_service import resolve_node_candidates as _resolve_shared_candidates
+
+
+def load_nodes():
+    nodes, _, _ = _load_shared_route_graph()
+    return nodes
+
+
+def load_edges():
+    _, graph, edge_info = _load_shared_route_graph()
+    return graph, edge_info
+
+
+def find_node(nodes, query):
+    candidates = _resolve_shared_candidates(query, nodes)
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    print("\n候補が複数あります。番号を選んでください:")
+    for index, node_id in enumerate(candidates[:30], 1):
+        print(f"  {format_node_display(index, node_id, nodes)}")
+    while True:
+        choice = input("番号 (Enterでキャンセル): ").strip()
+        if not choice:
+            return None
+        if choice.isdigit() and 1 <= int(choice) <= min(30, len(candidates)):
+            return candidates[int(choice) - 1]
+        print("候補番号を入力してください。")

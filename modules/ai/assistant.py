@@ -8,6 +8,7 @@ from .conversation import ConversationStore
 from .groq_client import GroqClient
 from .prompt_manager import build_system_prompt, build_verification_prompt
 from .wiki_retriever import WikiRetriever
+from modules.route_service import build_route_context
 
 DEFAULT_SETTINGS = {
     "model": "openai/gpt-oss-120b",
@@ -105,6 +106,9 @@ class AIAssistant:
     async def _build_messages(self, cid, prompt, operation):
         sources = await self.retriever.search_with_fallback(prompt, top_k=4)
         context = self.retriever.format_context(sources)[:12000]
+        route_context = build_route_context(prompt)
+        if route_context:
+            context = (context + "\n\n" + "## 経路・場所の補足データ\n" + route_context).strip()
         system = build_system_prompt(context)
         history = self.store.get_messages(
             cid, limit=int(self.settings["history_messages"]) + 1
@@ -131,8 +135,10 @@ class AIAssistant:
         for source in sources:
             if source["source_kind"] == "japanese_wiki":
                 kind = "日本語Wiki"
+            elif source["source_kind"] == "web":
+                kind = "一般Web（オンライン取得）"
             elif source.get("status") == "retrieved_live":
-                kind = "外部情報（英語版Wiki・オンライン取得）"
+                kind = "英語版Wiki（オンライン取得）"
             else:
                 kind = "外部情報（ローカル保存の非日本語資料。オンラインで未確認）"
             title = source["title"].replace("|", "\\|").replace("[", "\\[").replace("]", "\\]")
@@ -166,6 +172,8 @@ class AIAssistant:
             lines.append("- 英語版Wikiのオンライン検索に失敗しました。")
         elif search_status.get("external_online_status") == "no_results":
             lines.append("- 英語版Wikiのオンライン検索では該当する本文を確認できませんでした。")
+        if search_status.get("web_status") == "failed":
+            lines.append("- 一般Web検索に失敗しました。")
         for error in search_status.get("online_errors", []):
             source = error.get("source", "Wiki")
             title = error.get("title")
@@ -208,48 +216,44 @@ class AIAssistant:
             cid, prompt, generation["operation"]
         )
         search_status = self.retriever.last_search_status
-        if not sources and self.retriever.is_research_query(prompt):
-            answer = self.retriever.no_source_response(prompt, search_status)
-            if on_delta:
-                on_delta(answer)
-            finish_reason = "no_verified_sources"
+        try:
+            result = await self.llm.stream_chat(messages, on_delta=on_delta)
+        except RuntimeError as exc:
+            if "コンテキスト上限" not in str(exc):
+                raise
+            system = build_system_prompt(
+                self.retriever.format_context(sources)[:5000]
+            )
+            messages = [
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt},
+            ]
+            result = await self.llm.stream_chat(messages, on_delta=on_delta)
+        answer = result["content"]
+        finish_reason = result["finish_reason"]
+
+        if finish_reason == "length":
+            continuation_messages = messages + [
+                {"role": "assistant", "content": answer},
+                {
+                    "role": "user",
+                    "content": "直前の回答が出力上限で途中終了しました。重複を避けて、途切れた箇所の続きだけを出力してください。",
+                },
+            ]
+            continuation = await self.llm.stream_chat(
+                continuation_messages, on_delta=on_delta
+            )
+            answer += continuation["content"]
+            finish_reason = continuation["finish_reason"]
+
+        if sources:
+            answer = await self._verify_answer(prompt, answer, sources)
+            answer += "\n\n" + self._format_source_references(sources)
         else:
-            try:
-                result = await self.llm.stream_chat(messages, on_delta=on_delta)
-            except RuntimeError as exc:
-                if "コンテキスト上限" not in str(exc):
-                    raise
-                system = build_system_prompt(
-                    self.retriever.format_context(sources)[:5000]
-                )
-                messages = [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": prompt},
-                ]
-                result = await self.llm.stream_chat(messages, on_delta=on_delta)
-            answer = result["content"]
-            finish_reason = result["finish_reason"]
-
-            if finish_reason == "length":
-                continuation_messages = messages + [
-                    {"role": "assistant", "content": answer},
-                    {
-                        "role": "user",
-                        "content": "直前の回答が出力上限で途中終了しました。重複を避けて、途切れた箇所の続きだけを出力してください。",
-                    },
-                ]
-                continuation = await self.llm.stream_chat(
-                    continuation_messages, on_delta=on_delta
-                )
-                answer += continuation["content"]
-                finish_reason = continuation["finish_reason"]
-
-            if sources:
-                answer = await self._verify_answer(prompt, answer, sources)
-                answer += "\n\n" + self._format_source_references(sources)
-            warnings = self._format_search_warnings(search_status)
-            if warnings:
-                answer += "\n\n## 検索に関する注意\n" + warnings
+            answer += "\n\n## 確度について\n今回、引用できる資料を取得できませんでした。一般知識に基づく回答や推論を含むため、事実確認が必要な点はその旨を示しています。"
+        warnings = self._format_search_warnings(search_status)
+        if warnings:
+            answer += "\n\n## 検索に関する注意\n" + warnings
 
         saved = self.store.finish_generation(
             generation["request_id"],

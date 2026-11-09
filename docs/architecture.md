@@ -14,6 +14,7 @@
 | `modules/online_wiki.py` | Fandom MediaWiki API検索、ページ本文取得、URL検証、画像付きHTML保存 |
 | `modules/ai/assistant.py` | AIチャットのオーケストレーション、検索資料の組み立て、回答検証、タイトル生成 |
 | `modules/ai/wiki_retriever.py` | ローカルWiki資料の索引・順位付け、日本語版優先のオンライン検索 |
+| `modules/route_service.py` | 経路CSVの読み込み、非対話の候補解決・最短経路検索、AI向け経路コンテキスト |
 | `modules/ai/groq_client.py` | Groq Chat Completionsとストリーミング通信 |
 | `modules/ai/markdown_renderer.py` | Markdown変換、Pygmentsコードハイライト、HTMLサニタイズ |
 | `modules/ai/conversation.py` | SQLiteスキーマ、会話・メッセージ・回答バージョンの永続化 |
@@ -41,6 +42,10 @@ flowchart LR
     AI --> Groq[Groq API]
     AI --> SQLite[(database/ai/assistant.sqlite3)]
 ```
+
+経路タブ、CLI、AIは `modules/route_service.py` のCSV読込・候補解決を共有します。GUIは曖昧なLevel名に候補を返し、利用者が選択して再検索します。検索結果は有向接続をカード状のフローとして描画します。AIはLevelが質問に含まれるとき、登録された直接接続または2地点間の経路と危険度・理解度を回答コンテキストへ追加します。
+
+AIのオンライン検索は日本語・英語Backrooms Wikiに加えて一般Webの検索結果を調べ、取得できたページ本文を出典として回答に渡します。資料を取得できなかった場合もモデルが回答を試み、確度の注意を付けます。ネットワークエラー時は検索に失敗した旨を回答に示します。
 
 Windowsでは `webview.start(gui="edgechromium")` を使い、WebView2をレンダラーとして起動します。GUIの主画面は `gui_app.py` 内の `HTML_TEMPLATE` から生成され、JavaScriptは `BackroomsAPI` のメソッドを `pywebview.api` 経由で呼び出します。
 

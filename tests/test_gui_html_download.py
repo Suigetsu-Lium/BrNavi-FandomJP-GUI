@@ -200,6 +200,26 @@ class OnlineWikiGuiTests(unittest.TestCase):
             gui_app.HTML_TEMPLATE,
         )
 
+    def test_level_detail_opens_fandom_in_the_embedded_browser(self):
+        self.api.current_info = {"url": "https://backrooms.fandom.com/ja/wiki/Level_0"}
+
+        result = self.api.get_current_fandom_url()
+
+        self.assertEqual(result["url"], self.api.current_info["url"])
+        self.assertIn("openCurrentFandomInApp()", gui_app.HTML_TEMPLATE)
+        self.assertIn("pywebview.api.get_current_fandom_url()", gui_app.HTML_TEMPLATE)
+        self.assertNotIn("pywebview.api.open_external_fandom()", gui_app.HTML_TEMPLATE)
+
+    def test_context_menu_can_copy_text_and_ask_ai_about_a_selection(self):
+        self.assertIn('id="app-context-menu"', gui_app.HTML_TEMPLATE)
+        self.assertIn('id="app-context-copy"', gui_app.HTML_TEMPLATE)
+        self.assertIn('id="app-context-ask-ai"', gui_app.HTML_TEMPLATE)
+        self.assertIn("document.addEventListener('contextmenu', showAppContextMenu)", gui_app.HTML_TEMPLATE)
+        self.assertIn("navigator.clipboard.writeText(text)", gui_app.HTML_TEMPLATE)
+        self.assertIn("async function askAIAboutSelection()", gui_app.HTML_TEMPLATE)
+        self.assertIn("await aiNewConversation()", gui_app.HTML_TEMPLATE)
+        self.assertIn("await sendAIMessage()", gui_app.HTML_TEMPLATE)
+
     @patch.object(gui_app.BackroomsAPI, "_notify_maintenance_task_completed")
     @patch("gui_app.run_maintenance_operation")
     def test_maintenance_task_reports_status_without_gui_log_stream(

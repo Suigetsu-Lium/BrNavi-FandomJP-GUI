@@ -544,6 +544,10 @@ class BackroomsAPI:
                 "subtitle": subtitle,
                 "aliases": aliases,
                 "category": category,
+                "category_label": page.get("category_label", metadata.get("カテゴリ名", "")),
+                "source_type": page.get("source_type", ""),
+                "url": page.get("url", metadata.get("URL", "")),
+                "indexes": page.get("indexes", ""),
                 "language": page.get("language", "JP"),
                 "saved": bool(saved_file),
             }
@@ -556,7 +560,8 @@ class BackroomsAPI:
             if title:
                 unique_results[title_key] = {
                     "title": title, "subtitle": "", "aliases": [],
-                    "category": "", "language": "JP", "saved": True,
+                    "category": "", "category_label": "", "source_type": "",
+                    "url": "", "indexes": "", "language": "JP", "saved": True,
                 }
 
         catalog = list(unique_results.values())
@@ -1425,9 +1430,37 @@ HTML_TEMPLATE = r"""
         <div id="candidate-list" class="flex-1 overflow-y-auto p-3 text-xs"></div>
       </aside>
 
-      <!-- 右ペイン：Wiki 詳細ビュー -->
+      <!-- 右ペイン：本家Wiki風の一覧ハブ・番号一覧・記事詳細 -->
       <section class="flex-1 overflow-y-auto p-8 bg-[#fbf6de]">
-        <div id="wiki-page-container" class="max-w-4xl mx-auto bg-white border border-[#e2d8b5] p-8 rounded shadow-sm relative">
+        <div id="explorer-index-home" class="mx-auto max-w-5xl">
+          <div class="mb-5 text-center">
+            <div class="text-xs text-[#8c6b12]">Backrooms Wiki — 一覧</div>
+            <h2 class="mt-1 text-3xl font-semibold text-[#3f3828]">階層の一覧</h2>
+            <p class="mt-2 text-sm text-gray-600">カテゴリを選ぶと、番号帯ごとの一覧を開きます。</p>
+          </div>
+          <div id="explorer-category-tiles" class="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3" aria-label="階層カテゴリ一覧"></div>
+        </div>
+
+        <div id="explorer-index-category" class="hidden mx-auto max-w-6xl">
+          <div class="mb-4 flex items-center gap-3 border-b border-[#d8c99e] pb-3">
+            <button type="button" onclick="showExplorerIndexHome()" class="shrink-0 rounded px-3 py-1.5 text-sm font-semibold text-[#91520f] hover:bg-[#fff7dd]">‹ 一覧へ戻る</button>
+            <div class="min-w-0 flex-1">
+              <div class="text-xs text-[#8c6b12]">Backrooms Wiki — 階層の一覧</div>
+              <h2 id="explorer-index-category-title" class="text-2xl font-semibold text-[#3f3828]"></h2>
+            </div>
+            <span id="explorer-index-total" class="text-xs text-gray-500"></span>
+          </div>
+          <div class="flex items-start gap-5">
+            <div id="explorer-index-sections" class="min-w-0 flex-1 rounded border border-[#e2d8b5] bg-[#fffdf5] px-5 py-3"></div>
+            <aside class="sticky top-3 hidden w-64 shrink-0 rounded border border-[#d6c79a] bg-[#fff9df] p-3 lg:block">
+              <h3 class="mb-2 border-b border-[#e5d9b9] pb-2 text-sm font-bold">目次</h3>
+              <nav id="explorer-index-toc" class="max-h-[75vh] overflow-y-auto text-xs leading-6 text-gray-700"></nav>
+            </aside>
+          </div>
+        </div>
+
+        <div id="wiki-page-container" class="hidden max-w-4xl mx-auto bg-white border border-[#e2d8b5] p-8 rounded shadow-sm relative">
+          <button type="button" onclick="showExplorerIndexHome()" class="mb-4 rounded px-2 py-1 text-xs font-semibold text-[#91520f] hover:bg-[#fff7dd]">‹ 階層の一覧へ戻る</button>
 
           <div class="text-xs text-[#8c6b12] mb-1 font-medium">
             分類: <span id="view-category">階層</span>、危険度: <span id="view-danger-tag">-</span>
@@ -1442,6 +1475,11 @@ HTML_TEMPLATE = r"""
               <button onclick="openCurrentFandomInApp()" class="px-2.5 py-1 text-xs bg-[#f4e7b8] hover:bg-[#e8d89f] text-[#784f00] rounded font-medium border border-[#d9c78d]">🌐 内蔵ブラウザーでFandomを開く</button>
               <button onclick="pywebview.api.open_local_browser_html()" class="px-2.5 py-1 text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 rounded font-medium border border-gray-300">📄 ローカルHTML</button>
             </div>
+          </div>
+
+          <div id="explorer-unsaved-actions" class="hidden mb-5 rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+            <p class="mb-2">この記事はまだローカルに保存されていません。内蔵ブラウザーで開き、表示中の記事を保存できます。</p>
+            <button type="button" onclick="openCurrentFandomInApp()" class="rounded bg-[#91520f] px-3 py-1.5 text-xs font-semibold text-white">内蔵ブラウザーで開いて保存</button>
           </div>
 
           <!-- 本文 ＆ Infobox -->
@@ -1957,31 +1995,18 @@ HTML_TEMPLATE = r"""
     let levelSearchResults = [];
     let levelSearchRequestId = 0;
     let levelSearchActiveIndex = -1;
+    let explorerIndexPages = [];
+    let explorerIndexCategory = null;
 
     async function onSearchInput() {
       const requestId = ++levelSearchRequestId;
       const candidates = await pywebview.api.search_candidates(document.getElementById('search-input').value);
       if (requestId !== levelSearchRequestId) return;
       levelSearchResults = candidates || [];
+      if (!explorerIndexPages.length) explorerIndexPages = levelSearchResults.map(candidate => ({...candidate}));
       renderCandidates(levelSearchResults);
+      renderExplorerCategoryTiles();
       renderLevelSearchSuggestions();
-    }
-
-    function levelGroupKey(item) {
-      const name = `${item.title || ''} ${item.category || ''}`;
-      const eta = /η|イータ|_eta\b/i.test(name);
-      const category = /亜階層|サブレベル|sublevel/i.test(name) ? '亜階層'
-        : /番外|アノマリー|anomalous/i.test(name) ? '番外階層' : '通常階層';
-      const number = String(item.title || '').match(/(?:Level|レベル)\s*(-?\d+(?:\.\d+)?)/i);
-      let band = 'その他';
-      if (number) {
-        const value = Number(number[1]);
-        if (Number.isInteger(value) && value >= 0) {
-          const lower = value < 10 ? 0 : 10 ** Math.floor(Math.log10(value));
-          band = lower === 0 ? '0〜9' : `${lower}〜${lower * 10 - 1}`;
-        } else band = '小数・負数';
-      }
-      return {key: `${category}|${eta ? 'η' : '通常'}|${band}`, label: `${category}${eta ? ' η' : ''} · ${band}`};
     }
 
     function selectLevelCandidate(item) {
@@ -1991,43 +2016,215 @@ HTML_TEMPLATE = r"""
         const recent = JSON.parse(localStorage.getItem('brnavi-recent-levels') || '[]');
         localStorage.setItem('brnavi-recent-levels', JSON.stringify([item.title, ...recent.filter(title => title !== item.title)].slice(0, 8)));
       } catch (_) {}
-      openRouteLevel(item.title);
+      openExplorerCandidate(item);
     }
 
     function renderCandidates(list) {
       const host = document.getElementById('candidate-list');
       host.replaceChildren();
       document.getElementById('candidate-count').textContent = list.length;
-      const groups = new Map();
-      list.forEach(item => {
-        const group = levelGroupKey(item);
-        if (!groups.has(group.key)) groups.set(group.key, {label: group.label, items: []});
-        groups.get(group.key).items.push(item);
-      });
-      if (!list.length) {
-        host.innerHTML = '<p class="p-3 text-gray-500">該当する階層がありません。取得済みの一覧を環境設定から更新できます。</p>';
+      const query = document.getElementById('search-input').value.trim();
+      if (!query) {
+        host.innerHTML = '<p class="p-2 text-[11px] leading-relaxed text-gray-500">検索すると候補が表示されます。画像付きカテゴリ一覧から番号帯をたどることもできます。</p>';
         return;
       }
-      groups.forEach(group => {
-        const section = document.createElement('section');
-        section.className = 'mb-4';
-        const heading = document.createElement('h3');
-        heading.className = 'sticky top-0 mb-2 border-b border-[#e2d8b5] bg-[#f7f0d4] py-1 font-bold text-[#784f00]';
-        heading.textContent = group.label;
-        const links = document.createElement('div');
-        links.className = 'grid grid-cols-2 gap-x-3 gap-y-1';
-        group.items.forEach(item => {
-          const button = document.createElement('button');
-          button.type = 'button';
-          button.className = 'truncate rounded px-1.5 py-1 text-left text-[#1558a6] hover:bg-white hover:underline';
-          button.title = [item.title, item.subtitle, item.category].filter(Boolean).join(' · ');
-          button.innerHTML = `${item.saved ? '📖' : '↗'} <span>${escapeHTML(item.title)}</span>`;
-          button.onclick = () => selectLevelCandidate(item);
-          links.appendChild(button);
-        });
-        section.append(heading, links);
-        host.appendChild(section);
+      if (!list.length) {
+        host.innerHTML = '<p class="p-2 text-gray-500">一致する階層がありません。</p>';
+        return;
+      }
+      list.slice(0, 80).forEach(item => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'mb-1 block w-full rounded border border-transparent px-2 py-1.5 text-left hover:border-[#dfd3a8] hover:bg-white';
+        button.innerHTML = `<span class="mr-1">${item.saved ? '📖' : '↗'}</span><span class="font-semibold text-[#1558a6]">${escapeHTML(item.title)}</span>${item.subtitle ? `<span class="block pl-5 text-[10px] text-gray-500">${escapeHTML(item.subtitle)}</span>` : ''}`;
+        button.onclick = () => selectLevelCandidate(item);
+        host.appendChild(button);
       });
+    }
+
+    function explorerTitleKey(title) {
+      return String(title || '').replace(/[_\s]+/g, ' ').trim().toLocaleLowerCase();
+    }
+
+    function explorerPagesForCategory(categoryId) {
+      const source = explorerIndexPages.length ? explorerIndexPages : levelSearchResults;
+      const pages = levelListPagesForCategory(categoryId, source);
+      const metadataByTitle = new Map(levelSearchResults.map(item => [explorerTitleKey(item.title), item]));
+      return pages.map(page => {
+        const metadata = metadataByTitle.get(explorerTitleKey(page.title)) || {};
+        return {...metadata, ...page, saved: Boolean(metadata.saved),
+          subtitle: metadata.subtitle || page.subtitle || page.meta_title || ''};
+      }).sort(compareLevelListPages);
+    }
+
+    async function loadExplorerIndexPages() {
+      try {
+        const result = await pywebview.api.get_level_list_pages('JP');
+        if (result.error) throw new Error(result.error);
+        explorerIndexPages = result.pages || [];
+      } catch (_) {
+        explorerIndexPages = levelSearchResults.map(candidate => ({...candidate}));
+      }
+      renderExplorerCategoryTiles();
+      if (explorerIndexCategory !== null) renderExplorerCategorySections(explorerIndexCategory);
+    }
+
+    function renderExplorerCategoryTiles() {
+      const host = document.getElementById('explorer-category-tiles');
+      if (!host || !Array.isArray(levelListCategoryDefinitions)) return;
+      host.replaceChildren();
+      const categories = getLevelListCategories(explorerIndexPages.length ? explorerIndexPages : levelSearchResults);
+      categories.forEach((category, index) => {
+        const card = document.createElement('div');
+        card.className = 'overflow-hidden border border-[#dfd09f] bg-[#fff1b2] shadow-sm transition hover:-translate-y-0.5 hover:shadow-md';
+        if (categories.length === 8 && index === 6) card.classList.add('lg:col-start-2');
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'block w-full text-left focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#b45309]';
+        button.onclick = () => openExplorerCategory(category.id);
+        const art = document.createElement('div');
+        art.className = 'relative mx-auto mt-3 h-44 w-44 overflow-hidden bg-[#e4d9a8]';
+        const palette = [['#77754b','#cec899'],['#45463e','#b7b5a5'],['#39745f','#b7d8aa'],['#6d3f24','#d39b53'],['#6c7557','#d7c982'],['#61797e','#bed0c8'],['#657b80','#c7d5cd'],['#83785c','#d9cea9']][index % 8];
+        art.style.background = `linear-gradient(145deg,${palette[0]},${palette[1]})`;
+        if (category.imageUrl) {
+          const image = document.createElement('img');
+          image.src = category.imageUrl;
+          image.alt = `${category.title}の参考画像`;
+          image.loading = 'lazy';
+          image.className = 'absolute inset-0 h-full w-full object-cover';
+          image.onerror = () => image.remove();
+          art.appendChild(image);
+        }
+        const title = document.createElement('div');
+        title.className = 'px-2 py-2 text-center text-sm font-bold text-[#3f3828]';
+        title.textContent = category.title;
+        const count = document.createElement('div');
+        count.className = 'pb-2 text-center text-[10px] text-gray-600';
+        count.textContent = `${category.pages.length}件`;
+        button.append(art, title, count);
+        card.appendChild(button);
+        if (category.imagePageUrl) {
+          const credit = document.createElement('a');
+          credit.href = category.imagePageUrl;
+          credit.target = '_blank';
+          credit.rel = 'noopener noreferrer';
+          credit.className = 'block border-t border-[#e6d99f] px-2 py-1 text-right text-[9px] text-[#765b32] hover:underline';
+          credit.textContent = '画像出典';
+          card.appendChild(credit);
+        }
+        host.appendChild(card);
+      });
+    }
+
+    function openExplorerCategory(categoryId) {
+      explorerIndexCategory = categoryId;
+      document.getElementById('explorer-index-home').classList.add('hidden');
+      document.getElementById('wiki-page-container').classList.add('hidden');
+      document.getElementById('explorer-index-category').classList.remove('hidden');
+      const category = getLevelListCategories(explorerIndexPages.length ? explorerIndexPages : levelSearchResults)
+        .find(item => item.id === categoryId);
+      document.getElementById('explorer-index-category-title').textContent = category?.title || '階層の一覧';
+      renderExplorerCategorySections(categoryId);
+    }
+
+    function showExplorerIndexHome() {
+      explorerIndexCategory = null;
+      document.getElementById('wiki-page-container').classList.add('hidden');
+      document.getElementById('explorer-index-category').classList.add('hidden');
+      document.getElementById('explorer-index-home').classList.remove('hidden');
+    }
+
+    function renderExplorerCategorySections(categoryId) {
+      const host = document.getElementById('explorer-index-sections');
+      const toc = document.getElementById('explorer-index-toc');
+      host.replaceChildren();
+      toc.replaceChildren();
+      const pages = explorerPagesForCategory(categoryId);
+      const sections = getLevelListSections(pages, categoryId);
+      document.getElementById('explorer-index-total').textContent = `${pages.length}件`;
+      if (!pages.length) {
+        const message = document.createElement('p');
+        message.className = 'py-5 text-sm text-gray-600';
+        message.textContent = 'このカテゴリのローカル一覧データはありません。';
+        host.appendChild(message);
+        const category = getLevelListCategories(explorerIndexPages).find(item => item.id === categoryId);
+        if (category?.wikiTitle) {
+          const link = document.createElement('button');
+          link.className = 'mb-4 rounded bg-[#91520f] px-3 py-2 text-xs font-semibold text-white';
+          link.textContent = 'Fandom Wikiで一覧を開く';
+          link.onclick = () => openFandomLevelList(category.wikiTitle);
+          host.appendChild(link);
+        }
+        return;
+      }
+      const appendHeading = (title, key, level = 3) => {
+        const heading = document.createElement(level === 3 ? 'h3' : 'h4');
+        heading.id = `explorer-section-${key}`;
+        heading.className = level === 3
+          ? 'sticky top-0 z-10 -mx-5 mb-2 border-b border-[#d8c99e] bg-[#fff8dc] px-4 py-2 text-xl font-semibold text-[#3f3828]'
+          : 'mb-1 mt-3 border-b border-[#eee5ce] px-2 py-1 text-sm font-semibold text-gray-700';
+        heading.textContent = title;
+        host.appendChild(heading);
+        const link = document.createElement('a');
+        link.href = `#${heading.id}`;
+        link.className = level === 3 ? 'mb-1 block rounded px-2 py-1 text-gray-700 hover:bg-[#fff7dd] hover:text-[#9b3d06]' : 'mb-1 ml-3 block rounded px-2 py-1 text-gray-600 hover:bg-[#fff7dd]';
+        link.textContent = title;
+        link.onclick = event => { event.preventDefault(); heading.scrollIntoView({block: 'start'}); };
+        toc.appendChild(link);
+        return heading;
+      };
+      const appendPages = (items, indent = false) => items.forEach(page => {
+        const row = document.createElement('div');
+        row.className = `py-1.5 text-sm leading-relaxed ${indent ? 'pl-4' : ''}`;
+        const link = document.createElement('a');
+        link.href = page.url || '#';
+        link.className = 'text-[#a3420b] hover:underline';
+        link.textContent = page.title || '無題';
+        link.onclick = event => { event.preventDefault(); openExplorerCandidate(page); };
+        row.appendChild(link);
+        if (page.subtitle) {
+          const subtitle = document.createElement('span');
+          subtitle.className = 'ml-1 text-gray-700';
+          subtitle.textContent = `: "${page.subtitle}"`;
+          row.appendChild(subtitle);
+        }
+        const badge = document.createElement('span');
+        badge.className = `ml-2 rounded px-1.5 py-0.5 text-[10px] ${page.saved ? 'bg-emerald-100 text-emerald-800' : 'bg-gray-100 text-gray-600'}`;
+        badge.textContent = page.saved ? '保存済み' : '未保存';
+        row.appendChild(badge);
+        host.appendChild(row);
+      });
+      sections.forEach(section => {
+        appendHeading(section.title, section.key);
+        if (section.key === '100-999' && categoryId === 'normal_eta') {
+          const buckets = new Map();
+          section.pages.forEach(page => {
+            const number = getIntegerLevelNumber(page);
+            const start = Math.floor(number / 100) * 100;
+            const key = `${start}-${start + 99}`;
+            if (!buckets.has(key)) buckets.set(key, []);
+            buckets.get(key).push(page);
+          });
+          Array.from(buckets.entries()).sort((left, right) => Number(left[0].split('-')[0]) - Number(right[0].split('-')[0]))
+            .forEach(([range, items]) => {
+              const [start, end] = range.split('-');
+              const label = `${start} η から ${end} η まで`;
+              appendHeading(label, `eta-${range}`, 4);
+              appendPages(items, true);
+            });
+        } else {
+          appendPages(section.pages);
+        }
+      });
+    }
+
+    async function openExplorerCandidate(item) {
+      document.getElementById('explorer-index-home').classList.add('hidden');
+      document.getElementById('explorer-index-category').classList.add('hidden');
+      document.getElementById('wiki-page-container').classList.remove('hidden');
+      await loadLevelDetail(item.title);
+      const articleMissing = (document.getElementById('view-article-content').textContent || '').includes('本文データがありません');
+      document.getElementById('explorer-unsaved-actions').classList.toggle('hidden', !articleMissing);
     }
 
     function showLevelSearchSuggestions() {
@@ -2148,7 +2345,8 @@ HTML_TEMPLATE = r"""
     async function openRouteLevel(levelId) {
       switchTab('explorer');
       try {
-        await loadLevelDetail(levelId);
+        const candidate = levelSearchResults.find(item => explorerTitleKey(item.title) === explorerTitleKey(levelId));
+        await openExplorerCandidate(candidate || {title: levelId, saved: false});
         const article = document.getElementById('view-article-content').textContent || '';
         if (!article.includes('本文データがありません')) return;
       } catch (_) {}
@@ -2402,9 +2600,21 @@ HTML_TEMPLATE = r"""
       return Array.from(byUrl.values());
     }
 
-    function levelListPagesForCategory(categoryId) {
-      const pages = levelListPages.filter(page => {
-        const category = String(page.category || "").toLowerCase();
+    function normalizeExplorerCategory(value) {
+      const category = String(value || '').trim().toLocaleLowerCase();
+      if (/番外.*亜階層|anomalous_sublevel/.test(category)) return 'anomalous_sublevel_eta';
+      if (/通常.*亜階層|sublevel/.test(category)) return /η|eta/.test(category) ? 'sublevel_eta' : 'sublevel';
+      if (/番外階層|anomalous/.test(category)) return /η|eta/.test(category) ? 'anomalous_eta' : 'anomalous';
+      if (/通常階層|normal/.test(category)) return /η|eta/.test(category) ? 'normal_eta' : 'normal';
+      if (/別名|alias/.test(category)) return 'alias';
+      if (/翻訳|translation/.test(category)) return 'translation';
+      if (/コンテスト|contest/.test(category)) return 'contest';
+      return category;
+    }
+
+    function levelListPagesForCategory(categoryId, sourcePages = levelListPages) {
+      const pages = sourcePages.filter(page => {
+        const category = normalizeExplorerCategory(page.category);
         const source = String(page.source_type || "").toLowerCase();
         const title = String(page.title || "");
         if (categoryId === "all") return true;
@@ -2436,19 +2646,19 @@ HTML_TEMPLATE = r"""
       return uniqueLevelListPages(pages);
     }
 
-    function getLevelListCategories() {
+    function getLevelListCategories(sourcePages = levelListPages) {
       const categories = levelListCategoryDefinitions
-        .map(category => ({...category, pages: levelListPagesForCategory(category.id)}))
+        .map(category => ({...category, pages: levelListPagesForCategory(category.id, sourcePages)}))
       const knownIds = new Set(levelListCategoryDefinitions.map(category => category.id));
-      const additionalIds = Array.from(new Set(levelListPages.map(page =>
-        String(page.category || "").toLowerCase()
+      const additionalIds = Array.from(new Set(sourcePages.map(page =>
+        normalizeExplorerCategory(page.category)
       )))
         .filter(id => id && !knownIds.has(id) &&
           !["normal_eta", "anomalous_eta", "sublevel_eta"].includes(id) &&
           !id.startsWith("normal") && !id.startsWith("anomalous") && !id.startsWith("sublevel"))
         .sort((left, right) => left.localeCompare(right));
       additionalIds.forEach(id => {
-        const pages = levelListPagesForCategory(id);
+        const pages = levelListPagesForCategory(id, sourcePages);
         if (!pages.length) return;
         const label = pages[0].category_label || levelListCategoryLabels[id] || id;
         categories.push({
@@ -2563,8 +2773,8 @@ HTML_TEMPLATE = r"""
       return match ? Number(match[1]) : null;
     }
 
-    function getLevelNumberRange(number) {
-      const suffix = currentLevelListCategory === "normal_eta" ? "η" : "";
+    function getLevelNumberRange(number, categoryId = currentLevelListCategory) {
+      const suffix = categoryId === "normal_eta" ? "η" : "";
       if (number === 0) return {key: "zero", title: `0${suffix}`};
       if (number >= 1 && number <= 9) return {key: "1-9", title: `1${suffix} から 9${suffix} まで`};
       if (number >= 10 && number <= 99) return {key: "10-99", title: `10${suffix} から 99${suffix} まで`};
@@ -2587,14 +2797,14 @@ HTML_TEMPLATE = r"""
       return String(left.title).localeCompare(String(right.title), "ja", {numeric: true});
     }
 
-    function getLevelListSections(pages) {
-      if (currentLevelListCategory === "anomalous" || currentLevelListCategory === "sublevel") {
-        const categoryOrder = currentLevelListCategory === "anomalous"
+    function getLevelListSections(pages, categoryId = currentLevelListCategory) {
+      if (categoryId === "anomalous" || categoryId === "sublevel") {
+        const categoryOrder = categoryId === "anomalous"
           ? ["anomalous", "anomalous_eta", "anomalous_pl", "anomalous_ua"]
           : ["sublevel", "sublevel_eta", "anomalous_sublevel_eta"];
         const groups = new Map();
         pages.forEach(page => {
-          const category = String(page.category || "").toLowerCase();
+          const category = normalizeExplorerCategory(page.category);
           if (!groups.has(category)) {
             let title = page.category_label || category;
             if (category === "anomalous") title = "無印番外階層";
@@ -2614,13 +2824,13 @@ HTML_TEMPLATE = r"""
         });
       }
 
-      if (currentLevelListCategory === "all") {
+      if (categoryId === "all") {
         const categoryOrder = ["normal", "normal_eta", "anomalous", "anomalous_eta",
           "sublevel", "sublevel_eta", "dimension", "foreign", "entity", "item",
           "phenomenon", "canon", "joke_level", "joke_article", "person"];
         const groups = new Map();
         pages.forEach(page => {
-          const category = String(page.category || "").toLowerCase();
+          const category = normalizeExplorerCategory(page.category);
           if (!groups.has(category)) {
             groups.set(category, {
               key: category,
@@ -2643,7 +2853,7 @@ HTML_TEMPLATE = r"""
         const number = getIntegerLevelNumber(page);
         const range = number === null
           ? {key: "other", title: "その他の階層"}
-          : getLevelNumberRange(number);
+          : getLevelNumberRange(number, categoryId);
         if (!groups.has(range.key)) groups.set(range.key, {...range, pages: []});
         groups.get(range.key).pages.push(page);
       });
@@ -3215,6 +3425,7 @@ HTML_TEMPLATE = r"""
       setLevelListTaskBusy(false);
       pywebview.api.get_environment_settings().then(renderEnvironmentSettings).catch(() => {});
       onSearchInput();
+      loadExplorerIndexPages();
     }
 
     // --- BrNavi AI Assistant ---
@@ -3887,6 +4098,7 @@ HTML_TEMPLATE = r"""
 
     window.addEventListener('pywebviewready', () => {
       onSearchInput();
+      loadExplorerIndexPages();
       initializeAI();
       initializeEnvironmentSettings();
       updateOnlineWikiCurrentUrl();

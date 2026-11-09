@@ -94,13 +94,22 @@ class OnlineWikiGuiTests(unittest.TestCase):
         self.assertNotIn("function appendLog", gui_app.HTML_TEMPLATE)
         self.assertNotIn("open_online_wiki_browser", gui_app.HTML_TEMPLATE)
 
-    def test_explorer_has_keyboard_suggestions_and_grouped_link_index(self):
+    def test_explorer_has_keyboard_suggestions_and_saved_status(self):
         self.assertIn('role="combobox"', gui_app.HTML_TEMPLATE)
         self.assertIn('id="level-search-suggestions"', gui_app.HTML_TEMPLATE)
         self.assertIn("function onLevelSearchKeydown(event)", gui_app.HTML_TEMPLATE)
-        self.assertIn("function levelGroupKey(item)", gui_app.HTML_TEMPLATE)
         self.assertIn("item.saved ? '📖' : '↗'", gui_app.HTML_TEMPLATE)
         self.assertIn("item.subtitle", gui_app.HTML_TEMPLATE)
+
+    def test_explorer_index_uses_category_tiles_range_sections_and_toc(self):
+        self.assertIn('id="explorer-index-home"', gui_app.HTML_TEMPLATE)
+        self.assertIn('id="explorer-category-tiles"', gui_app.HTML_TEMPLATE)
+        self.assertIn('id="explorer-index-sections"', gui_app.HTML_TEMPLATE)
+        self.assertIn('id="explorer-index-toc"', gui_app.HTML_TEMPLATE)
+        self.assertIn('function openExplorerCategory(categoryId)', gui_app.HTML_TEMPLATE)
+        self.assertIn('function renderExplorerCategorySections(categoryId)', gui_app.HTML_TEMPLATE)
+        self.assertIn('function showExplorerIndexHome()', gui_app.HTML_TEMPLATE)
+        self.assertIn('class="sticky top-3 hidden w-64 shrink-0 rounded border', gui_app.HTML_TEMPLATE)
 
     @patch("gui_app.load_master_database")
     @patch("gui_app.TEXT_DIR")
@@ -174,7 +183,7 @@ class OnlineWikiGuiTests(unittest.TestCase):
         self.assertIn('style="display: flex; flex-direction: column;', gui_app.HTML_TEMPLATE)
         self.assertIn('row.style.cssText = "box-sizing: border-box; flex: 0 0 auto; width: 100%;"', gui_app.HTML_TEMPLATE)
         self.assertIn('title: "通常階層 η の一覧"', gui_app.HTML_TEMPLATE)
-        self.assertIn('function getLevelListSections(pages)', gui_app.HTML_TEMPLATE)
+        self.assertIn('function getLevelListSections(pages, categoryId = currentLevelListCategory)', gui_app.HTML_TEMPLATE)
         self.assertIn('category === "normal_eta" && source !== "translation"', gui_app.HTML_TEMPLATE)
         self.assertIn('async function openFandomLevelList(wikiTitle)', gui_app.HTML_TEMPLATE)
         self.assertIn('function showLevelListCategories()', gui_app.HTML_TEMPLATE)

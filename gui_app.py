@@ -1331,6 +1331,7 @@ HTML_TEMPLATE = r"""
         </dl>
         <section class="border-t border-[#d3c29a] pt-3">
           <h3 class="font-semibold mb-2">リンク・ライセンス</h3>
+          <p class="text-xs text-gray-600 mb-2">個人開発の非公式ツールです。Fandom, Inc.およびBackrooms Wiki運営とは関係ありません。Wikiコンテンツは各ページ・画像のライセンスに従います。</p>
           <div class="flex flex-wrap gap-2">
             <button onclick="openAboutLink('repository')" class="px-3 py-1 rounded border border-[#d3c29a] bg-white hover:bg-[#f2e8c5] text-xs">GitHubリポジトリ</button>
             <button onclick="openAboutLink('releases')" class="px-3 py-1 rounded border border-[#d3c29a] bg-white hover:bg-[#f2e8c5] text-xs">更新情報</button>

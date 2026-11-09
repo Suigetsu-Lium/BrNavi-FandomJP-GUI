@@ -67,13 +67,8 @@ exit /b 0
 :stage_data
 set "TARGET=%~1"
 for %%D in (parsed_index level_lists index_html downloaded_fandom_html extracted_fandom_levels downloaded_images) do (
-    if exist "%ROOT%\%%D\" (
-        robocopy "%ROOT%\%%D" "%TARGET%\%%D" /E /COPY:DAT /DCOPY:DAT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP > nul
-        if errorlevel 8 exit /b 1
-    ) else (
-        if not exist "%TARGET%\%%D" mkdir "%TARGET%\%%D"
-        if errorlevel 1 exit /b 1
-    )
+    if not exist "%TARGET%\%%D" mkdir "%TARGET%\%%D"
+    if errorlevel 1 exit /b 1
 )
 
 if not exist "%TARGET%\database\ai" mkdir "%TARGET%\database\ai"
@@ -81,12 +76,6 @@ if errorlevel 1 exit /b 1
 > "%TARGET%\VERSION.txt" echo v%APP_VERSION%
 if errorlevel 1 exit /b 1
 
-for %%F in (wiki_list.txt extracted_fandom_levels_summary.csv backrooms_nodes.csv backrooms_edges.csv) do (
-    if exist "%ROOT%\%%F" (
-        copy /y "%ROOT%\%%F" "%TARGET%\%%F" > nul
-        if errorlevel 1 exit /b 1
-    )
-)
 exit /b 0
 
 :missing_dependencies

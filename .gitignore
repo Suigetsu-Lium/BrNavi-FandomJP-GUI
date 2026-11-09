@@ -151,6 +151,8 @@ activemq-data/
 
 # Environments
 .env
+.env.*
+!.env.example
 .envrc
 .venv
 env/
@@ -159,8 +161,24 @@ ENV/
 env.bak/
 venv.bak/
 
-# Local AI conversations, settings, and SQLite migration backups
-database/ai/
+# User data: downloaded Wiki pages/images, extracted content, indexes and generated route/catalog files
+/downloaded_fandom_html/
+/extracted_fandom_levels/
+/downloaded_images/
+/parsed_index/
+/index_html/
+/level_lists/
+/database/
+/wiki_list.txt
+/extracted_fandom_levels_summary.csv
+/backrooms_nodes.csv
+/backrooms_edges.csv
+
+# Local credentials and secret material
+/.secrets/
+/secrets/
+*.secret
+*.key
 
 # Spyder project settings
 .spyderproject

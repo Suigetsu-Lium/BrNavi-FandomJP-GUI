@@ -81,6 +81,7 @@ from urllib.parse import unquote, urlparse
 
 from bs4 import BeautifulSoup
 from curl_cffi import requests
+from modules.runtime_paths import get_application_dir
 
 
 # =============================================================================
@@ -88,12 +89,7 @@ from curl_cffi import requests
 # =============================================================================
 
 # modules/ の1つ上 = BrNavi-FandomJP
-BASE_DIR = (
-    Path(__file__)
-    .resolve()
-    .parent
-    .parent
-)
+BASE_DIR = get_application_dir()
 
 MASTER_FILE = (
     BASE_DIR

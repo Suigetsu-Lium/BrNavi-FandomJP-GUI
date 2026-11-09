@@ -12,13 +12,14 @@ from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 from curl_cffi import requests
+from modules.runtime_paths import get_application_dir
 
 
 # =============================================================================
 # 基本パス
 # =============================================================================
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BASE_DIR = str(get_application_dir())
 
 INDEX_HTML_DIR = os.path.join(
     BASE_DIR,

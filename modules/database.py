@@ -25,18 +25,14 @@ import re
 import webbrowser
 from pathlib import Path
 
+from modules.runtime_paths import get_application_dir
 
 # =============================================================================
 # 基本パス
 # =============================================================================
 
 # modules/ の1つ上 = BrNavi-FandomJP
-BASE_DIR = (
-    Path(__file__)
-    .resolve()
-    .parent
-    .parent
-)
+BASE_DIR = get_application_dir()
 
 
 # =============================================================================

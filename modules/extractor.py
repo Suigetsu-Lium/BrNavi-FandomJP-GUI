@@ -7,6 +7,7 @@ from pathlib import Path
 from urllib.parse import unquote
 
 from bs4 import BeautifulSoup
+from modules.runtime_paths import get_application_dir
 
 
 # ============================================================
@@ -34,12 +35,7 @@ from bs4 import BeautifulSoup
 # 基本パス
 # ============================================================
 
-BASE_DIR = (
-    Path(__file__)
-    .resolve()
-    .parent
-    .parent
-)
+BASE_DIR = get_application_dir()
 
 DOWNLOADED_HTML_DIR = (
     BASE_DIR

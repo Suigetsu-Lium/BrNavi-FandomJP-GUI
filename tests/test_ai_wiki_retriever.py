@@ -295,6 +295,32 @@ class WikiRetrieverTests(unittest.TestCase):
         self.assertEqual(results[0]["status"], "retrieved_live")
         self.assertEqual(results[0]["retrieval_time_basis"], "live_api_retrieval_time")
 
+    def test_ai_search_uses_embedded_webview_after_fandom_api_403(self):
+        retriever = self.retriever()
+        error = RuntimeError("403 Forbidden")
+        error.response = type("Response", (), {"status_code": 403})()
+        pages = [
+            {
+                "title": "検索結果",
+                "url": "https://backrooms.fandom.com/ja/wiki/Special:Search?query=Level+0",
+                "html": '<div id="mw-content-text"><a href="/ja/wiki/Level_0">Level 0</a></div>',
+            },
+            {
+                "title": "Level 0",
+                "url": "https://backrooms.fandom.com/ja/wiki/Level_0",
+                "html": '<div class="mw-parser-output"><p>Level 0の確認済み記事本文です。</p><p>移動条件などの情報があります。</p></div>',
+            },
+        ]
+        with (
+            patch.object(retriever, "_online_search_api", side_effect=error),
+            patch("modules.ai.wiki_retriever.fetch_public_page", side_effect=pages),
+        ):
+            results = asyncio.run(retriever._online_search("Level 0", "ja"))
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["title"], "Level 0")
+        self.assertIn("確認済み記事本文", results[0]["excerpt"])
+
     def test_online_fallback_searches_english_only_after_japanese_no_results(self):
         retriever = self.retriever()
         retriever.online_search = True

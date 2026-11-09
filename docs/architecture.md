@@ -38,6 +38,8 @@ flowchart LR
     Route --> RouteCSV[(backrooms_nodes.csv<br/>backrooms_edges.csv)]
     UI --> Frame[Fandom埋め込みフレーム]
     Frame --> Fandom[Fandom日本語版]
+    Bridge --> HiddenWebView[非表示WebView2<br/>403時のDOM取得]
+    HiddenWebView --> Fandom
     Bridge --> AI[modules/ai/assistant.py]
     AI --> Retriever[WikiRetriever]
     Retriever --> LocalWiki[ローカルTXT・HTML]
@@ -46,7 +48,7 @@ flowchart LR
     AI --> SQLite[(database/ai/assistant.sqlite3)]
 ```
 
-経路タブ、CLI、AIは `modules/route_service.py` のCSV読込・候補解決を共有します。GUIは曖昧なLevel名に候補を返し、利用者が選択して再検索します。経路は有向グラフ上の最短経路を最大8件、最大深度30で返し、検索結果はLevel、危険度、理解度、接続条件を含むカード状のフローとして描画します。CLIは同じノード・エッジの読込と候補解決を使い、対話画面で候補を選びます。環境設定からの接続CSV生成は `downloaded_fandom_html/` 内のLevel記事HTMLを直接解析し、従来と同じ列構成の `backrooms_nodes.csv` と `backrooms_edges.csv` を出力します。LevelタイトルをHTMLページ情報から解決するため、記事本文を一つのTXTへ統合する処理に依存しません。解析できるLevelまたは接続が0件の場合は失敗として既存CSVを維持します。
+経路タブ、CLI、AIは `modules/route_service.py` のCSV読込・候補解決を共有します。GUIは曖昧なLevel名に候補を返し、利用者が選択して再検索します。経路は有向グラフ上の最短経路を最大8件、最大深度30で返します。GUIは一覧から個別の縦型タイムラインへ進み、移動条件を大きく表示します。各Levelを図鑑で開き、本文が未保存なら内蔵Wikiへ案内します。環境設定からの接続CSV生成は `downloaded_fandom_html/` 内のLevel記事HTMLを直接解析し、従来と同じ列構成の `backrooms_nodes.csv` と `backrooms_edges.csv` を出力します。危険度・理解度はHTML本文から抽出し、不足する値を `extracted_fandom_levels_summary.csv` からLevelコードまたはメタタイトルで補完します。危険度の数値、可変、条件付き、N/Aと補足文を保持し、図鑑・経路詳細で同じ色区分を使います。LevelタイトルをHTMLページ情報から解決するため、記事本文を一つのTXTへ統合する処理に依存しません。解析できるLevelまたは接続が0件の場合は失敗として既存CSVを維持します。
 
 AIは経路・出口・移動などの相談で、Levelが一つ指定された場合は登録された直接接続先、二つ指定された場合は両者間の最短経路候補をコンテキストに追加します。質問文に接続CSVの条件文が含まれる場合は、その条件と一致する経路レコードも優先して渡します。これらはローカルCSV出典として回答に付記します。情報が未登録なら未登録として扱います。グラフの欠落やWiki設定のフィクション性があるため、現実の安全や到達を保証するものではありません。
 
@@ -55,6 +57,8 @@ AIの検索はローカルWiki資料を順位付けし、日本語・英語Backr
 危険度・安全・理解度・カテゴリ・ηなどの条件検索意図がある場合、`extracted_fandom_levels_summary.csv`、`parsed_index/pages_database_classified.csv`、`parsed_index/pages_master.csv` を読み、Level名・カテゴリ・危険度・理解度・タグと、対応するローカル記事本文の冒頭を組み合わせたメタデータ候補を作ります。条件に合うものを最大15件まで出典資料として渡し、指定された危険度の数値やηカテゴリが分かる場合は絞り込みます。
 
 出典資料が0件の場合はGroqを呼ばず、「該当する資料が見つかりませんでした。具体的なLevel番号（例：Level 16 η）を指定して質問するか、『HTML取得・データ抽出』タブから対象ページのオフライン保存を行ってください。」だけを返します。画面には追加で日本語版Wiki候補を検索する操作を表示します。記事の保存は候補選択後に記事名・URL・本文と画像を明示した利用者確認を通過した場合だけ実行し、API本文を `downloaded_fandom_html/` へ保存してから同じ質問を再実行します。オンライン検索・本文取得エラーはAIの状態表示に残します。
+
+質問文に明示されたLevelについてローカル本文が未保存なら、ほかの出典で回答できる場合にも対象ページの取得操作を表示します。片方向だけに入口・出口が記載される可能性を案内し、利用者が保存を承諾したときだけ記事と画像を保存して接続CSVを再解析します。再解析が成功した場合、同じ質問を再実行して最新経路データを読み直します。
 
 出典URLおよび回答内URLはMarkdownリンクとして描画し、クリックをアプリ内Wikiタブのブラウザーへ振り向けます。HTTP(S)以外、認証情報付きURL、ループバック・プライベートIP、ローカルホスト名は拒否します。出典のある主張は別のGroq呼び出しで照合し、回答に資料区分・URL・取得時刻またはローカル更新時刻・抜粋を付けます。
 
@@ -70,13 +74,13 @@ Windowsでは `webview.start(gui="edgechromium")` を使い、WebView2をレン�
 
 ## Wiki閲覧・保存
 
-1. Wikiタブの検索はFandomのMediaWiki API (`/ja/api.php`) を呼び出し、ページ名・URL・カテゴリを取得します。検索結果は最大30件です。
+1. Wikiタブの検索はFandomのMediaWiki API (`/ja/api.php`) を呼び出し、ページ名・URL・カテゴリを取得します。検索結果は最大30件です。ブラウザーに近いUser-Agent、Accept、Accept-Language、Refererを設定します。
 2. 選択した検索結果または入力されたURLは、日本語版WikiのHTTPS記事URLであることをPython側でも検証します。
 3. 記事はWebView内のiframeへ読み込みます。WebViewのFandom HTML応答URLを監視して現在の記事URLを画面へ返し、「表示中を保存」の対象にします。
-4. 保存処理はMediaWiki APIから取得した記事本文を管理メタデータ付きHTMLにし、一時ファイルから `os.replace()` で `downloaded_fandom_html/` に保存します。記事HTMLへの直接HTTPリクエストは行いません。
+4. 保存処理はMediaWiki APIから取得した記事本文を管理メタデータ付きHTMLにし、一時ファイルから `os.replace()` で `downloaded_fandom_html/` に保存します。APIがHTTP 403を返した場合は非表示のEdge WebView2ウィンドウで同一の公開記事を開き、DOM本文を取得して保存します。記事HTMLへの直接HTTPリクエストは行いません。
 5. HTML内の許可されたFandom画像ホストを調べて画像を取得し、記事名に対応する `_assets` フォルダーへ相対パスで保存します。1ページあたり最大40画像、1画像あたり20 MiBまでです。
 
-閲覧ではFandom本来のページ表示を保ち、保存では既存ダウンローダーとの互換性を保つ設計です。画面に描画されたiframeのDOMそのものは保存しません。Fandomのページ構造・レスポンスヘッダー・画像ホストの変更により表示や保存が影響を受けることがあります。
+閲覧ではFandom本来のページ表示を保ち、保存では既存ダウンローダーとの互換性を保つ設計です。通常の保存では画面に描画されたiframeのDOMを使わず、APIが403を返した場合に限って独立したWebView2セッションのDOMを取得します。Fandomのページ構造・アクセス制御・画像ホストの変更により表示や保存が影響を受けることがあります。
 
 ## レベルリストHTML取得・データ抽出
 

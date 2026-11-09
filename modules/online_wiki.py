@@ -4,12 +4,13 @@ import re
 import os
 import tempfile
 from pathlib import Path
-from urllib.parse import unquote, urljoin, urlparse
+from urllib.parse import quote_plus, unquote, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 from curl_cffi import requests
 
 from modules.downloader import OUTPUT_DIR, find_existing_html, make_filename, modify_html
+from modules.webview_fallback import fetch_public_page
 
 
 API_URL = "https://backrooms.fandom.com/ja/api.php"
@@ -17,6 +18,12 @@ REQUEST_TIMEOUT = 15
 MAX_SEARCH_RESULTS = 30
 MAX_IMAGES_PER_PAGE = 40
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
+REQUEST_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 BrNaviFandomJP/1.0",
+    "Accept": "application/json, text/html, application/xhtml+xml, application/xml;q=0.9, image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.7,en;q=0.6",
+    "Referer": "https://backrooms.fandom.com/ja/wiki/Backrooms_Wiki",
+}
 IMAGE_EXTENSIONS = {
     "image/avif": ".avif",
     "image/gif": ".gif",
@@ -51,7 +58,7 @@ def _api_request(params):
         params={**params, "format": "json", "formatversion": 2},
         impersonate="chrome",
         timeout=REQUEST_TIMEOUT,
-        headers={"User-Agent": "BrNaviFandomJP/1.0 (desktop Wiki reader)"},
+        headers=REQUEST_HEADERS,
     )
     response.raise_for_status()
     payload = response.json()
@@ -80,33 +87,75 @@ def _page_url(page):
     return ""
 
 
+def _is_http_403(error):
+    return (
+        getattr(getattr(error, "response", None), "status_code", None) == 403
+        or getattr(error, "status_code", None) == 403
+    )
+
+
+def _search_pages_in_browser(query, limit):
+    browser_page = fetch_public_page(
+        "https://backrooms.fandom.com/ja/wiki/Special:Search?query=" + quote_plus(query)
+    )
+    soup = BeautifulSoup(browser_page.get("html", ""), "html.parser")
+    fallback_pages, seen = [], set()
+    for anchor in soup.select('a[href*="/ja/wiki/"]'):
+        url = urljoin("https://backrooms.fandom.com", anchor.get("href", ""))
+        if not is_supported_wiki_url(url) or "/wiki/Special:" in url or url in seen:
+            continue
+        title = anchor.get_text(" ", strip=True)
+        if not title:
+            continue
+        seen.add(url)
+        fallback_pages.append({
+            "title": title,
+            "url": url,
+            "categories": [],
+            "snippet": anchor.parent.get_text(" ", strip=True)[:400],
+        })
+        if len(fallback_pages) >= limit:
+            break
+    return fallback_pages
+
+
 def search_pages(query, limit=MAX_SEARCH_RESULTS):
     query = str(query or "").strip()
     if not query:
         return []
     limit = max(1, min(int(limit), MAX_SEARCH_RESULTS))
-    payload = _api_request(
-        {
-            "action": "query",
-            "list": "search",
-            "srsearch": query,
-            "srnamespace": 0,
-            "srlimit": limit,
-        }
-    )
+    try:
+        payload = _api_request(
+            {
+                "action": "query",
+                "list": "search",
+                "srsearch": query,
+                "srnamespace": 0,
+                "srlimit": limit,
+            }
+        )
+    except Exception as error:
+        if not _is_http_403(error):
+            raise
+        return _search_pages_in_browser(query, limit)
     hits = payload.get("query", {}).get("search", [])
     pageids = [str(hit["pageid"]) for hit in hits if hit.get("pageid")]
     if not pageids:
         return []
-    details = _api_request(
-        {
-            "action": "query",
-            "prop": "info|categories",
-            "inprop": "url",
-            "cllimit": "max",
-            "pageids": "|".join(pageids),
-        }
-    )
+    try:
+        details = _api_request(
+            {
+                "action": "query",
+                "prop": "info|categories",
+                "inprop": "url",
+                "cllimit": "max",
+                "pageids": "|".join(pageids),
+            }
+        )
+    except Exception as error:
+        if _is_http_403(error):
+            return _search_pages_in_browser(query, limit)
+        raise
     by_id = {
         str(page.get("pageid")): page
         for page in details.get("query", {}).get("pages", [])
@@ -138,17 +187,26 @@ def fetch_page(url):
     if not is_supported_wiki_url(url):
         raise ValueError("日本語版Backrooms WikiのページURLを指定してください。")
     title = unquote(url.rstrip("/").rsplit("/", 1)[-1]).replace("_", " ")
-    payload = _api_request(
-        {
-            "action": "parse",
-            "page": title,
-            "prop": "text|displaytitle",
-            "disableeditsection": 1,
-            "disabletoc": 1,
-        }
-    )
-    page = payload.get("parse", {})
-    article_html = str(page.get("text", ""))
+    browser_fallback = False
+    try:
+        payload = _api_request(
+            {
+                "action": "parse",
+                "page": title,
+                "prop": "text|displaytitle",
+                "disableeditsection": 1,
+                "disabletoc": 1,
+            }
+        )
+        page = payload.get("parse", {})
+        article_html = str(page.get("text", ""))
+    except Exception as error:
+        if not _is_http_403(error):
+            raise
+        browser_page = fetch_public_page(url)
+        page = {"displaytitle": browser_page.get("title") or title}
+        article_html = str(browser_page.get("html", ""))
+        browser_fallback = True
     if not article_html.strip():
         raise RuntimeError("ページ本文を取得できませんでした。")
     soup = BeautifulSoup(article_html, "html.parser")
@@ -188,6 +246,7 @@ def fetch_page(url):
         "title": page.get("displaytitle") or page.get("title") or title,
         "url": url,
         "html": clean_html,
+        "browser_fallback": browser_fallback,
     }
 
 
@@ -224,7 +283,7 @@ def _localize_images(html, html_path):
                 image_url,
                 impersonate="chrome",
                 timeout=REQUEST_TIMEOUT,
-                headers={"User-Agent": "BrNaviFandomJP/1.0 (desktop Wiki reader)"},
+                headers={**REQUEST_HEADERS, "Referer": image_url},
             )
             response.raise_for_status()
             content = response.content

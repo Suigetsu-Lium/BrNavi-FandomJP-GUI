@@ -359,8 +359,19 @@ class MaintenanceOperationTests(unittest.TestCase):
     def test_network_cancellation_preserves_existing_csv_outputs(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            input_path = root / "input.txt"
-            input_path.write_text("Level 0: Example\n", encoding="utf-8")
+            html_dir = root / "downloaded_fandom_html"
+            html_dir.mkdir()
+            (html_dir / "Level_0.html").write_text(
+                '<h1 id="firstHeading"><span class="mw-page-title-main">Level 0</span></h1>'
+                '<div class="mw-parser-output"><p>危険度: 1/5</p><h2>出口</h2><br><p>Level 1</p></div>',
+                encoding="utf-8",
+            )
+            summary_path = root / "extracted_fandom_levels_summary.csv"
+            summary_path.write_text(
+                "階層コード,メタタイトル,危険度,理解度\n"
+                "Level 1,Level 1,条件付き（特定条件）,N/A\n",
+                encoding="utf-8-sig",
+            )
             edges_path = root / "edges.csv"
             nodes_path = root / "nodes.csv"
             edges_path.write_text("existing edges", encoding="utf-8")
@@ -373,9 +384,10 @@ class MaintenanceOperationTests(unittest.TestCase):
 
             with patch.multiple(
                 network,
-                INPUT_FILE=str(input_path),
+                HTML_DIR=str(html_dir),
                 EDGES_OUTPUT_FILE=str(edges_path),
                 NODES_OUTPUT_FILE=str(nodes_path),
+                SUMMARY_CSV=summary_path,
             ):
                 with self.assertRaises(OperationCancelled):
                     network.process_backrooms_data(context=context)
@@ -387,25 +399,41 @@ class MaintenanceOperationTests(unittest.TestCase):
     def test_network_replaces_both_csv_outputs(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            input_path = root / "input.txt"
-            input_path.write_text(
-                "Level 0: Example\n[出口]\nLevel 1\n",
+            html_dir = root / "downloaded_fandom_html"
+            html_dir.mkdir()
+            (html_dir / "Level_0.html").write_text(
+                '<h1 id="firstHeading"><span class="mw-page-title-main">Level 0</span></h1>'
+                '<div class="mw-parser-output"><p>理解度: 55%</p><p>危険度: 2/5 - 注意</p>'
+                '<h2>出口</h2><br><p>Level 1</p></div>',
                 encoding="utf-8",
+            )
+            summary_path = root / "extracted_fandom_levels_summary.csv"
+            summary_path.write_text(
+                "階層コード,メタタイトル,危険度,理解度\n"
+                "Level 1,Level 1,条件付き（特定条件）,N/A\n",
+                encoding="utf-8-sig",
             )
             edges_path = root / "edges.csv"
             nodes_path = root / "nodes.csv"
 
             with patch.multiple(
                 network,
-                INPUT_FILE=str(input_path),
+                HTML_DIR=str(html_dir),
                 EDGES_OUTPUT_FILE=str(edges_path),
                 NODES_OUTPUT_FILE=str(nodes_path),
+                SUMMARY_CSV=summary_path,
             ):
                 self.assertTrue(network.process_backrooms_data())
 
             self.assertIn("Level 0", nodes_path.read_text(encoding="utf-8"))
             self.assertIn("Level 1", nodes_path.read_text(encoding="utf-8"))
             self.assertIn("Level 1", edges_path.read_text(encoding="utf-8"))
+            with nodes_path.open("r", encoding="utf-8-sig", newline="") as stream:
+                nodes = {row["Id"]: row for row in csv.DictReader(stream)}
+            self.assertEqual(nodes["Level 0"]["Danger"], "2/5 - 注意")
+            self.assertEqual(nodes["Level 0"]["Comprehension"], "55%")
+            self.assertEqual(nodes["Level 1"]["Danger"], "条件付き（特定条件）")
+            self.assertEqual(nodes["Level 1"]["Comprehension"], "N/A")
             self.assertEqual(list(root.glob(".brnavi-network-*")), [])
 
     def test_network_rolls_back_first_csv_if_second_replace_fails(self):

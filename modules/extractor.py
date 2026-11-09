@@ -6,6 +6,7 @@ import html
 import os
 import shutil
 import tempfile
+import unicodedata
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -1608,8 +1609,10 @@ def extract_danger(
         return "", ""
 
     patterns = [
-        r"危険度\s*[:：]\s*([^\n]+)",
-        r"Danger\s*[:：]\s*([^\n]+)",
+        r"(?:危険度|生存難易度|Survival\s+Difficulty|Danger)\s*[:：]\s*([^\n]+)",
+        r"^\s*\[(?:危険度|生存難易度|Survival\s+Difficulty|Danger)\]\s*$\n\s*([^\n\[]+)",
+        r"^\s*(?:危険度|生存難易度|Survival\s+Difficulty|Danger)\s*$\n\s*([^\n\[]+)",
+        r"^\s*(?:危険度|生存難易度|Survival\s+Difficulty|Danger)\s+([^\n]+)",
     ]
 
     value = ""
@@ -1619,7 +1622,7 @@ def extract_danger(
         match = re.search(
             pattern,
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE | re.MULTILINE
         )
 
         if match:
@@ -1638,96 +1641,23 @@ def extract_danger(
         1
     )[0].strip()
 
-    # --------------------------------------------------------
-    # 可変
-    # --------------------------------------------------------
-
-    if "可変" in value:
-
-        values = re.findall(
-            r"\d+\s*/\s*5",
-            text
-        )
-
-        values = [
-            item.replace(
-                " ",
-                ""
-            )
-            for item in values
-        ]
-
-        values = list(
-            dict.fromkeys(
-                values
-            )
-        )
-
-        if values:
-
-            return (
-                "可変",
-                "|".join(values)
-            )
-
-        return (
-            "可変",
-            "可変"
-        )
-
-    # --------------------------------------------------------
-    # N/A
-    # --------------------------------------------------------
-
-    if value.upper() == "N/A":
-
-        return (
-            "N/A",
-            "N/A"
-        )
-
-    # --------------------------------------------------------
-    # 未定 / 不明
-    # --------------------------------------------------------
-
-    if value in (
-        "未定",
-        "不明"
-    ):
-
-        return (
-            value,
-            value
-        )
-
-    # --------------------------------------------------------
-    # 通常
-    # --------------------------------------------------------
-
-    match = re.search(
-        r"\d+\s*/\s*5",
-        value
-    )
-
+    value = re.sub(r"\s+", " ", value).strip(" |\t")
+    normalized = unicodedata.normalize("NFKC", value)
+    match = re.match(r"(\d+)\s*/\s*5", normalized)
     if match:
-
-        normalized = (
-            match.group(0)
-            .replace(
-                " ",
-                ""
-            )
-        )
-
-        return (
-            normalized,
-            normalized
-        )
-
-    return (
-        value,
-        value
-    )
+        if int(match.group(1)) > 6:
+            return value, value
+        primary = f"{match.group(1)}/5"
+        display = primary + value[len(match.group(0)):]
+        return display, primary
+    special = re.match(r"(可変|条件付き|N\s*/\s*A|未定|不明)", normalized, re.I)
+    if special:
+        primary = "N/A" if special.group(1).replace(" ", "").upper() == "N/A" else special.group(1)
+        display = primary + value[len(special.group(0)):]
+        numbers = list(dict.fromkeys(re.findall(r"\d+\s*/\s*5", normalized)))
+        search_value = "|".join(re.sub(r"\s+", "", item) for item in numbers) or primary
+        return display, search_value
+    return value, value
 
 
 # ============================================================
@@ -1745,8 +1675,10 @@ def extract_understanding(
         return "", ""
 
     patterns = [
-        r"理解度\s*[:：]\s*([^\n]+)",
-        r"Understanding\s*[:：]\s*([^\n]+)",
+        r"(?:理解度|Comprehension|Understanding)\s*[:：]\s*([^\n]+)",
+        r"^\s*\[(?:理解度|Comprehension|Understanding)\]\s*$\n\s*([^\n\[]+)",
+        r"^\s*(?:理解度|Comprehension|Understanding)\s*$\n\s*([^\n\[]+)",
+        r"^\s*(?:理解度|Comprehension|Understanding)\s+([^\n]+)",
     ]
 
     value = ""
@@ -1756,7 +1688,7 @@ def extract_understanding(
         match = re.search(
             pattern,
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE | re.MULTILINE
         )
 
         if match:
@@ -1775,30 +1707,23 @@ def extract_understanding(
         1
     )[0].strip()
 
-    match = re.search(
-        r"(\d+(?:\.\d+)?)\s*%",
-        value
-    )
+    value = re.sub(r"\s+", " ", value).strip(" |\t")
+    normalized = unicodedata.normalize("NFKC", value)
+    match = re.search(r"(\d+(?:\.\d+)?)\s*%", normalized)
 
     if match:
 
         number = match.group(1)
+        if float(number) > 100:
+            return value, value
 
-        return (
-            f"{number}%",
-            number
-        )
+        normalized = f"{number}%"
+        return normalized + value[match.end():], number
 
-    if value in (
-        "不明",
-        "未定",
-        "N/A"
-    ):
-
-        return (
-            value,
-            ""
-        )
+    unknown = re.match(r"(N\s*/\s*A|NA|Unknown|TBD|不明|未定|不詳|未知)", unicodedata.normalize("NFKC", value), re.I)
+    if unknown:
+        token = "N/A" if unknown.group(1).replace(" ", "").upper() in {"NA", "N/A"} else unknown.group(1)
+        return token + value[unknown.end():], ""
 
     return (
         value,

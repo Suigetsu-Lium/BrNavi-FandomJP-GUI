@@ -36,7 +36,7 @@ def load_route_graph(base_dir=None):
                     "comprehension": ("Comprehension", "理解度"),
                 }.items():
                     value = next((_clean(row.get(key)) for key in keys if _clean(row.get(key))), "")
-                    if value:
+                    if value and not item[field]:
                         item[field] = value
     wiki_list = root / "wiki_list.txt"
     if wiki_list.is_file():

@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import math
 import ipaddress
+import asyncio
 import csv
 import re
 import unicodedata
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 from bs4 import BeautifulSoup
 
 from curl_cffi.requests import AsyncSession
@@ -19,6 +20,7 @@ from modules.extractor import (
     extract_page_title_from_html,
     extract_url_from_html,
 )
+from modules.webview_fallback import fetch_public_page
 
 
 TOKEN_RE = re.compile(r"[a-z0-9_#./-]+|[ぁ-んァ-ヶー一-龠]+", re.IGNORECASE)
@@ -518,6 +520,24 @@ class WikiRetriever:
             "read_errors": read_errors,
         }
 
+    def find_missing_local_level(self, query):
+        """Return an explicitly named Level whose article body is not archived locally."""
+        match = re.search(
+            r"(?:Level|レベル)\s*(-?\d+(?:\.\d+)?)\s*(η|イータ)?",
+            str(query or ""),
+            re.I,
+        )
+        if not match:
+            return None
+        level_id = f"Level {match.group(1)}" + (" η" if match.group(2) else "")
+        self._index()
+        for document in self._documents:
+            for alias in (document.get("title", ""), *document.get("aliases", [])):
+                alias = re.sub(r"[_\s]+", " ", str(alias or "")).strip()
+                if re.match(re.escape(level_id) + r"(?:\s|[:：]|$)", alias, re.I):
+                    return None
+        return {"level_id": level_id, "query": level_id}
+
     def _rank(self, query, documents):
         phrase = _query_phrase(query)
         query_tokens = _tokens(_query_text(query))
@@ -656,8 +676,10 @@ class WikiRetriever:
             params=params,
             timeout=self.request_timeout,
             headers={
-                "User-Agent": "BrNaviFandomJP/1.0 (AI Wiki research assistant)",
-                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 BrNaviFandomJP/1.0",
+                "Accept": "application/json, text/html, application/xhtml+xml, */*;q=0.8",
+                "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.7,en;q=0.6",
+                "Referer": "https://backrooms.fandom.com/ja/wiki/Backrooms_Wiki",
             },
         )
         response.raise_for_status()
@@ -676,6 +698,15 @@ class WikiRetriever:
             if language == "ja"
             else "https://backrooms.fandom.com/api.php"
         )
+        try:
+            return await self._online_search_api(query, language, endpoint)
+        except Exception as error:
+            status = getattr(getattr(error, "response", None), "status_code", None) or getattr(error, "status_code", None)
+            if status != 403:
+                raise
+            return await self._online_search_browser(query, language)
+
+    async def _online_search_api(self, query, language, endpoint):
         async with AsyncSession(impersonate="chrome") as session:
             search_data = await self._api_json(
                 session,
@@ -770,6 +801,58 @@ class WikiRetriever:
                     f"{item['title']}: {item['error']}" for item in page_errors[:3]
                 )
                 raise RuntimeError(f"検索候補の本文を取得できませんでした ({details})")
+        return self._rank(query, documents)
+
+    async def _online_search_browser(self, query, language):
+        prefix = "/ja" if language == "ja" else ""
+        search_url = (
+            "https://backrooms.fandom.com" + prefix + "/wiki/Special:Search?query="
+            + quote_plus(_search_query(query))
+        )
+        search_page = await asyncio.to_thread(fetch_public_page, search_url)
+        soup = BeautifulSoup(search_page.get("html", ""), "html.parser")
+        candidates = []
+        seen = set()
+        for anchor in soup.select('a[href*="/wiki/"]'):
+            url = urljoin("https://backrooms.fandom.com", anchor.get("href", ""))
+            parsed = urlparse(url)
+            if parsed.hostname != "backrooms.fandom.com" or "/wiki/Special:" in parsed.path:
+                continue
+            if language == "ja" and not parsed.path.startswith("/ja/wiki/"):
+                continue
+            if language == "en" and parsed.path.startswith("/ja/wiki/"):
+                continue
+            title = anchor.get_text(" ", strip=True)
+            if title and url not in seen:
+                seen.add(url)
+                candidates.append((title, url))
+            if len(candidates) >= 3:
+                break
+        documents = []
+        for title, url in candidates:
+            try:
+                page = await asyncio.to_thread(fetch_public_page, url)
+                body = extract_article_text(page.get("html", "")).strip()
+                if not body:
+                    continue
+                documents.append({
+                    "title": title,
+                    "url": url,
+                    "language": "JP" if language == "ja" else "EN",
+                    "source_kind": "japanese_wiki" if language == "ja" else "external",
+                    "aliases": [title],
+                    "body": body,
+                    "file": "Fandom embedded browser DOM",
+                    "file_modified_at": None,
+                    "page_updated_at": None,
+                    "retrieved_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "retrieval_time_basis": "live_api_retrieval_time",
+                    "status": "retrieved_live",
+                })
+            except Exception as error:
+                self._online_page_errors.setdefault(language, []).append(
+                    {"title": title, "error": str(error)}
+                )
         return self._rank(query, documents)
 
     async def _web_search(self, query, limit=4):

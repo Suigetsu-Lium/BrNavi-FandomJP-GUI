@@ -108,6 +108,42 @@ class OnlineWikiTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     online_wiki.fetch_page(url)
 
+    @patch("modules.online_wiki.fetch_public_page")
+    @patch("modules.online_wiki._api_request")
+    def test_fetch_page_uses_embedded_webview_after_api_403(self, api_request, browser_fetch):
+        error = RuntimeError("403 Forbidden")
+        error.response = type("Response", (), {"status_code": 403})()
+        api_request.side_effect = error
+        browser_fetch.return_value = {
+            "title": "Level 0",
+            "url": "https://backrooms.fandom.com/ja/wiki/Level_0",
+            "html": '<div class="mw-parser-output"><p>ブラウザー本文</p></div>',
+        }
+
+        result = online_wiki.fetch_page("https://backrooms.fandom.com/ja/wiki/Level_0")
+
+        self.assertTrue(result["browser_fallback"])
+        self.assertIn("ブラウザー本文", result["html"])
+        browser_fetch.assert_called_once_with("https://backrooms.fandom.com/ja/wiki/Level_0")
+
+    @patch("modules.online_wiki.fetch_public_page")
+    @patch("modules.online_wiki._api_request")
+    def test_search_page_uses_embedded_webview_after_api_403(self, api_request, browser_fetch):
+        error = RuntimeError("403 Forbidden")
+        error.response = type("Response", (), {"status_code": 403})()
+        api_request.side_effect = error
+        browser_fetch.return_value = {
+            "title": "検索",
+            "url": "https://backrooms.fandom.com/ja/wiki/Special:Search?query=Level+0",
+            "html": '<div id="mw-content-text"><ul><li><a href="/ja/wiki/Level_0">Level 0</a></li></ul></div>',
+        }
+
+        pages = online_wiki.search_pages("Level 0", limit=2)
+
+        self.assertEqual(pages[0]["title"], "Level 0")
+        self.assertIn("/ja/wiki/Level_0", pages[0]["url"])
+        self.assertIn("Special:Search?query=Level+0", browser_fetch.call_args.args[0])
+
     @patch("modules.online_wiki.requests.get")
     def test_localize_images_saves_allowed_image_and_rewrites_html(self, get_image):
         with tempfile.TemporaryDirectory() as directory:

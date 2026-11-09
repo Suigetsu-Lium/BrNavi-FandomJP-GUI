@@ -79,10 +79,12 @@ class OnlineWikiGuiTests(unittest.TestCase):
             self.api._maintenance_done_event.set()
             self.api._maintenance_lock.release()
 
-    def test_wiki_has_its_own_tab_and_gui_execution_log_is_removed(self):
+    def test_wiki_has_its_own_tab_and_maintenance_is_in_settings(self):
         self.assertIn('id="view-wiki"', gui_app.HTML_TEMPLATE)
         self.assertIn("switchTab('wiki')", gui_app.HTML_TEMPLATE)
-        self.assertIn('id="view-maintenance"', gui_app.HTML_TEMPLATE)
+        self.assertIn('id="view-settings"', gui_app.HTML_TEMPLATE)
+        self.assertIn('id="auto-update-catalog"', gui_app.HTML_TEMPLATE)
+        self.assertIn('id="catalog-update-history"', gui_app.HTML_TEMPLATE)
         self.assertIn('id="online-wiki-frame"', gui_app.HTML_TEMPLATE)
         self.assertIn(
             "document.getElementById('online-wiki-frame').src = result.url",
@@ -175,12 +177,22 @@ class OnlineWikiGuiTests(unittest.TestCase):
         )
 
     def test_maintenance_panel_exposes_service_progress_and_stop_controls(self):
-        self.assertIn("maintenance-update-mode", gui_app.HTML_TEMPLATE)
+        self.assertIn("runTask('update_master', {mode: 1})", gui_app.HTML_TEMPLATE)
+        self.assertIn("runTask('update_master', {mode: 2})", gui_app.HTML_TEMPLATE)
         self.assertIn("maintenance-progress", gui_app.HTML_TEMPLATE)
         self.assertIn("maintenance-log", gui_app.HTML_TEMPLATE)
         self.assertIn("cancelMaintenanceTask()", gui_app.HTML_TEMPLATE)
         self.assertIn("pywebview.api.cancel_maintenance_task()", gui_app.HTML_TEMPLATE)
         self.assertIn("pywebview.api.run_maintenance_task(taskName, null, options)", gui_app.HTML_TEMPLATE)
+
+    def test_route_results_open_vertical_details_and_level_articles(self):
+        self.assertIn('id="route-results-list"', gui_app.HTML_TEMPLATE)
+        self.assertIn('id="route-detail-view"', gui_app.HTML_TEMPLATE)
+        self.assertIn("function showRouteDetail(routeIndex)", gui_app.HTML_TEMPLATE)
+        self.assertIn("検索結果一覧へ戻る", gui_app.HTML_TEMPLATE)
+        self.assertIn("data-route-level", gui_app.HTML_TEMPLATE)
+        self.assertIn("function dangerBadgeClass(value)", gui_app.HTML_TEMPLATE)
+        self.assertIn("async function openRouteLevel(levelId)", gui_app.HTML_TEMPLATE)
 
     def test_about_dialog_has_version_model_and_license_links(self):
         self.assertIn('id="about-dialog"', gui_app.HTML_TEMPLATE)
@@ -235,7 +247,7 @@ class OnlineWikiGuiTests(unittest.TestCase):
         with contextlib.redirect_stdout(output):
             self.api._execute_task("update_master", options={"mode": 1})
 
-        self.assertIn("既存データベース更新", output.getvalue())
+        self.assertIn("Level一覧データ更新", output.getvalue())
         notify.assert_called_once_with(True, "既存データベースを更新しました。")
         self.assertFalse(self.api._maintenance_lock.locked())
         args, kwargs = run_operation.call_args
@@ -254,7 +266,7 @@ class OnlineWikiGuiTests(unittest.TestCase):
 
         self.assertIn("test failure", output.getvalue())
         notify.assert_called_once_with(
-            False, "既存データベース更新に失敗しました: test failure"
+            False, "Level一覧データ更新に失敗しました: test failure"
         )
         self.assertFalse(self.api._maintenance_lock.locked())
 

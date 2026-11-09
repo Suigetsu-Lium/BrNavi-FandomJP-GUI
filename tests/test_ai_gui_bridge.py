@@ -55,8 +55,12 @@ class GUIBridgeTests(unittest.TestCase):
         api.run_maintenance_task.assert_called_once_with(
             "save_online_wiki_page",
             page,
-            options={"ai_prompt": "Level 16 ηについて", "ai_flow_id": "flow-1"},
+            options={"ai_prompt": "Level 16 ηについて", "ai_flow_id": "flow-1", "ai_rebuild_network": False},
         )
+
+        api.run_maintenance_task.reset_mock()
+        api.start_ai_source_save(page, "Level 16 ηの経路", True, "flow-2", True)
+        self.assertTrue(api.run_maintenance_task.call_args.kwargs["options"]["ai_rebuild_network"])
 
     def test_cancelled_request_keeps_user_message_without_answer(self):
         with tempfile.TemporaryDirectory() as directory:

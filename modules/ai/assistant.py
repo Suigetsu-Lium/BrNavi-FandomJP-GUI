@@ -245,6 +245,7 @@ class AIAssistant:
             cid, prompt, generation["operation"]
         )
         search_status = self.retriever.last_search_status
+        missing_level = self.retriever.find_missing_local_level(prompt)
         if not sources:
             answer = NO_VERIFIED_SOURCE_RESPONSE
             if on_delta:
@@ -269,6 +270,7 @@ class AIAssistant:
                 "prompt": prompt,
                 "sources": [],
                 "search_status": search_status,
+                "missing_level": missing_level,
                 "model": self.llm.model,
                 "finish_reason": "no_verified_sources",
             }
@@ -330,6 +332,7 @@ class AIAssistant:
             "version_number": saved["version_number"],
             "response": answer,
             "sources": sources,
+            "missing_level": missing_level,
             "model": self.llm.model,
             "finish_reason": finish_reason,
         }

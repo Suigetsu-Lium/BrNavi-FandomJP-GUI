@@ -16,10 +16,12 @@ import os
 import re
 import shutil
 import tempfile
+import unicodedata
 
 from modules.operation_context import OperationCancelled
 from modules.runtime_paths import get_application_dir
 from modules.extractor import (
+    SUMMARY_CSV,
     determine_level_information,
     extract_danger,
     extract_article_text,
@@ -68,11 +70,13 @@ WS_PATTERN = re.compile(
 )
 
 COMPREHENSION_PATTERN = re.compile(
-    r"^理解度\s*(\d+%?)"
+    r"^(?:理解度|Comprehension|Understanding)\s*[:：]?\s*(.+)$",
+    re.IGNORECASE,
 )
 
 DANGER_PATTERN = re.compile(
-    r"^危険度\s*([0-9]/[0-9]|可変|未定.*)"
+    r"^(?:危険度|生存難易度|Survival\s+Difficulty|Danger)\s*[:：]?\s*(.+)$",
+    re.IGNORECASE,
 )
 
 
@@ -265,6 +269,31 @@ def _replace_csv_outputs(staged_outputs):
                 os.unlink(backup_path)
 
 
+def _metadata_key(value):
+    return re.sub(r"[\s_]+", "", unicodedata.normalize("NFKC", str(value or "")).casefold())
+
+
+def _load_extracted_metadata():
+    metadata = {}
+    try:
+        with open(SUMMARY_CSV, "r", encoding="utf-8-sig", newline="") as stream:
+            for row in csv.DictReader(stream):
+                item = {
+                    "Comprehension": str(row.get("理解度", "") or "").strip(),
+                    "Danger": str(row.get("危険度", "") or "").strip(),
+                }
+                for alias in (row.get("階層コード"), row.get("メタタイトル")):
+                    key = _metadata_key(alias)
+                    if key:
+                        current = metadata.setdefault(key, {})
+                        for field, value in item.items():
+                            if value:
+                                current[field] = value
+    except (OSError, csv.Error, UnicodeError):
+        pass
+    return metadata
+
+
 def process_backrooms_data(context=None):
     """
     保存済みの各HTMLを直接解析し、ノード・エッジ情報をCSVに保存する。
@@ -280,6 +309,7 @@ def process_backrooms_data(context=None):
 
     unique_edges = {}
     nodes_info = {}
+    extracted_metadata = _load_extracted_metadata()
     log = context.log if context else print
 
     html_files = []
@@ -328,12 +358,19 @@ def process_backrooms_data(context=None):
                     continue
                 current_level = clean_level_name(level_code)
                 current_section_type = None
-                nodes_info.setdefault(current_level, {
+                page_node = nodes_info.setdefault(current_level, {
                     "Id": current_level,
                     "Label": level_title,
-                    "Comprehension": extract_understanding(article_text)[0],
-                    "Danger": extract_danger(article_text)[0],
+                    "Comprehension": "",
+                    "Danger": "",
                 })
+                page_node["Label"] = level_title or page_node.get("Label") or current_level
+                comprehension = extract_understanding(article_text)[0]
+                danger = extract_danger(article_text)[0]
+                if comprehension:
+                    page_node["Comprehension"] = comprehension
+                if danger:
+                    page_node["Danger"] = danger
                 # 旧パーサーはTXT内のLevel見出しを開始点にしていた。
                 # HTML本文には記事タイトルが含まれないため、抽出したページ自身の
                 # タイトルを先頭に補って同じセクション解析へ渡す。
@@ -569,6 +606,13 @@ def process_backrooms_data(context=None):
         log(f"本文を解析したLevelページ: {parsed_pages} 件")
         log("既存の接続CSVは変更していません。HTML取得元と記事本文を確認してください。")
         return False
+
+    for node_id, item in nodes_info.items():
+        for alias in (node_id, item.get("Label")):
+            metadata = extracted_metadata.get(_metadata_key(alias), {})
+            for field in ("Comprehension", "Danger"):
+                if not item.get(field) and metadata.get(field):
+                    item[field] = metadata[field]
 
     # =========================================================================
     # エッジCSV

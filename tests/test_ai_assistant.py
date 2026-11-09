@@ -74,6 +74,28 @@ class AssistantTests(unittest.TestCase):
             self.assertEqual(history[1]["content"], result["response"])
             self.assertEqual(history[1]["versions"][0]["content"], result["response"])
 
+    def test_missing_level_is_flagged_even_when_other_sources_can_answer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            assistant = self.create_assistant(
+                directory,
+                [
+                    {"content": "ローカル経路CSVを参照した回答", "finish_reason": "stop"},
+                    {"content": "ローカル経路CSVを参照した回答", "finish_reason": "stop"},
+                ],
+            )
+            self.attach_source(assistant)
+            cid = assistant.new_conversation()
+            generation = assistant.store.begin_generation(
+                cid, "Level 200 ηの片方向出口を調べて"
+            )
+
+            result = asyncio.run(assistant.chat(generation))
+
+            self.assertEqual(
+                result["missing_level"],
+                {"level_id": "Level 200 η", "query": "Level 200 η"},
+            )
+
     def test_live_external_source_is_labeled_and_online_errors_are_visible(self):
         source = {
             "title": "Level 0",

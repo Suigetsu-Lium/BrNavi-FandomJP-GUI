@@ -4,6 +4,7 @@ import ipaddress
 import os
 import json
 import base64
+import csv
 import re
 import sys
 import threading
@@ -21,6 +22,7 @@ from modules.database import (
     load_master_database,
     open_local_html
 )
+from modules.extractor import extract_danger, extract_understanding
 
 # 保守・更新サービス
 from modules.operation_context import OperationCancelled, OperationContext
@@ -38,6 +40,7 @@ from modules.online_wiki import search_pages as search_online_wiki_pages
 from modules.route_service import search_routes as search_local_routes
 from modules.runtime_paths import get_application_dir
 from modules.version import VERSION
+from modules.webview_fallback import set_browser_window
 
 # AI Assistant（Groq / ローカルWiki検索）
 AI_DEFAULT_SETTINGS = {"model": "openai/gpt-oss-120b"}
@@ -609,13 +612,27 @@ class BackroomsAPI:
                 meta_title = (title_m.group(2) or "").strip()
                 break
 
-        danger_m = re.search(r'\[危険度\]\s*\n\s*([^\n\[]+)', raw_text)
-        if danger_m:
-            danger = danger_m.group(1).strip()
-
-        comp_m = re.search(r'\[理解度\]\s*\n\s*([^\n\[]+)', raw_text)
-        if comp_m:
-            comprehension = comp_m.group(1).strip()
+        parsed_danger, _ = extract_danger(raw_text)
+        parsed_comprehension, _ = extract_understanding(raw_text)
+        if parsed_danger:
+            danger = parsed_danger
+        if parsed_comprehension:
+            comprehension = parsed_comprehension
+        if danger == "情報なし" or comprehension == "情報なし":
+            summary_file = BASE_DIR / "extracted_fandom_levels_summary.csv"
+            try:
+                with summary_file.open("r", encoding="utf-8-sig", newline="") as stream:
+                    for row in csv.DictReader(stream):
+                        code = re.sub(r"\s+", " ", str(row.get("階層コード", "")).strip()).casefold()
+                        if code != re.sub(r"\s+", " ", level_id.strip()).casefold():
+                            continue
+                        if danger == "情報なし" and row.get("危険度"):
+                            danger = row["危険度"].strip()
+                        if comprehension == "情報なし" and row.get("理解度"):
+                            comprehension = row["理解度"].strip()
+                        break
+            except (OSError, csv.Error, UnicodeError):
+                pass
 
         # 本文から先頭のメタ情報ブロック（タイトル・理解度・危険度・写真キャプション等）を除外
         cleaned_text = raw_text
@@ -773,7 +790,7 @@ class BackroomsAPI:
         self._current_online_wiki_url = url
         return {"status": "ok", "url": url}
 
-    def start_ai_source_save(self, page, prompt, user_consented=False, flow_id=""):
+    def start_ai_source_save(self, page, prompt, user_consented=False, flow_id="", rebuild_network=False):
         if user_consented is not True:
             return {"status": "error", "message": "資料の保存には利用者の承諾が必要です。"}
         if not isinstance(page, dict) or not page.get("title") or not is_supported_wiki_url(page.get("url")):
@@ -784,6 +801,7 @@ class BackroomsAPI:
             options={
                 "ai_prompt": str(prompt or "")[:12000],
                 "ai_flow_id": str(flow_id or "")[:100],
+                "ai_rebuild_network": bool(rebuild_network),
             },
         )
 
@@ -943,6 +961,22 @@ class BackroomsAPI:
                         "cancelled": self._maintenance_cancel_event.is_set(),
                         "error": "保存処理を開始できませんでした。",
                     }
+                    if payload.get("ok") and options and options.get("ai_rebuild_network"):
+                        try:
+                            network_result = run_maintenance_operation(
+                                "update_network",
+                                context=OperationContext(
+                                    cancel_event=self._maintenance_cancel_event,
+                                    on_log=self._notify_maintenance_log,
+                                    on_progress=self._notify_maintenance_progress,
+                                ),
+                            )
+                            payload["network_updated"] = bool(network_result.success)
+                            if not network_result.success:
+                                payload["network_update_error"] = network_result.message
+                        except Exception as error:
+                            payload["network_updated"] = False
+                            payload["network_update_error"] = str(error)
             finally:
                 self._maintenance_done_event.set()
                 try:
@@ -1531,7 +1565,11 @@ HTML_TEMPLATE = r"""
         <div class="flex flex-wrap items-end gap-3"><label class="text-xs font-semibold">出発Level<input id="route-start" class="block mt-1 border border-[#d6c79a] rounded px-3 py-2 text-sm" placeholder="Level 20"></label>
           <span class="pb-2 text-gray-400">→</span><label class="text-xs font-semibold">目的Level<input id="route-goal" class="block mt-1 border border-[#d6c79a] rounded px-3 py-2 text-sm" placeholder="Level 4"></label>
           <button onclick="searchRoutes()" class="px-4 py-2 rounded bg-[#b45309] text-white text-xs font-semibold">経路を検索</button><span id="route-status" class="text-xs text-gray-600" role="status"></span></div>
-        <div id="route-results" class="space-y-4"></div>
+        <div id="route-results-list" class="space-y-3"><div id="route-results" class="space-y-4"></div></div>
+        <div id="route-detail-view" class="hidden space-y-3">
+          <button type="button" onclick="showRouteResults()" class="rounded border border-[#d6c79a] px-3 py-2 text-sm font-semibold hover:bg-amber-50">← 検索結果一覧へ戻る</button>
+          <div id="route-detail-content" class="rounded-lg border border-[#e2d8b5] bg-[#fffdf5] p-4"></div>
+        </div>
       </div>
     </section>
 
@@ -1894,12 +1932,76 @@ HTML_TEMPLATE = r"""
       })[ch]);
     }
 
+    function dangerBadgeClass(value) {
+      const text = String(value || '').trim();
+      const number = text.match(/^([0-6])\s*\/\s*5/);
+      if (number && Number(number[1]) <= 1) return 'inline-flex rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-bold text-emerald-800';
+      if (number && Number(number[1]) <= 3) return 'inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-xs font-bold text-amber-800';
+      if (number) return 'inline-flex rounded-full bg-rose-100 px-2 py-0.5 text-xs font-bold text-rose-800';
+      if (/可変|条件付き|N\s*\/\s*A/i.test(text)) return 'inline-flex rounded-full bg-violet-100 px-2 py-0.5 text-xs font-bold text-violet-800';
+      return 'inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-xs font-bold text-slate-700';
+    }
+
+    let routeLastResults = [];
+
+    function showRouteResults() {
+      document.getElementById('route-detail-view').classList.add('hidden');
+      document.getElementById('route-results-list').classList.remove('hidden');
+    }
+
+    function showRouteDetail(routeIndex) {
+      const route = routeLastResults[routeIndex];
+      if (!route) return;
+      const edgeInfo = routeLastResults.edge_info || {};
+      const levelBlock = node => `<article class="rounded-lg border border-[#d6c79a] bg-white p-4 shadow-sm">
+        <div class="flex flex-wrap items-center justify-between gap-3"><div><div class="text-lg font-bold">${escapeHTML(node.id)}</div><div class="text-sm text-[#91520f]">${escapeHTML(node.title || '題名なし')}</div></div>
+        <div class="flex flex-wrap items-center gap-2"><span class="${dangerBadgeClass(node.danger)}">危険度 ${escapeHTML(node.danger || '未登録')}</span><span class="rounded-full bg-sky-100 px-2 py-0.5 text-xs font-bold text-sky-800">理解度 ${escapeHTML(node.comprehension || '未登録')}</span>
+        <button type="button" data-route-level="${escapeHTML(node.id)}" class="rounded bg-[#91520f] px-3 py-1.5 text-xs font-semibold text-white">Level 図鑑で開く</button></div></div></article>`;
+      let timeline = levelBlock(route[0]);
+      for (let index = 0; index < route.length - 1; index++) {
+        const source = route[index], target = route[index + 1];
+        const transitions = edgeInfo[`${source.id}\n${target.id}`] || [];
+        const details = transitions.length ? transitions.map(info => `<div class="rounded border border-[#e4d6b2] bg-[#fbf6de] p-3">
+          <div class="text-xs font-bold text-[#78440f]">${[info.category, info.type].filter(Boolean).map(escapeHTML).join(' · ') || '移動条件'}</div>
+          <div class="mt-1 whitespace-pre-wrap break-words text-base font-semibold leading-relaxed">${escapeHTML(info.condition || '条件の記載なし')}</div></div>`).join('') : '<div class="text-sm text-gray-600">移動条件の記載はありません。</div>';
+        timeline += `<div class="ml-6 border-l-2 border-[#c68a2b] py-3 pl-5"><div class="mb-2 text-xs font-bold text-[#91520f]">↓ ${escapeHTML(source.id)} から ${escapeHTML(target.id)} へ</div><div class="space-y-2">${details}</div></div>${levelBlock(target)}`;
+      }
+      const content = document.getElementById('route-detail-content');
+      content.innerHTML = `<h3 class="mb-4 text-lg font-bold">ルート ${routeIndex + 1} · ${route.length - 1} 接続</h3><div class="space-y-0">${timeline}</div>`;
+      content.querySelectorAll('[data-route-level]').forEach(button => button.addEventListener('click', () => openRouteLevel(button.dataset.routeLevel)));
+      document.getElementById('route-results-list').classList.add('hidden');
+      document.getElementById('route-detail-view').classList.remove('hidden');
+    }
+
+    async function openRouteLevel(levelId) {
+      switchTab('explorer');
+      try {
+        await loadLevelDetail(levelId);
+        const article = document.getElementById('view-article-content').textContent || '';
+        if (!article.includes('本文データがありません')) return;
+      } catch (_) {}
+      try {
+        const result = await pywebview.api.search_online_wiki(levelId);
+        const page = (result.pages || []).find(item => String(item.title || '').toLowerCase().includes(levelId.toLowerCase()));
+        if (page && page.url) {
+          await openAIAnswerLink(page.url);
+          document.getElementById('html-download-status').textContent = `${levelId} は未保存のため内蔵ブラウザーで開きました。保存する場合は「表示中を保存」を押してください。`;
+          return;
+        }
+      } catch (_) {}
+      switchTab('wiki');
+      document.getElementById('html-download-search').value = levelId;
+      searchOnlineWiki();
+    }
+
     async function searchRoutes() {
       const start = document.getElementById('route-start').value.trim();
       const goal = document.getElementById('route-goal').value.trim();
       const status = document.getElementById('route-status');
       const output = document.getElementById('route-results');
       output.innerHTML = '';
+      routeLastResults = [];
+      showRouteResults();
       if (!start || !goal) { status.textContent = '出発地と目的地を入力してください。'; return; }
       status.textContent = '経路を検索しています…';
       try {
@@ -1912,15 +2014,16 @@ HTML_TEMPLATE = r"""
           status.textContent = ''; return;
         }
         status.textContent = result.message || `${result.routes.length}件の経路`;
-        output.innerHTML = (result.routes || []).map((route, routeIndex) => {
+        routeLastResults = result.routes || [];
+        routeLastResults.edge_info = result.edge_info || {};
+        output.innerHTML = routeLastResults.map((route, routeIndex) => {
           const cards = route.map((node, index) => {
-            const meta = [node.danger ? `危険度 ${node.danger}` : '危険度 未登録', node.comprehension ? `理解度 ${node.comprehension}` : '理解度 未登録'].join(' · ');
-            const edge = index < route.length - 1 ? (result.edge_info?.[`${node.id}\n${route[index + 1].id}`] || []) : [];
-            const conditions = edge.flatMap(info => Object.entries(info).filter(([, value]) => value).map(([key, value]) => `${key}: ${value}`)).join(' / ');
-            return `<div class="flex items-center gap-3 min-w-max"><article class="w-52 rounded-lg border-2 border-[#d6c79a] bg-[#fffdf5] p-3 shadow-sm"><div class="font-bold text-sm">${escapeHTML(node.id)}</div><div class="text-xs text-[#91520f] mt-1">${escapeHTML(node.title || '題名なし')}</div><div class="text-[10px] text-gray-600 mt-2">${escapeHTML(meta)}</div></article>${index < route.length - 1 ? `<div class="flex flex-col items-center text-[#b45309]"><span class="text-2xl leading-5">→</span>${conditions ? `<span class="max-w-40 text-center text-[10px] text-gray-600">${escapeHTML(conditions)}</span>` : ''}</div>` : ''}</div>`;
+            const badge = `<span class="${dangerBadgeClass(node.danger)}">危険度 ${escapeHTML(node.danger || '未登録')}</span>`;
+            return `<div class="flex items-center gap-2 min-w-max"><article class="w-48 rounded-lg border-2 border-[#d6c79a] bg-[#fffdf5] p-3 shadow-sm"><div class="font-bold text-sm">${escapeHTML(node.id)}</div><div class="text-xs text-[#91520f] mt-1">${escapeHTML(node.title || '題名なし')}</div><div class="mt-2">${badge}</div><div class="text-xs text-gray-600 mt-1">理解度 ${escapeHTML(node.comprehension || '未登録')}</div></article>${index < route.length - 1 ? '<span class="text-xl font-bold text-[#b45309]">→</span>' : ''}</div>`;
           }).join('');
-          return `<section class="rounded-lg border border-[#e2d8b5] p-3"><h3 class="text-xs font-bold mb-3">ルート ${routeIndex + 1} · ${route.length - 1} 接続</h3><div class="flex items-center gap-2 overflow-x-auto pb-2">${cards}</div></section>`;
+          return `<button type="button" data-route-index="${routeIndex}" class="w-full rounded-lg border border-[#e2d8b5] bg-[#fffdf5] p-3 text-left hover:border-[#b45309] hover:shadow"><span class="mb-2 block text-sm font-bold">ルート ${routeIndex + 1} · ${route.length - 1} 接続　詳細を見る →</span><span class="flex items-center gap-2 overflow-x-auto pb-1">${cards}</span></button>`;
         }).join('') || '<div class="p-3 text-sm text-gray-600">到達可能な経路がありません。</div>';
+        output.querySelectorAll('[data-route-index]').forEach(button => button.addEventListener('click', () => showRouteDetail(Number(button.dataset.routeIndex))));
       } catch (error) { status.textContent = `検索に失敗しました: ${error}`; }
     }
 
@@ -1972,6 +2075,7 @@ HTML_TEMPLATE = r"""
       document.getElementById('view-meta-title').innerText = d.title && d.title !== d.level_id ? `"${d.title}"` : "";
       document.getElementById('view-category').innerText = d.category;
       document.getElementById('view-danger-tag').innerText = d.danger;
+      document.getElementById('view-danger-tag').className = dangerBadgeClass(d.danger);
 
       // 本文の整形描画
       document.getElementById('view-article-content').innerHTML = formatWikiContent(d.text);
@@ -1979,6 +2083,7 @@ HTML_TEMPLATE = r"""
       // Infobox
       document.getElementById('infobox-title').innerText = d.level_id;
       document.getElementById('infobox-danger').innerText = d.danger;
+      document.getElementById('infobox-danger').className = dangerBadgeClass(d.danger);
       document.getElementById('infobox-comprehension').innerText = d.comprehension;
       document.getElementById('infobox-category').innerText = d.category;
       document.getElementById('infobox-lang').innerText = d.language;
@@ -3327,13 +3432,15 @@ HTML_TEMPLATE = r"""
       document.getElementById('ai-chat-messages').appendChild(wrap);
     }
 
-    function aiAppendMissingSourceActions(prompt, conversationId) {
+    function aiAppendMissingSourceActions(prompt, conversationId, options = {}) {
       const wrap = document.createElement('div');
       wrap.className = "ai-message max-w-4xl mx-auto flex justify-start";
       const panel = document.createElement('div');
       panel.className = "max-w-[90%] rounded border border-[#dfd3a8] bg-[#fffdf5] p-3 text-xs space-y-2";
       const explanation = document.createElement('p');
-      explanation.textContent = "対象の日本語版Wiki記事を検索できます。保存前に記事名と内容を確認し、保存操作ごとに承諾を求めます。";
+      explanation.textContent = options.missingLevel
+        ? `${options.missingLevel} のローカル本文は未保存です。入口・出口が片側にだけ記載されている可能性があるため、対象ページを取得して経路CSVを再解析しますか？`
+        : "対象の日本語版Wiki記事を検索できます。保存前に記事名と内容を確認し、保存操作ごとに承諾を求めます。";
       const searchButton = document.createElement('button');
       searchButton.type = "button";
       searchButton.className = "rounded bg-[#91520f] px-3 py-1.5 text-white font-semibold";
@@ -3347,7 +3454,7 @@ HTML_TEMPLATE = r"""
         searchButton.disabled = true;
         status.textContent = "日本語版Backrooms Wikiを検索中...";
         try {
-          const result = await pywebview.api.search_online_wiki(prompt);
+          const result = await pywebview.api.search_online_wiki(options.searchQuery || prompt);
           if (result.error) throw new Error(result.error);
           const pages = (result.pages || []).slice(0, 8);
           if (!pages.length) {
@@ -3366,6 +3473,7 @@ HTML_TEMPLATE = r"""
             link.href = page.url;
             link.textContent = page.url;
             link.className = "block break-all text-[#9b3d06] underline";
+            link.onclick = event => { event.preventDefault(); openAIAnswerLink(page.url); };
             const snippet = document.createElement('div');
             snippet.className = "text-gray-600";
             snippet.textContent = page.snippet || "検索抜粋はありません。";
@@ -3375,16 +3483,16 @@ HTML_TEMPLATE = r"""
             save.textContent = "この記事を保存して回答に使う";
             save.onclick = async () => {
               const approved = window.confirm(
-                `「${page.title}」の記事本文と画像をダウンロードしてローカル保存します。よろしいですか？\n${page.url}`
+                `「${page.title}」の記事本文と画像をダウンロードしてローカル保存します${options.rebuildNetwork ? "。接続CSVも再解析します" : ""}。よろしいですか？\n${page.url}`
               );
               if (!approved) return;
               save.disabled = true;
               status.textContent = `${page.title} を保存中です...`;
               const flowId = aiRequestId();
-              aiMissingSourceFlows.set(flowId, {prompt, conversationId, status});
+              aiMissingSourceFlows.set(flowId, {prompt, conversationId, status, rebuildNetwork: Boolean(options.rebuildNetwork)});
               try {
                 const started = await pywebview.api.start_ai_source_save(
-                  page, prompt, true, flowId
+                  page, prompt, true, flowId, Boolean(options.rebuildNetwork)
                 );
                 if (started.status !== "started") {
                   aiMissingSourceFlows.delete(flowId);
@@ -3415,6 +3523,10 @@ HTML_TEMPLATE = r"""
       aiMissingSourceFlows.delete(result.flow_id);
       if (!result.ok) {
         flow.status.textContent = `資料を保存できませんでした: ${result.error || '詳細不明'}`;
+        return;
+      }
+      if (flow.rebuildNetwork && !result.network_updated) {
+        flow.status.textContent = `${result.title} は保存しましたが、経路CSVを更新できませんでした: ${result.network_update_error || '記事から接続情報を抽出できませんでした。環境設定からネットワーク更新を実行してください。'}`;
         return;
       }
       flow.status.textContent = `${result.title} を保存しました。質問を再確認します。`;
@@ -3546,7 +3658,13 @@ HTML_TEMPLATE = r"""
                   sources: data.sources || [],
                 }],
               });
-              if (data.finish_reason === "no_verified_sources" && data.prompt) {
+              if (data.missing_level && data.prompt) {
+                aiAppendMissingSourceActions(data.prompt, cid, {
+                  missingLevel: data.missing_level.level_id,
+                  searchQuery: data.missing_level.query,
+                  rebuildNetwork: true,
+                });
+              } else if (data.finish_reason === "no_verified_sources" && data.prompt) {
                 aiAppendMissingSourceActions(data.prompt, cid);
               }
             }
@@ -3616,6 +3734,15 @@ def main():
     api._main_window.events.response_received += (
         api._on_main_window_response_received
     )
+    fallback_window = webview.create_window(
+        title="Backrooms Wiki取得補助",
+        html="<!doctype html><html><head><meta charset='utf-8'></head><body></body></html>",
+        width=960,
+        height=720,
+        hidden=True,
+    )
+    set_browser_window(fallback_window)
+    api._main_window.events.closed += lambda *_args: fallback_window.destroy()
     if os.name == "nt":
         webview.start(debug=False, gui="edgechromium")
     else:

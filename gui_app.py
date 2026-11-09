@@ -39,7 +39,7 @@ from modules.online_wiki import save_page as save_online_wiki_page
 from modules.online_wiki import search_pages as search_online_wiki_pages
 from modules.route_service import search_routes as search_local_routes
 from modules.runtime_paths import get_application_dir
-from modules.system_dashboard import format_clock, get_network_kind, get_power_status, list_local_images, storage_summary
+from modules.system_dashboard import format_clock, get_network_kind, get_power_status, list_local_images, local_saved_level_list, storage_summary
 from modules.version import VERSION
 from modules.webview_fallback import set_browser_window
 
@@ -127,6 +127,9 @@ class BackroomsAPI:
             item.pop("path", None)
             result.append(item)
         return result
+
+    def get_local_saved_levels(self):
+        return local_saved_level_list(self.search_candidates(""))
 
     def get_local_image_data(self, filename):
         name = Path(str(filename or "")).name
@@ -1396,15 +1399,15 @@ HTML_TEMPLATE = r"""
     }
 
     body[data-theme="dark"] {
-      --bg-fandom: #202020;
-      --surface-fandom: #2b2b2b;
-      --surface-raised: #323232;
-      --surface-soft: #292929;
-      --border-fandom: #454545;
-      --header-amber: #171717;
-      --accent-amber: #e5ad42;
-      --text-primary: #eeeeee;
-      --text-secondary: #b8b8b8;
+      --bg-fandom: #1e1c17;
+      --surface-fandom: #27241d;
+      --surface-raised: #2f2b22;
+      --surface-soft: #24211a;
+      --border-fandom: #443e31;
+      --header-amber: #15130f;
+      --accent-amber: #ffc500;
+      --text-primary: #edeae2;
+      --text-secondary: #b5afa2;
       color-scheme: dark;
     }
     body[data-theme="dark"] [class*="bg-[#"],
@@ -1424,17 +1427,17 @@ HTML_TEMPLATE = r"""
     body[data-theme="dark"] [class*="text-gray-"],
     body[data-theme="dark"] [class*="text-[#"] { color: var(--text-primary) !important; }
     body[data-theme="dark"] [class~="bg-gray-800"],
-    body[data-theme="dark"] [class~="bg-gray-700"] { background-color: #181818 !important; }
-    body[data-theme="dark"] header { background-color: #151515 !important; }
-    body[data-theme="dark"] a { color: #edb84d; }
+    body[data-theme="dark"] [class~="bg-gray-700"] { background-color: #211e18 !important; }
+    body[data-theme="dark"] header { background-color: #14120e !important; border-bottom: 1px solid #3a3428; }
+    body[data-theme="dark"] a { color: #ffc500; }
     body[data-theme="dark"] input, body[data-theme="dark"] textarea,
-    body[data-theme="dark"] select { color: #ededed; background-color: #303030; border-color: #505050; }
-    body[data-theme="dark"] .wiki-infobox-header { background-color: #a97423; }
-    body[data-theme="dark"] .online-wiki-content { color: #e7e7e7; }
-    body[data-theme="dark"] .online-wiki-content a, body[data-theme="dark"] .ai-answer-content a { color: #f2bd58; }
-    body[data-theme="dark"] .online-wiki-content th, body[data-theme="dark"] .ai-answer-content th { background: #383838; }
+    body[data-theme="dark"] select { color: #edeae2; background-color: #191713; border-color: #4d4637; }
+    body[data-theme="dark"] .wiki-infobox-header { background-color: #8c6218; color: #fffaf0; }
+    body[data-theme="dark"] .online-wiki-content { color: #edeae2; }
+    body[data-theme="dark"] .online-wiki-content a, body[data-theme="dark"] .ai-answer-content a { color: #ffc500; }
+    body[data-theme="dark"] .online-wiki-content th, body[data-theme="dark"] .ai-answer-content th { background: #332e24; }
     body[data-theme="dark"] .online-wiki-content th, body[data-theme="dark"] .online-wiki-content td,
-    body[data-theme="dark"] .ai-answer-content th, body[data-theme="dark"] .ai-answer-content td { border-color: #505050; }
+    body[data-theme="dark"] .ai-answer-content th, body[data-theme="dark"] .ai-answer-content td { border-color: #4d4637; }
   </style>
 </head>
 <body class="flex flex-col h-screen overflow-hidden select-text">
@@ -1541,6 +1544,15 @@ HTML_TEMPLATE = r"""
             <p class="mt-2 text-sm text-gray-600">カテゴリを選ぶと、番号帯ごとの一覧を開きます。</p>
           </div>
           <div id="explorer-category-tiles" class="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3" aria-label="階層カテゴリ一覧"></div>
+        </div>
+
+        <div id="explorer-index-local-saved" class="hidden mx-auto max-w-6xl">
+          <div class="mb-4 flex items-center gap-3 border-b border-[#d8c99e] pb-3">
+            <button type="button" onclick="showExplorerIndexHome()" class="shrink-0 rounded px-3 py-1.5 text-sm font-semibold text-[#91520f] hover:bg-[#fff7dd]">‹ 一覧へ戻る</button>
+            <div class="min-w-0 flex-1"><div class="text-xs text-[#8c6b12]">ローカルアーカイブ</div><h2 class="text-2xl font-semibold text-[#3f3828]">ローカル保存済み階層の一覧</h2></div>
+            <span id="local-saved-level-count" class="text-xs text-gray-500"></span>
+          </div>
+          <div id="local-saved-level-list" class="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3"></div>
         </div>
 
         <div id="explorer-index-category" class="hidden mx-auto max-w-6xl">
@@ -1957,6 +1969,7 @@ HTML_TEMPLATE = r"""
     let activeTimezone = 'Asia/Tokyo';
     let explorerImages = [];
     let localImages = [];
+    let localSavedLevels = [];
     let lightboxImages = [];
     let lightboxIndex = 0;
     let lightboxLevel = '';
@@ -2068,6 +2081,7 @@ HTML_TEMPLATE = r"""
       await switchExplorerSubtab('article');
       document.getElementById('explorer-index-home').classList.add('hidden');
       document.getElementById('explorer-index-category').classList.add('hidden');
+      document.getElementById('explorer-index-local-saved').classList.add('hidden');
       document.getElementById('wiki-page-container').classList.remove('hidden');
       await loadLevelDetail(level);
     }
@@ -2331,7 +2345,9 @@ HTML_TEMPLATE = r"""
 
     function explorerPagesForCategory(categoryId) {
       const source = explorerIndexPages.length ? explorerIndexPages : levelSearchResults;
-      const pages = levelListPagesForCategory(categoryId, source);
+      const pages = categoryId === "saved_local"
+        ? uniqueLevelListPages(source.filter(page => Boolean(page.saved)))
+        : levelListPagesForCategory(categoryId, source);
       const metadataByTitle = new Map(levelSearchResults.map(item => [explorerTitleKey(item.title), item]));
       return pages.map(page => {
         const metadata = metadataByTitle.get(explorerTitleKey(page.title)) || {};
@@ -2351,7 +2367,8 @@ HTML_TEMPLATE = r"""
       // Include newly saved local articles even when the packaged level-list source
       // has not been regenerated yet.
       try {
-        const localCandidates = await pywebview.api.search_candidates('');
+        localSavedLevels = await pywebview.api.get_local_saved_levels();
+        const localCandidates = localSavedLevels;
         const known = new Set(explorerIndexPages.map(page => explorerTitleKey(page.title)));
         (localCandidates || []).filter(page => page.saved).forEach(page => {
           const key = explorerTitleKey(page.title);
@@ -2366,6 +2383,7 @@ HTML_TEMPLATE = r"""
         });
       } catch (_) {}
       renderExplorerCategoryTiles();
+      if (!document.getElementById('explorer-index-local-saved').classList.contains('hidden')) renderLocalSavedLevels();
       if (explorerIndexCategory !== null) renderExplorerCategorySections(explorerIndexCategory);
     }
 
@@ -2373,11 +2391,25 @@ HTML_TEMPLATE = r"""
       const host = document.getElementById('explorer-category-tiles');
       if (!host || !Array.isArray(levelListCategoryDefinitions)) return;
       host.replaceChildren();
-      const categories = getLevelListCategories(explorerIndexPages.length ? explorerIndexPages : levelSearchResults);
+      const sourcePages = explorerIndexPages.length ? explorerIndexPages : levelSearchResults;
+      const categories = [...getLevelListCategories(sourcePages)];
+      const savedPages = uniqueLevelListPages(sourcePages.filter(page => Boolean(page.saved)));
+      const savedCard = {
+        id: "saved_local",
+        title: "ローカル保存済み階層の一覧",
+        visual: "💾",
+        wikiTitle: "",
+        imageUrl: "https://nocookie.net",
+        pages: savedPages,
+      };
+      if (categories.length >= 6) {
+        categories.splice(6, 0, savedCard);
+      } else {
+        categories.push(savedCard);
+      }
       categories.forEach((category, index) => {
         const card = document.createElement('div');
         card.className = 'overflow-hidden border border-[#dfd09f] bg-[#fff1b2] shadow-sm transition hover:-translate-y-0.5 hover:shadow-md';
-        if (categories.length === 8 && index === 6) card.classList.add('lg:col-start-2');
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'block w-full text-left focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#b45309]';
@@ -2414,15 +2446,76 @@ HTML_TEMPLATE = r"""
         }
         host.appendChild(card);
       });
+      const localCard = document.createElement('div');
+      localCard.className = 'overflow-hidden border border-[#dfd09f] bg-[#fff1b2] shadow-sm transition hover:-translate-y-0.5 hover:shadow-md';
+      if (categories.length === 8) localCard.classList.add('lg:col-start-1', 'lg:row-start-3');
+      const localButton = document.createElement('button');
+      localButton.type = 'button';
+      localButton.className = 'block w-full text-left focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#b45309]';
+      localButton.onclick = openLocalSavedLevels;
+      const localArt = document.createElement('div');
+      localArt.className = 'relative mx-auto mt-3 flex h-44 w-44 items-center justify-center overflow-hidden bg-[#e4d9a8] text-6xl';
+      localArt.style.background = 'linear-gradient(145deg,#806b42,#ddc99a)';
+      localArt.textContent = '📚';
+      const localTitle = document.createElement('div');
+      localTitle.className = 'px-2 py-2 text-center text-sm font-bold text-[#3f3828]';
+      localTitle.textContent = 'ローカル保存済み階層の一覧';
+      const localCount = document.createElement('div');
+      localCount.className = 'pb-2 text-center text-[10px] text-gray-600';
+      localCount.textContent = `${localSavedLevels.length}件`;
+      localButton.append(localArt, localTitle, localCount);
+      localCard.appendChild(localButton);
+      host.appendChild(localCard);
+    }
+
+    function openLocalSavedLevels() {
+      switchExplorerSubtab('article');
+      explorerIndexCategory = null;
+      document.getElementById('explorer-index-home').classList.add('hidden');
+      document.getElementById('explorer-index-category').classList.add('hidden');
+      document.getElementById('wiki-page-container').classList.add('hidden');
+      document.getElementById('explorer-index-local-saved').classList.remove('hidden');
+      renderLocalSavedLevels();
+    }
+
+    function renderLocalSavedLevels() {
+      const host = document.getElementById('local-saved-level-list');
+      if (!host) return;
+      document.getElementById('local-saved-level-count').textContent = `${localSavedLevels.length}件`;
+      host.replaceChildren();
+      if (!localSavedLevels.length) {
+        const empty = document.createElement('p');
+        empty.className = 'col-span-full rounded border border-[#e2d8b5] bg-[#fffdf5] p-5 text-sm text-gray-600';
+        empty.textContent = 'ローカルに保存・抽出済みの階層はありません。Wiki閲覧・保存またはHTML取得・データ抽出から記事を保存してください。';
+        host.appendChild(empty);
+        return;
+      }
+      localSavedLevels.forEach(page => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'rounded border border-[#e2d8b5] bg-[#fffdf5] p-3 text-left shadow-sm transition hover:bg-[#f7f0d4]';
+        button.onclick = () => openExplorerCandidate(page);
+        const title = document.createElement('span');
+        title.className = 'block font-semibold text-[#a3420b]';
+        title.textContent = `📖 ${page.title}`;
+        const subtitle = document.createElement('span');
+        subtitle.className = 'mt-1 block text-xs text-gray-600';
+        subtitle.textContent = [page.subtitle, page.category_label || page.category].filter(Boolean).join(' · ') || '保存済み';
+        button.append(title, subtitle);
+        host.appendChild(button);
+      });
     }
 
     function openExplorerCategory(categoryId) {
       explorerIndexCategory = categoryId;
       document.getElementById('explorer-index-home').classList.add('hidden');
+      document.getElementById('explorer-index-local-saved').classList.add('hidden');
       document.getElementById('wiki-page-container').classList.add('hidden');
       document.getElementById('explorer-index-category').classList.remove('hidden');
-      const category = getLevelListCategories(explorerIndexPages.length ? explorerIndexPages : levelSearchResults)
-        .find(item => item.id === categoryId);
+      const category = categoryId === "saved_local"
+        ? {title: "ローカル保存済み階層の一覧"}
+        : getLevelListCategories(explorerIndexPages.length ? explorerIndexPages : levelSearchResults)
+            .find(item => item.id === categoryId);
       document.getElementById('explorer-index-category-title').textContent = category?.title || '階層の一覧';
       renderExplorerCategorySections(categoryId);
     }
@@ -2431,6 +2524,7 @@ HTML_TEMPLATE = r"""
       explorerIndexCategory = null;
       document.getElementById('wiki-page-container').classList.add('hidden');
       document.getElementById('explorer-index-category').classList.add('hidden');
+      document.getElementById('explorer-index-local-saved').classList.add('hidden');
       document.getElementById('explorer-index-home').classList.remove('hidden');
     }
 
@@ -2521,6 +2615,7 @@ HTML_TEMPLATE = r"""
     async function openExplorerCandidate(item) {
       document.getElementById('explorer-index-home').classList.add('hidden');
       document.getElementById('explorer-index-category').classList.add('hidden');
+      document.getElementById('explorer-index-local-saved').classList.add('hidden');
       document.getElementById('wiki-page-container').classList.remove('hidden');
       await loadLevelDetail(item.title);
       const articleMissing = (document.getElementById('view-article-content').textContent || '').includes('本文データがありません');

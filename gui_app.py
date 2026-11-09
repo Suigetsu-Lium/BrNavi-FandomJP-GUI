@@ -1051,22 +1051,38 @@ class BackroomsAPI:
                         "cancelled": self._maintenance_cancel_event.is_set(),
                         "error": "保存処理を開始できませんでした。",
                     }
-                    if payload.get("ok") and options and options.get("ai_rebuild_network"):
+                    if payload.get("ok"):
                         try:
-                            network_result = run_maintenance_operation(
-                                "update_network",
+                            pipeline_result = run_maintenance_operation(
+                                "refresh_saved_wiki_page",
+                                options={"html_path": payload.get("path", "")},
                                 context=OperationContext(
                                     cancel_event=self._maintenance_cancel_event,
                                     on_log=self._notify_maintenance_log,
                                     on_progress=self._notify_maintenance_progress,
                                 ),
                             )
-                            payload["network_updated"] = bool(network_result.success)
-                            if not network_result.success:
-                                payload["network_update_error"] = network_result.message
-                        except Exception as error:
+                            details = pipeline_result.details or {}
+                            payload["pipeline_ok"] = bool(pipeline_result.success)
+                            payload["extraction_completed"] = bool(details.get("extraction_completed", False))
+                            payload["network_updated"] = bool(details.get("network_updated", False))
+                            payload["pipeline_message"] = pipeline_result.message
+                            if not pipeline_result.success:
+                                payload["pipeline_error"] = pipeline_result.message
+                                payload["network_update_error"] = pipeline_result.message
+                        except OperationCancelled:
+                            payload["pipeline_ok"] = False
                             payload["network_updated"] = False
+                            payload["cancelled"] = True
+                            payload["pipeline_error"] = "抽出パイプラインを停止しました。"
+                            payload["network_update_error"] = payload["pipeline_error"]
+                        except Exception as error:
+                            payload["pipeline_ok"] = False
+                            payload["network_updated"] = False
+                            payload["pipeline_error"] = str(error)
                             payload["network_update_error"] = str(error)
+                        # Rebuild the in-memory catalog so newly saved Levels are immediately searchable.
+                        self._candidate_catalog = None
             finally:
                 self._maintenance_done_event.set()
                 try:
@@ -2319,7 +2335,7 @@ HTML_TEMPLATE = r"""
       const metadataByTitle = new Map(levelSearchResults.map(item => [explorerTitleKey(item.title), item]));
       return pages.map(page => {
         const metadata = metadataByTitle.get(explorerTitleKey(page.title)) || {};
-        return {...metadata, ...page, saved: Boolean(metadata.saved),
+        return {...metadata, ...page, saved: Boolean(metadata.saved || page.saved),
           subtitle: metadata.subtitle || page.subtitle || page.meta_title || ''};
       }).sort(compareLevelListPages);
     }
@@ -2332,6 +2348,23 @@ HTML_TEMPLATE = r"""
       } catch (_) {
         explorerIndexPages = levelSearchResults.map(candidate => ({...candidate}));
       }
+      // Include newly saved local articles even when the packaged level-list source
+      // has not been regenerated yet.
+      try {
+        const localCandidates = await pywebview.api.search_candidates('');
+        const known = new Set(explorerIndexPages.map(page => explorerTitleKey(page.title)));
+        (localCandidates || []).filter(page => page.saved).forEach(page => {
+          const key = explorerTitleKey(page.title);
+          if (known.has(key)) {
+            const existing = explorerIndexPages.find(item => explorerTitleKey(item.title) === key);
+            if (existing) Object.assign(existing, {...page, saved: true, url: existing.url || page.url});
+            return;
+          }
+          const category = page.category || (/η\s*$/i.test(page.title) ? 'normal_eta' : 'normal');
+          explorerIndexPages.push({...page, category, category_label: page.category_label || (category === 'normal_eta' ? '通常階層 η' : '通常階層')});
+          known.add(key);
+        });
+      } catch (_) {}
       renderExplorerCategoryTiles();
       if (explorerIndexCategory !== null) renderExplorerCategorySections(explorerIndexCategory);
     }
@@ -3560,7 +3593,7 @@ HTML_TEMPLATE = r"""
       onlineWikiBrowserBusy = true;
       document.getElementById('online-wiki-save-current').disabled = true;
       document.getElementById('online-wiki-save-status').textContent =
-        "表示中のWiki本文と画像を保存しています...";
+        "表示中の記事を保存し、本文・図鑑・経路データへ反映しています...";
       try {
         const result = await pywebview.api.save_current_online_wiki_page();
         if (result.status !== "started") {
@@ -3580,13 +3613,20 @@ HTML_TEMPLATE = r"""
       }
     }
 
-    function onOnlineWikiSaveCompleted(result) {
+    async function onOnlineWikiSaveCompleted(result) {
       onlineWikiBrowserBusy = false;
       if (result.ok) {
+        const pipelineStatus = result.pipeline_ok
+          ? 'テキスト・図鑑・経路反映済'
+          : `反映に一部失敗: ${result.pipeline_error || '詳細ログを確認してください'}`;
         document.getElementById('online-wiki-save-status').textContent =
-          `保存完了: ${result.title} / 画像 ${result.images_saved}件` +
+          `保存＆抽出${result.pipeline_ok ? '完了' : '済'}: ${result.title} / 画像 ${result.images_saved || 0}件` +
           (result.images_failed ? ` (失敗 ${result.images_failed}件)` : "") +
-          ` / ${result.path}`;
+          ` / ${pipelineStatus}`;
+        try {
+          await onSearchInput();
+          await loadExplorerIndexPages();
+        } catch (error) { console.error('図鑑一覧の更新に失敗:', error); }
       } else {
         document.getElementById('online-wiki-save-status').textContent =
           "保存エラー: " + (result.error || "不明なエラー");

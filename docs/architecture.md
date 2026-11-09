@@ -94,6 +94,8 @@ Wikiタブの現在URLは、HTTPSの日本語版記事名前空間（`/ja/wiki/<
 3. 記事はWebView内のiframeへ読み込みます。WebViewのFandom HTML応答URLを監視して現在の記事URLを画面へ返し、「表示中を保存」の対象にします。
 4. 保存処理はMediaWiki APIから取得した記事本文を管理メタデータ付きHTMLにし、一時ファイルから `os.replace()` で `downloaded_fandom_html/` に保存します。APIがHTTP 403を返した場合は非表示のEdge WebView2ウィンドウで同一の公開記事を開き、DOM本文を取得して保存します。記事HTMLへの直接HTTPリクエストは行いません。
 5. HTML内の許可されたFandom画像ホストを調べて画像を取得し、記事名に対応する `_assets` フォルダーへ相対パスで保存します。1ページあたり最大40画像、1画像あたり20 MiBまでです。
+6. GUIの「表示中を保存」は保存成功後に `refresh_saved_wiki_page` 保守処理を続けて実行します。対象HTMLだけを `extract_levels(html_files=[...], merge_existing=True)` で本文TXT・要約CSVへ反映し、既存の抽出データを保ったまま `process_backrooms_data()` で `backrooms_nodes.csv` / `backrooms_edges.csv` を再構築します。抽出の完了状態と経路更新の成否を保存完了通知に含めます。
+7. パイプライン終了時にGUIの候補カタログキャッシュを破棄し、検索候補・階層一覧を再取得します。Level一覧ソースにまだ載っていない保存済み記事も、抽出メタデータをもとに一覧へ追加します。AIのローカル索引はTXT/HTML/要約CSVの更新時刻・サイズを使って次の検索時に再索引するため、保存直後の質問で最新資料を参照できます。経路検索はCSVを検索時に読み直します。
 
 閲覧ではFandom本来のページ表示を保ち、保存では既存ダウンローダーとの互換性を保つ設計です。通常の保存では画面に描画されたiframeのDOMを使わず、APIが403を返した場合に限って独立したWebView2セッションのDOMを取得します。Fandomのページ構造・アクセス制御・画像ホストの変更により表示や保存が影響を受けることがあります。
 

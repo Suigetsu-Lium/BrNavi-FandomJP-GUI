@@ -21,6 +21,39 @@ from modules.operations import (
 
 
 class MaintenanceOperationTests(unittest.TestCase):
+    def test_saved_wiki_page_pipeline_extracts_before_rebuilding_network(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            html_root = Path(temp_dir) / "downloaded_fandom_html"
+            html_root.mkdir()
+            html_path = html_root / "Level_200_η.html"
+            html_path.write_text("<html>Level 200 η</html>", encoding="utf-8")
+            calls = []
+
+            def extract(**kwargs):
+                calls.append("extract")
+                self.assertEqual(kwargs["html_files"], [html_path.resolve()])
+                self.assertTrue(kwargs["merge_existing"])
+                return [{"階層コード": "Level 200 η"}]
+
+            def update_network(**kwargs):
+                calls.append("network")
+                return True
+
+            with (
+                patch("modules.operations.get_application_dir", return_value=Path(temp_dir)),
+                patch("modules.operations.extract_levels", side_effect=extract),
+                patch("modules.operations.process_backrooms_data", side_effect=update_network),
+            ):
+                result = run_maintenance_operation(
+                    "refresh_saved_wiki_page",
+                    options={"html_path": str(html_path)},
+                    context=OperationContext(),
+                )
+
+            self.assertTrue(result.success)
+            self.assertEqual(result.details, {"extraction_completed": True, "network_updated": True})
+            self.assertEqual(calls, ["extract", "network"])
+
     def test_level_list_pages_parse_metadata_and_exclude_unsupported_urls(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             list_path = Path(temp_dir) / "JP.txt"

@@ -436,8 +436,9 @@ class OnlineWikiGuiTests(unittest.TestCase):
             "categories": [],
         })
 
+    @patch("gui_app.run_maintenance_operation")
     @patch("gui_app.save_online_wiki_page")
-    def test_save_task_reports_completion(self, save_page):
+    def test_save_task_runs_extraction_pipeline_and_reports_completion(self, save_page, pipeline):
         page = {
             "title": "Level 0",
             "url": "https://backrooms.fandom.com/ja/wiki/Level_0",
@@ -449,6 +450,11 @@ class OnlineWikiGuiTests(unittest.TestCase):
             "images_saved": 2,
             "images_failed": 0,
         }
+        pipeline.return_value = SimpleNamespace(
+            success=True,
+            message="本文・メタデータを抽出し、図鑑用データと経路CSVを更新しました。",
+            details={"extraction_completed": True, "network_updated": True},
+        )
         window = unittest.mock.Mock()
         self.api._main_window = window
         self.api._maintenance_lock.acquire()
@@ -459,8 +465,17 @@ class OnlineWikiGuiTests(unittest.TestCase):
 
         self.assertIn("Wikiページを保存します", output.getvalue())
         save_page.assert_called_once_with(page)
+        pipeline.assert_called_once()
+        self.assertEqual(pipeline.call_args.args[0], "refresh_saved_wiki_page")
+        self.assertEqual(
+            pipeline.call_args.kwargs["options"],
+            {"html_path": "downloaded_fandom_html/Level_0.html"},
+        )
         window.evaluate_js.assert_called_once()
-        self.assertIn("onOnlineWikiSaveCompleted", window.evaluate_js.call_args.args[0])
+        callback = window.evaluate_js.call_args.args[0]
+        self.assertIn("onOnlineWikiSaveCompleted", callback)
+        self.assertIn('"pipeline_ok": true', callback)
+        self.assertIn('"extraction_completed": true', callback)
         self.assertFalse(self.api._maintenance_lock.locked())
 
 

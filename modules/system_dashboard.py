@@ -157,4 +157,4 @@ def get_power_status():
         charging = bool(status.BatteryFlag & 8)
         return f"⚡ {percent}% (充電中)" if charging else f"🔋 {percent}%"
     except Exception:
-        return "⚡ AC給電"\n
+        return "⚡ AC給電"

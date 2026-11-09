@@ -143,6 +143,41 @@ def run_maintenance_operation(task_name, options=None, context=None):
             if success else "ネットワークを更新できませんでした。",
         )
 
+    if task_name == "refresh_saved_wiki_page":
+        html_path = Path(str(options.get("html_path") or "")).resolve()
+        html_root = (get_application_dir() / "downloaded_fandom_html").resolve()
+        if html_path.parent != html_root or html_path.suffix.lower() not in {".html", ".htm"}:
+            raise ValueError("保存済みWiki HTMLのパスが不正です。")
+        if not html_path.is_file():
+            raise FileNotFoundError("抽出対象の保存済みWiki HTMLがありません。")
+
+        context.log(f"保存した記事から本文・メタデータを抽出します: {html_path.name}")
+        extracted_rows = extract_levels(
+            html_files=[html_path],
+            merge_existing=True,
+            interactive=False,
+            context=context,
+        )
+        if extracted_rows is None:
+            return OperationResult(
+                success=False,
+                message="HTMLは保存されましたが、本文・メタデータを抽出できませんでした。",
+                details={"extraction_completed": False, "network_updated": False},
+            )
+
+        context.check_cancelled()
+        context.log("最新の保存済みHTMLと抽出メタデータから経路CSVを再構築します。")
+        network_updated = bool(process_backrooms_data(context=context))
+        return OperationResult(
+            success=network_updated,
+            message=(
+                "本文・メタデータを抽出し、図鑑用データと経路CSVを更新しました。"
+                if network_updated else
+                "本文は抽出しましたが、経路CSVを更新できませんでした。"
+            ),
+            details={"extraction_completed": True, "network_updated": network_updated},
+        )
+
     if task_name == "download_level_list_html":
         pages = options.get("pages", [])
         overwrite = bool(options.get("overwrite", False))

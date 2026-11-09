@@ -21,6 +21,7 @@
 | `modules/downloader.py` | 従来のMaster DBベースのHTMLダウンロードとURLダウンロード |
 | `modules/extractor.py` | 保存済みHTMLから本文・タグなどを抽出 |
 | `modules/network.py` / `modules/navigator.py` | 抽出データから接続ネットワークを生成し、経路を検索 |
+| `modules/operation_context.py` / `modules/operations.py` | GUI・CLIから利用する保守操作の実行文脈、ログ・進捗・協調キャンセル、サービス入口 |
 | `BackroomsNavigationSystem_FandomJP.py` | 従来のコンソール版エントリーポイント |
 
 ### GUIとデータ経路
@@ -58,6 +59,14 @@ Windowsでは `webview.start(gui="edgechromium")` を使い、WebView2をレン�
 5. HTML内の許可されたFandom画像ホストを調べて画像を取得し、記事名に対応する `_assets` フォルダーへ相対パスで保存します。1ページあたり最大40画像、1画像あたり20 MiBまでです。
 
 閲覧ではFandom本来のページ表示を保ち、保存では既存ダウンローダーとの互換性を保つ設計です。画面に描画されたiframeのDOMそのものは保存しません。Fandomのページ構造・レスポンスヘッダー・画像ホストの変更により表示や保存が影響を受けることがあります。
+
+## 保守操作と共有サービス層
+
+- GUIは専用のバックグラウンドスレッドから `run_maintenance_operation()` を呼び出し、CLIの対話型メニューを経由せず同じ処理モジュールを再利用します。既存CLIのエントリーポイントと引数なしの操作関数呼び出しは維持します。
+- `OperationContext` はキャンセルイベント、ログコールバック、進捗コールバックを保持します。操作は安全な処理境界でキャンセルを確認し、GUIの停止ボタンはスレッドを強制終了せず協調的に停止します。
+- Master Database更新はモード（一覧HTMLを再取得する全更新／既存HTMLからの再構築）を明示して非対話実行します。既存の更新ステップ内部には未対応の長時間処理があるため、停止要求は現在のステップ完了後に反映されます。
+- 情報抽出は一時ディレクトリにTXT・CSVを作成してから出力を切り替えます。ネットワーク更新も2つのCSVを一時ファイルとして生成し、出力切り替え時に既存ファイルを退避します。キャンセル時には出力を更新しません。
+- GUIの保守パネルはログをテキストとして表示し、最大300行を保持します。処理の実行中もWebViewのUIスレッドをブロックしません。
 
 ## AI Assistant
 
@@ -199,7 +208,7 @@ python -m unittest discover -s tests -v
 
 主なテスト対象：
 
-- `tests/test_gui_html_download.py`：GUI APIブリッジ、URL検証、埋め込みURL追跡、保守タスク状態通知
+- `tests/test_gui_html_download.py`, `tests/test_maintenance_operations.py`：GUI APIブリッジ、保守操作の実行・キャンセル、キャンセル時の既存出力保持
 - `tests/test_online_wiki.py`：Fandom検索・本文サニタイズ・画像ローカル保存
 - `tests/test_ai_wiki_retriever.py`：ローカル資料検索、出典優先順位、オンラインフォールバック
 - `tests/test_ai_conversation.py`：SQLiteスキーマ、会話・回答バージョン、評価、削除、マイグレーション

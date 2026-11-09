@@ -12,6 +12,7 @@ import time
 import traceback
 
 from modules.runtime_paths import get_application_dir
+from modules.operation_context import OperationCancelled
 
 # =============================================================================
 # 基本パス設定
@@ -90,7 +91,7 @@ def directory_exists(path):
     return os.path.isdir(path)
 
 
-def check_index_html():
+def check_index_html(log=print):
     required_files = [
         "hierarchy.html",
         "translation.html",
@@ -112,21 +113,21 @@ def check_index_html():
     if not missing:
         return True
 
-    print()
-    print("=" * 80)
-    print("【エラー】必要な一覧HTMLがありません。")
-    print("=" * 80)
-    print(f"\n確認対象フォルダ:\n  {INDEX_HTML_DIR}\n")
-    print("不足しているファイル:")
+    log()
+    log("=" * 80)
+    log("【エラー】必要な一覧HTMLがありません。")
+    log("=" * 80)
+    log(f"\n確認対象フォルダ:\n  {INDEX_HTML_DIR}\n")
+    log("不足しているファイル:")
     for file_name in missing:
-        print(f"  - {file_name}")
-    print("\n[1] 全更新を選択すると一覧HTMLを取得できます。\n")
+        log(f"  - {file_name}")
+    log("\n[1] 全更新を選択すると一覧HTMLを取得できます。\n")
 
     return False
 
 
-def show_database_status():
-    print("\n【生成済みDB】\n")
+def show_database_status(log=print):
+    log("\n【生成済みDB】\n")
     files = [
         "all_links.csv",
         "pages_database.csv",
@@ -143,45 +144,57 @@ def show_database_status():
             found = True
             try:
                 size = os.path.getsize(file_path)
-                print(f"  ✓ {file_name} ({size:,} bytes)")
+                log(f"  ✓ {file_name} ({size:,} bytes)")
             except OSError:
-                print(f"  ✓ {file_name}")
+                log(f"  ✓ {file_name}")
 
     if not found:
-        print("  生成済みDBはありません。")
+        log("  生成済みDBはありません。")
 
 
-def run_step(number, name, function):
-    print()
-    print("=" * 80)
-    print(f"[{number}] {name}")
-    print("=" * 80)
+def run_step(number, name, function, context=None):
+    log = context.log if context else print
+    log()
+    log("=" * 80)
+    log(f"[{number}] {name}")
+    log("=" * 80)
 
     start_time = time.time()
 
     try:
+        if context:
+            context.check_cancelled()
+            context.progress(message=name)
         result = function()
+        if context:
+            context.check_cancelled()
         elapsed = time.time() - start_time
 
         if result is False:
-            print(f"\n【FAILED】[{number}] {name}")
-            print(f"処理時間: {elapsed:.1f} 秒\n")
+            log(f"\n【FAILED】[{number}] {name}")
+            log(f"処理時間: {elapsed:.1f} 秒\n")
             return False
 
-        print(f"\n【SUCCESS】[{number}] {name}")
-        print(f"処理時間: {elapsed:.1f} 秒")
-        print("=" * 80)
+        log(f"\n【SUCCESS】[{number}] {name}")
+        log(f"処理時間: {elapsed:.1f} 秒")
+        log("=" * 80)
         return True
 
+    except OperationCancelled:
+        raise
     except Exception as e:
         elapsed = time.time() - start_time
-        print("\n" + "=" * 80)
-        print(f"【FAILED】[{number}] {name}")
-        print(f"処理時間: {elapsed:.1f} 秒")
-        print("=" * 80 + "\n")
-        print(f"エラー種類: {type(e).__name__}")
-        print(f"エラー内容: {e}\n")
-        traceback.print_exc()
+        log("\n" + "=" * 80)
+        log(f"【FAILED】[{number}] {name}")
+        log(f"処理時間: {elapsed:.1f} 秒")
+        log("=" * 80 + "\n")
+        log(f"エラー種類: {type(e).__name__}")
+        if context:
+            log(f"エラー内容: {e}\n", "error")
+            log(traceback.format_exc(), "error")
+        else:
+            log(f"エラー内容: {e}\n")
+            traceback.print_exc()
         return False
 
 
@@ -244,39 +257,49 @@ def show_selected_mode(mode):
     print("=" * 80)
 
 
-def execute_update(mode):
+def execute_update(mode, context=None):
+    log = context.log if context else print
+    if mode not in {"1", "2", 1, 2}:
+        raise ValueError("更新モードは1または2を指定してください。")
+    mode = str(mode)
+
     if mode == "2":
-        if not check_index_html():
+        if not check_index_html(log=log):
             return False
 
     steps = build_steps(mode)
     overall_start = time.time()
     completed = 0
 
-    for number, name, function in steps:
-        success = run_step(number, name, function)
+    for index, (number, name, function) in enumerate(steps, 1):
+        if context:
+            context.check_cancelled()
+            context.progress(index - 1, len(steps), name)
+        success = run_step(number, name, function, context=context)
         if not success:
-            print("\n" + "=" * 80)
-            print("データベース更新を中断しました。")
-            print("=" * 80 + "\n")
-            print(f"完了済み: {completed}/{len(steps)} ステップ\n")
-            show_database_status()
+            log("\n" + "=" * 80)
+            log("データベース更新を中断しました。")
+            log("=" * 80 + "\n")
+            log(f"完了済み: {completed}/{len(steps)} ステップ\n")
+            show_database_status(log=log)
             return False
         completed += 1
 
     elapsed = time.time() - overall_start
-    print("\n\n" + "=" * 80)
-    print(" ★ データベース更新完了 ★")
-    print("=" * 80 + "\n")
-    print(f"全ステップ完了: {completed}/{len(steps)}")
-    print(f"総処理時間: {elapsed:.1f} 秒\n")
-    print("更新された主なデータ:")
+    log("\n\n" + "=" * 80)
+    log(" ★ データベース更新完了 ★")
+    log("=" * 80 + "\n")
+    log(f"全ステップ完了: {completed}/{len(steps)}")
+    log(f"総処理時間: {elapsed:.1f} 秒\n")
+    log("更新された主なデータ:")
     if mode == "1":
-        print(f"  {INDEX_HTML_DIR}")
-    print(f"  {os.path.join(PARSED_INDEX_DIR, 'pages_master.csv')}")
-    print(f"  {LEVEL_LIST_DIR}\n")
-    show_database_status()
-    print("\n" + "=" * 80)
+        log(f"  {INDEX_HTML_DIR}")
+    log(f"  {os.path.join(PARSED_INDEX_DIR, 'pages_master.csv')}")
+    log(f"  {LEVEL_LIST_DIR}\n")
+    show_database_status(log=log)
+    log("\n" + "=" * 80)
+    if context:
+        context.progress(len(steps), len(steps), "完了")
     return True
 
 

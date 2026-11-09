@@ -2,7 +2,7 @@
 
 Backrooms日本語版Fandom Wikiを閲覧するためのPython製デスクトップアプリです。ローカルWikiデータを使ったLevel検索・閲覧、Fandomの埋め込み閲覧・保存、Groq APIを使った出典付きAIチャットを提供します。
 
-> **開発状況:** GitHub Releasesでのexe配布はありません。ソースから `build_release.bat` を実行すると、GUI版とCLI版のexeを個別にビルドできます。
+> **配布:** Windows向けGUI版・CLI版は[GitHub Releases](https://github.com/Suigetsu-Lium/BrNavi-FandomJP-GUI/releases/latest)からダウンロードできます。ソースから `build_release.bat` を実行して個別にビルドすることもできます。
 
 ## 目次
 
@@ -57,7 +57,7 @@ AIを使用するには `GROQ_API_KEY` 環境変数が必要です。APIキー�
 
 ### GUIアプリ（Windows）
 
-現時点でGUI版exeは配布していません。[リポジトリのソースZIP](https://github.com/Suigetsu-Lium/BrNavi-FandomJP-GUI/archive/refs/heads/main.zip)をダウンロードして展開し、Python 3.10以降をインストールしてください。展開したフォルダーでPowerShellを開き、以下を実行します。
+GitHub ReleasesからGUI版のZIPをダウンロード・展開して `BrNavi-GUI.exe` を起動します。CLIを使う場合は `BrNavi-CLI.exe` を起動してください。各ZIPはonedir形式のため、exeだけでなくZIP内のファイル一式が必要です。ソースから実行する場合は、[リポジトリのソースZIP](https://github.com/Suigetsu-Lium/BrNavi-FandomJP-GUI/archive/refs/heads/main.zip)を展開し、Python 3.10以降をインストールして次を実行します。
 
 ```powershell
 python -m venv .venv
@@ -102,7 +102,7 @@ Level検索・情報表示・ルート検索・ローカルデータ閲覧、HTM
 | GUI | `dist\BrNavi-GUI\BrNavi-GUI\BrNavi-GUI.exe` |
 | CLI | `dist\BrNavi-CLI\BrNavi-CLI\BrNavi-CLI.exe` |
 
-onedir形式ではexeだけでなく同じ出力フォルダー内のDLL・Python依存ファイルも必要です。配布時は各 `BrNavi-GUI` / `BrNavi-CLI` フォルダーを丸ごと渡してください。ビルド時に存在するローカルWikiデータも各出力へコピーし、不足データ用の空フォルダーを作成します。会話履歴などの `database\ai` はコピーせず、配布先で新規作成されます。出力先は書き込み可能な場所に置いてください。
+onedir形式ではexeだけでなく同じ出力フォルダー内のDLL・Python依存ファイルも必要です。配布時は各 `BrNavi-GUI` / `BrNavi-CLI` フォルダーを丸ごと渡してください。ビルド時に存在するローカルWikiデータも各出力へコピーし、不足データ用の空フォルダーを作成します。会話履歴などの `database\ai` はコピーせず、配布先で新規作成されます。README、アーキテクチャ資料、ライセンスも配布フォルダーに含まれます。出力先は書き込み可能な場所に置いてください。
 
 GUI版はpywebviewをWindows Edge Chromiumバックエンドで起動します。WebView2 Runtimeはexeに含まれないため、配布先Windowsにも必要です。APIキーは同梱せず、利用者の `GROQ_API_KEY` 環境変数から読み込みます。
 

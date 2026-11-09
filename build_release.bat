@@ -43,6 +43,10 @@ for %%T in ("dist\BrNavi-GUI\BrNavi-GUI" "dist\BrNavi-CLI\BrNavi-CLI") do (
     if errorlevel 1 goto staging_failed
     copy /y "LICENSE" "%%~T\LICENSE" > nul
     if errorlevel 1 goto staging_failed
+    if not exist "%%~T\docs" mkdir "%%~T\docs"
+    if errorlevel 1 goto staging_failed
+    copy /y "docs\architecture.md" "%%~T\docs\architecture.md" > nul
+    if errorlevel 1 goto staging_failed
 )
 
 echo.

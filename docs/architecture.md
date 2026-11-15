@@ -83,7 +83,7 @@ Wikiタブの現在URLは、HTTPSの日本語版記事名前空間（`/ja/wiki/<
 
 `modules/runtime_paths.py` の `get_application_dir()` は、ソース実行ではリポジトリルート、PyInstaller実行ではexeの配置フォルダーをアプリケーションデータルートとして返します。アプリから読み書きする相対データはこのルートを基準にし、現在の作業ディレクトリに依存させません。
 
-配布ビルドはGUIとCLIそれぞれのonedirフォルダーに、実行時に必要となるデータ保存先だけを空で作成します。Wiki記事本文・画像・抽出済み本文・索引・生成CSV・会話DB・APIキーなど、ビルド元にある利用者データは配布物へコピーしません。利用者は必要な記事をアプリ内の機能からオンデマンドで取得します。必要な階層だけをローカルに蓄積することで配布容量を抑え、MIT Licenseのソースコードと、外部Wikiコンテンツに適用されるライセンスの境界を分離します。アプリケーションフォルダーには書き込み権限が必要です。書き込み不可のProgram Files等へのインストールは現在サポートしていません。
+配布ビルドはGUIのonedirフォルダーに、実行時に必要となるデータ保存先だけを空で作成します。Wiki記事本文・画像・抽出済み本文・索引・生成CSV・会話DB・APIキーなど、ビルド元にある利用者データは配布物へコピーしません。利用者は必要な記事をアプリ内の機能からオンデマンドで取得します。必要な階層だけをローカルに蓄積することで配布容量を抑え、MIT Licenseのソースコードと、外部Wikiコンテンツに適用されるライセンスの境界を分離します。アプリケーションフォルダーには書き込み権限が必要です。書き込み不可のProgram Files等へのインストールは現在サポートしていません。
 
 日本語版 Backrooms Wiki の文章は、個別の表示がない限り原則 CC BY-SA 3.0 です。画像・ページごとに別条件や第三者コンテンツが含まれる可能性があるため、保存・再利用時は元ページと個別ファイルの権利表示を確認し、再配布では適用ライセンスに従って著作者・元URL・ライセンスを示します。Wiki取得処理にはリクエスト間隔を設け、短時間の過度な一括取得を避けます。本アプリは個人開発の非公式ツールであり、Fandom, Inc.またはWiki運営とは関係ありません。Groq等の外部APIキーは利用者のローカル環境変数から読み込み、ソース・配布物・Git管理対象には含めません。
 
@@ -273,4 +273,4 @@ python -m unittest discover -s tests -v
 - `tests/test_ai_groq_client.py`, `tests/test_ai_assistant.py`, `tests/test_ai_markdown_renderer.py`, `tests/test_ai_gui_bridge.py`：Groq通信、回答生成、Markdown表示、GUI連携
 - `tests/test_runtime_paths.py`：ソース実行と凍結実行ファイルのアプリケーションルート
 
-配布ビルドはWindows上で `build_release.bat` を実行します。GUI・CLIをそれぞれPyInstallerのonedir形式でビルドします。生成物を起動確認する際は、CLIメニューの正常終了とGUIウィンドウの起動を確認します。GUIの実行には配布先のWebView2 Runtimeが必要です。
+配布ビルドはWindows上で `build_release.bat` を実行します。`gui_app.py` のみをPyInstallerのonedir形式でビルドし、CLI版EXEは生成しません。生成物はGUIウィンドウの起動を確認します。GUIの実行には配布先のWebView2 Runtimeが必要です。

@@ -56,6 +56,7 @@ index_html/ 内に保存されたFandom JPの各種一覧HTMLを解析し、
 import csv
 import os
 import re
+import sys
 
 from urllib.parse import (
     urljoin,
@@ -65,6 +66,31 @@ from urllib.parse import (
 
 from bs4 import BeautifulSoup
 from modules.runtime_paths import get_application_dir
+
+
+# =============================================================================
+# コンソール出力の文字コード対策
+# =============================================================================
+
+def _configure_console_output():
+    """
+    Windows の CP932 で表現できない Wiki タイトルが出力されても、
+    一覧解析全体が UnicodeEncodeError で停止しないようにする。
+    表示できない文字は Unicode エスケープ形式で出力する。
+    """
+
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+
+        if callable(reconfigure):
+            try:
+                reconfigure(errors="backslashreplace")
+            except (OSError, ValueError):
+                # GUI 側で差し替えられたストリームなどは変更できない場合がある。
+                pass
+
+
+_configure_console_output()
 
 
 # =============================================================================

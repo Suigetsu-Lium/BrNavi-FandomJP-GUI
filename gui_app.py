@@ -231,6 +231,7 @@ class BackroomsAPI:
             "repository": "https://github.com/Suigetsu-Lium/BrNavi-FandomJP-GUI",
             "releases": "https://github.com/Suigetsu-Lium/BrNavi-FandomJP-GUI/releases",
             "license": "https://github.com/Suigetsu-Lium/BrNavi-FandomJP-GUI/blob/main/LICENSE",
+            "cc_by_sa": "https://creativecommons.org/licenses/by-sa/3.0/deed.ja",
             "third_party": (
                 "https://github.com/Suigetsu-Lium/BrNavi-FandomJP-GUI/"
                 "blob/main/THIRD_PARTY_NOTICES.md"
@@ -1439,6 +1440,8 @@ HTML_TEMPLATE = r"""
     body[data-theme="dark"] .online-wiki-content th, body[data-theme="dark"] .online-wiki-content td,
     body[data-theme="dark"] .ai-answer-content th, body[data-theme="dark"] .ai-answer-content td { border-color: #4d4637; }
 
+    .print-attribution { display: none; }
+
     /* Level図鑑の記事印刷 */
     @media print {
       @page {
@@ -1569,6 +1572,23 @@ HTML_TEMPLATE = r"""
         break-inside: avoid;
       }
 
+      #print-attribution {
+        display: block !important;
+        visibility: visible !important;
+        margin-top: 12mm !important;
+        padding-top: 3mm !important;
+        border-top: 0.25mm solid #888 !important;
+        color: #333 !important;
+        font-size: 8pt !important;
+        line-height: 1.5 !important;
+        break-inside: avoid !important;
+      }
+      #print-attribution a {
+        color: #222 !important;
+        text-decoration: underline !important;
+        overflow-wrap: anywhere !important;
+      }
+
       #wiki-page-container,
       #wiki-page-container * {
         -webkit-print-color-adjust: exact;
@@ -1623,11 +1643,12 @@ HTML_TEMPLATE = r"""
         </dl>
         <section class="border-t border-[#d3c29a] pt-3">
           <h3 class="font-semibold mb-2">リンク・ライセンス</h3>
-          <p class="text-xs text-gray-600 mb-2">個人開発の非公式ツールです。Fandom, Inc.およびBackrooms Wiki運営とは関係ありません。Wikiコンテンツは各ページ・画像のライセンスに従います。</p>
+          <p class="text-xs text-gray-600 mb-2">個人開発の非公式ツールです。Fandom, Inc.およびBackrooms Wiki運営とは関係ありません。Wiki記事の文章は原則CC BY-SA 3.0ですが、個別ページ・画像には異なる条件や第三者素材が含まれる場合があります。</p>
           <div class="flex flex-wrap gap-2">
             <button onclick="openAboutLink('repository')" class="px-3 py-1 rounded border border-[#d3c29a] bg-white hover:bg-[#f2e8c5] text-xs">GitHubリポジトリ</button>
             <button onclick="openAboutLink('releases')" class="px-3 py-1 rounded border border-[#d3c29a] bg-white hover:bg-[#f2e8c5] text-xs">更新情報</button>
             <button onclick="openAboutLink('license')" class="px-3 py-1 rounded border border-[#d3c29a] bg-white hover:bg-[#f2e8c5] text-xs">MIT License</button>
+            <button onclick="openAboutLink('cc_by_sa')" class="px-3 py-1 rounded border border-[#d3c29a] bg-white hover:bg-[#f2e8c5] text-xs">CC BY-SA 3.0</button>
             <button onclick="openAboutLink('third_party')" class="px-3 py-1 rounded border border-[#d3c29a] bg-white hover:bg-[#f2e8c5] text-xs">第三者ライセンス</button>
           </div>
         </section>
@@ -1795,6 +1816,13 @@ HTML_TEMPLATE = r"""
             </div>
 
           </div>
+          <footer id="print-attribution" class="text-xs text-gray-600">
+            <p class="font-semibold mb-1">出典・ライセンス情報</p>
+            <p>出典：<a id="print-source-link" class="break-all underline" target="_blank" rel="noopener noreferrer"></a></p>
+            <p>記事本文のライセンス（原則）：<a href="https://creativecommons.org/licenses/by-sa/3.0/deed.ja">クリエイティブ・コモンズ 表示-継承 3.0（CC BY-SA 3.0）</a></p>
+            <p>個別ページ・画像・第三者素材には異なるライセンス条件が適用される場合があります。各素材の権利表示も確認してください。</p>
+            <p class="mt-1">BrNavi Fandom JP は個人開発の非公式ツールです。Fandom, Inc.およびBackrooms Wiki運営とは関係ありません。</p>
+          </footer>
         </div>
         </div>
         <section id="explorer-gallery-view" class="hidden mx-auto max-w-6xl">
@@ -3006,6 +3034,20 @@ HTML_TEMPLATE = r"""
 
       document.getElementById('view-level-id').innerText = d.level_id;
       document.getElementById('view-meta-title').innerText = d.title && d.title !== d.level_id ? `"${d.title}"` : "";
+      const printSourceLink = document.getElementById('print-source-link');
+      printSourceLink.removeAttribute('href');
+      printSourceLink.textContent = '';
+      printSourceLink.classList.add('hidden');
+      try {
+        const sourceUrl = new URL(String(d.url || ''));
+        if (sourceUrl.protocol === 'https:' || sourceUrl.protocol === 'http:') {
+          printSourceLink.href = sourceUrl.href;
+          printSourceLink.textContent = sourceUrl.href;
+          printSourceLink.classList.remove('hidden');
+        }
+      } catch (_) {
+        // 元記事URLがない場合は出典リンクを表示しない。
+      }
       document.getElementById('view-category').innerText = d.category;
       document.getElementById('view-danger-tag').innerText = d.danger;
       document.getElementById('view-danger-tag').className = dangerBadgeClass(d.danger);

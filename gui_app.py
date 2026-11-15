@@ -1501,8 +1501,43 @@ HTML_TEMPLATE = r"""
       }
 
       .print-exclude,
-      #explorer-unsaved-actions {
+      #explorer-unsaved-actions,
+      #print-options-panel {
         display: none !important;
+      }
+
+      /* ホチキス位置マーカー。fixed要素はChromium印刷で各ページに繰り返す */
+      #print-staple-markers {
+        display: none;
+      }
+      body[data-print-staple="true"] #print-staple-markers {
+        display: block !important;
+        visibility: visible !important;
+        position: fixed !important;
+        inset: 0 !important;
+        z-index: 99999 !important;
+        pointer-events: none !important;
+      }
+      #print-staple-markers .staple-mark {
+        position: absolute !important;
+        display: block !important;
+        width: 5mm !important;
+        height: 0 !important;
+        border-top: 0.25mm solid #111 !important;
+      }
+      body[data-staple-edge="left"] #print-staple-markers .staple-mark:nth-child(1) {
+        left: 1mm !important; top: 25% !important;
+      }
+      body[data-staple-edge="left"] #print-staple-markers .staple-mark:nth-child(2) {
+        left: 1mm !important; top: 75% !important;
+      }
+      body[data-staple-edge="top"] #print-staple-markers .staple-mark:nth-child(1) {
+        top: 1mm !important; left: 30% !important;
+        transform: rotate(90deg) !important; transform-origin: left center !important;
+      }
+      body[data-staple-edge="top"] #print-staple-markers .staple-mark:nth-child(2) {
+        top: 1mm !important; left: 70% !important;
+        transform: rotate(90deg) !important; transform-origin: left center !important;
       }
 
       #wiki-page-container .sticky {
@@ -1690,7 +1725,26 @@ HTML_TEMPLATE = r"""
             <div class="print-exclude flex space-x-2 select-none">
               <button onclick="openCurrentFandomInApp()" class="px-2.5 py-1 text-xs bg-[#f4e7b8] hover:bg-[#e8d89f] text-[#784f00] rounded font-medium border border-[#d9c78d]">🌐 内蔵ブラウザーでFandomを開く</button>
               <button onclick="pywebview.api.open_local_browser_html()" class="px-2.5 py-1 text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 rounded font-medium border border-gray-300">📄 ローカルHTML</button>
-              <button type="button" onclick="printLevelArticle()" class="px-2.5 py-1 text-xs bg-[#e8e0c8] hover:bg-[#d9cfb0] text-gray-800 rounded font-medium border border-[#cfc3a0]">🖨 印刷</button>
+              <button type="button" onclick="togglePrintOptions()" class="px-2.5 py-1 text-xs bg-[#e8e0c8] hover:bg-[#d9cfb0] text-gray-800 rounded font-medium border border-[#cfc3a0]">🖨 印刷</button>
+            </div>
+          </div>
+
+          <div id="print-options-panel" class="print-exclude hidden mb-5 rounded border border-[#d6c79a] bg-[#fffaf0] p-3 text-sm">
+            <div class="mb-2 font-semibold text-gray-800">印刷オプション</div>
+            <label class="flex items-center gap-2 mb-3">
+              <input id="print-staple-enabled" type="checkbox" checked class="accent-amber-700">
+              <span>ホチキス位置マーカーを印字する</span>
+            </label>
+            <label class="flex items-center gap-2 mb-3">
+              <span class="shrink-0">マーカー位置</span>
+              <select id="print-staple-edge" class="rounded border border-gray-300 px-2 py-1 text-sm">
+                <option value="left">左側（A4縦・長辺綴じ）</option>
+                <option value="top">上側（A4横・長辺綴じ）</option>
+              </select>
+            </label>
+            <div class="flex gap-2">
+              <button type="button" onclick="printLevelArticle()" class="rounded bg-[#91520f] px-3 py-1.5 text-xs font-semibold text-white">印刷ダイアログを開く</button>
+              <button type="button" onclick="togglePrintOptions(false)" class="rounded border border-gray-300 px-3 py-1.5 text-xs">閉じる</button>
             </div>
           </div>
 
@@ -1700,6 +1754,7 @@ HTML_TEMPLATE = r"""
           </div>
 
           <!-- 本文 ＆ Infobox -->
+          <div id="print-staple-markers" aria-hidden="true"><span class="staple-mark"></span><span class="staple-mark"></span></div>
           <div class="flex space-x-6 items-start">
 
             <!-- 🌟 Wiki Infobox (右側情報カード) -->
@@ -2920,7 +2975,15 @@ HTML_TEMPLATE = r"""
       return html;
     }
 
-    // レベル詳細の描画
+    // 印刷オプションの表示切り替え
+    function togglePrintOptions(forceState) {
+      const panel = document.getElementById('print-options-panel');
+      if (!panel) return;
+      const shouldShow = typeof forceState === 'boolean' ? forceState : panel.classList.contains('hidden');
+      panel.classList.toggle('hidden', !shouldShow);
+    }
+
+    // レベル詳細の印刷
     function printLevelArticle() {
       const article = document.getElementById('wiki-page-container');
 
@@ -2929,6 +2992,11 @@ HTML_TEMPLATE = r"""
         return;
       }
 
+      const enabled = document.getElementById('print-staple-enabled')?.checked ?? false;
+      const edge = document.getElementById('print-staple-edge')?.value || 'left';
+      document.body.dataset.printStaple = enabled ? 'true' : 'false';
+      document.body.dataset.stapleEdge = edge;
+      togglePrintOptions(false);
       window.print();
     }
 

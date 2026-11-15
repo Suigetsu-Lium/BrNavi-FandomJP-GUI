@@ -1438,6 +1438,108 @@ HTML_TEMPLATE = r"""
     body[data-theme="dark"] .online-wiki-content th, body[data-theme="dark"] .ai-answer-content th { background: #332e24; }
     body[data-theme="dark"] .online-wiki-content th, body[data-theme="dark"] .online-wiki-content td,
     body[data-theme="dark"] .ai-answer-content th, body[data-theme="dark"] .ai-answer-content td { border-color: #4d4637; }
+
+    /* Level図鑑の記事印刷 */
+    @media print {
+      @page {
+        size: A4 portrait;
+        margin: 12mm;
+      }
+
+      html,
+      body {
+        width: auto !important;
+        height: auto !important;
+        min-height: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        overflow: visible !important;
+        background: #ffffff !important;
+      }
+
+      body * {
+        visibility: hidden !important;
+      }
+
+      /* スクロール領域による印刷時の切り抜きを防ぐ */
+      body > main,
+      #view-explorer,
+      #view-explorer > section,
+      #explorer-article-view {
+        display: block !important;
+        width: auto !important;
+        height: auto !important;
+        max-height: none !important;
+        overflow: visible !important;
+        padding: 0 !important;
+        margin: 0 !important;
+      }
+
+      #view-explorer > aside {
+        display: none !important;
+      }
+
+      #wiki-page-container,
+      #wiki-page-container * {
+        visibility: visible !important;
+      }
+
+      #wiki-page-container {
+        display: block !important;
+        position: absolute !important;
+        left: 0 !important;
+        top: 0 !important;
+        width: 100% !important;
+        max-width: none !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        border: none !important;
+        border-radius: 0 !important;
+        box-shadow: none !important;
+        background: #ffffff !important;
+        color: #202124 !important;
+      }
+
+      .print-exclude,
+      #explorer-unsaved-actions {
+        display: none !important;
+      }
+
+      #wiki-page-container .sticky {
+        position: static !important;
+      }
+
+      /* Infoboxを右上に固定し、本文を下側で全幅に回り込ませる */
+      #wiki-page-container > .flex.space-x-6 {
+        display: block !important;
+      }
+
+      #wiki-page-container .wiki-infobox {
+        float: right !important;
+        position: static !important;
+        width: 320px !important;
+        max-width: 48% !important;
+        margin: 0 0 12px 24px !important;
+        break-inside: avoid;
+      }
+
+      #wiki-page-container > .flex.space-x-6 > .flex-1 {
+        display: block !important;
+        width: auto !important;
+        min-width: 0 !important;
+      }
+
+      #wiki-page-container img {
+        max-width: 100% !important;
+        break-inside: avoid;
+      }
+
+      #wiki-page-container,
+      #wiki-page-container * {
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+      }
+    }
   </style>
 </head>
 <body class="flex flex-col h-screen overflow-hidden select-text">
@@ -1574,7 +1676,7 @@ HTML_TEMPLATE = r"""
         </div>
 
         <div id="wiki-page-container" class="hidden max-w-4xl mx-auto bg-white border border-[#e2d8b5] p-8 rounded shadow-sm relative">
-          <button type="button" onclick="showExplorerIndexHome()" class="mb-4 rounded px-2 py-1 text-xs font-semibold text-[#91520f] hover:bg-[#fff7dd]">‹ 階層の一覧へ戻る</button>
+          <button type="button" onclick="showExplorerIndexHome()" class="print-exclude mb-4 rounded px-2 py-1 text-xs font-semibold text-[#91520f] hover:bg-[#fff7dd]">‹ 階層の一覧へ戻る</button>
 
           <div class="text-xs text-[#8c6b12] mb-1 font-medium">
             分類: <span id="view-category">階層</span>、危険度: <span id="view-danger-tag">-</span>
@@ -1585,9 +1687,10 @@ HTML_TEMPLATE = r"""
               <h2 id="view-level-id" class="text-2xl font-bold text-[#202124]">Level 0 η</h2>
               <div id="view-meta-title" class="text-base font-semibold text-[#b45309] mt-0.5"></div>
             </div>
-            <div class="flex space-x-2 select-none">
+            <div class="print-exclude flex space-x-2 select-none">
               <button onclick="openCurrentFandomInApp()" class="px-2.5 py-1 text-xs bg-[#f4e7b8] hover:bg-[#e8d89f] text-[#784f00] rounded font-medium border border-[#d9c78d]">🌐 内蔵ブラウザーでFandomを開く</button>
               <button onclick="pywebview.api.open_local_browser_html()" class="px-2.5 py-1 text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 rounded font-medium border border-gray-300">📄 ローカルHTML</button>
+              <button type="button" onclick="printLevelArticle()" class="px-2.5 py-1 text-xs bg-[#e8e0c8] hover:bg-[#d9cfb0] text-gray-800 rounded font-medium border border-[#cfc3a0]">🖨 印刷</button>
             </div>
           </div>
 
@@ -1599,23 +1702,8 @@ HTML_TEMPLATE = r"""
           <!-- 本文 ＆ Infobox -->
           <div class="flex space-x-6 items-start">
 
-            <!-- 本文エリア (左) -->
-            <div class="flex-1 text-sm leading-relaxed text-gray-800">
-              <div id="view-article-content" class="space-y-3">
-                読み込み中...
-              </div>
-
-              <!-- 画像ギャラリー -->
-              <div id="gallery-container" class="mt-6 pt-4 border-t border-[#e2d8b5] hidden">
-                <div class="wiki-heading">
-                  <span>記録写真ギャラリー</span>
-                </div>
-                <div id="view-image-gallery" class="grid grid-cols-2 gap-4 pt-2"></div>
-              </div>
-            </div>
-
             <!-- 🌟 Wiki Infobox (右側情報カード) -->
-            <aside class="wiki-infobox rounded overflow-hidden select-none sticky top-0">
+            <aside class="wiki-infobox order-2 rounded overflow-hidden select-none sticky top-0">
               <div id="infobox-title" class="wiki-infobox-header">Level 0 η</div>
               
               <!-- 写真 -->
@@ -1635,6 +1723,21 @@ HTML_TEMPLATE = r"""
                 <tr><th>言語</th><td id="infobox-lang">-</td></tr>
               </table>
             </aside>
+
+            <!-- 本文エリア (左) -->
+            <div class="flex-1 order-1 text-sm leading-relaxed text-gray-800">
+              <div id="view-article-content" class="space-y-3">
+                読み込み中...
+              </div>
+
+              <!-- 画像ギャラリー -->
+              <div id="gallery-container" class="mt-6 pt-4 border-t border-[#e2d8b5] hidden">
+                <div class="wiki-heading">
+                  <span>記録写真ギャラリー</span>
+                </div>
+                <div id="view-image-gallery" class="grid grid-cols-2 gap-4 pt-2"></div>
+              </div>
+            </div>
 
           </div>
         </div>
@@ -2818,6 +2921,17 @@ HTML_TEMPLATE = r"""
     }
 
     // レベル詳細の描画
+    function printLevelArticle() {
+      const article = document.getElementById('wiki-page-container');
+
+      if (!article || article.classList.contains('hidden')) {
+        alert('印刷するLevel記事を開いてください。');
+        return;
+      }
+
+      window.print();
+    }
+
     async function loadLevelDetail(levelId) {
       const d = await pywebview.api.get_level_detail(levelId);
       explorerImages = d.images || [];

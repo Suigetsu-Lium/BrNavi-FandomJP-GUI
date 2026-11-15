@@ -98,9 +98,9 @@ def list_local_images(image_dir):
         if not path.is_file() or path.suffix.casefold() not in IMAGE_SUFFIXES:
             continue
         stem = path.stem
-        match = re.match(r"(Level[_\s]+-?\d+(?:\.\d+)?(?:[_\s]+η)?(?:[_\s]+\([^)]*\))?)", stem, re.I)
-        level = re.sub(r"[_\s]+", " ", match.group(1)).replace("( ", "(").strip() if match else ""
-        level = re.sub(r"\s+η", " η", level)
+        match = re.match(r"(Level[_\\s]+-?\\d+(?:\\.\\d+)?(?:[_\\s]+η)?(?:[_\\s]+\\([^)]*\\))?)", stem, re.I)
+        level = re.sub(r"[_\\s]+", " ", match.group(1)).replace("( ", "(").strip() if match else ""
+        level = re.sub(r"\\s+η", " η", level)
         items.append({"name": path.name, "path": str(path), "level_id": level, "bytes": _safe_size(path)})
     return items
 
@@ -113,9 +113,9 @@ def local_saved_level_list(candidates):
         if not isinstance(item, dict) or not item.get("saved"):
             continue
         title = str(item.get("title") or "").strip()
-        if not re.match(r"^(?:Level|レベル)\s+-?\d", title, re.IGNORECASE):
+        if not re.match(r"^(?:Level|レベル)\\s+-?\\d", title, re.IGNORECASE):
             continue
-        key = re.sub(r"[_\s]+", " ", title).casefold()
+        key = re.sub(r"[_\\s]+", " ", title).casefold()
         if key not in seen:
             unique.append(dict(item))
             seen.add(key)
@@ -154,8 +154,18 @@ def get_network_kind():
             pass
         if sys.platform == "win32":
             try:
-                result = subprocess.run(["netsh", "wlan", "show", "interfaces"], capture_output=True,
-                                        text=True, encoding="utf-8", errors="replace", timeout=2, check=False)
+                # The GUI refreshes this status periodically. Suppress the child
+                # console so netsh does not flash a terminal on every refresh.
+                result = subprocess.run(
+                    ["netsh", "wlan", "show", "interfaces"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=2,
+                    check=False,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
                 output = (result.stdout or "").casefold()
                 connected = "connected" in output or "接続済み" in output
                 has_ssid = "ssid" in output

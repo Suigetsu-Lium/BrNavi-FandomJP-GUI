@@ -42,6 +42,16 @@ class AboutDialogApiTests(unittest.TestCase):
             new=2,
         )
 
+    @patch("gui_app.webbrowser.open", return_value=True)
+    def test_about_cc_by_sa_link_opens_japanese_license_page(self, open_browser):
+        result = self.api.open_about_link("cc_by_sa")
+
+        self.assertEqual(result, {"opened": True})
+        open_browser.assert_called_once_with(
+            "https://creativecommons.org/licenses/by-sa/3.0/deed.ja",
+            new=2,
+        )
+
     @patch("gui_app.webbrowser.open")
     def test_about_api_rejects_unlisted_urls(self, open_browser):
         result = self.api.open_about_link("https://example.com")

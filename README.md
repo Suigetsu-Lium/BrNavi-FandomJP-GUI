@@ -2,7 +2,7 @@
 
 Backrooms日本語版Fandom Wikiを閲覧するためのPython製デスクトップアプリです。ローカルWikiデータを使ったLevel検索・閲覧、Fandomの埋め込み閲覧・保存、Groq APIを使った出典付きAIチャットを提供します。
 
-> **配布:** Windows向けGUI版・CLI版は[GitHub Releases](https://github.com/Suigetsu-Lium/BrNavi-FandomJP-GUI/releases/latest)からダウンロードできます。ソースから `build_release.bat` を実行して個別にビルドすることもできます。
+> **配布:** Windows向けGUI版は[GitHub Releases](https://github.com/Suigetsu-Lium/BrNavi-FandomJP-GUI/releases/latest)からダウンロードできます。CLI版はソースコードからPythonで実行できます。
 
 アプリのバージョンはGUIの上部とウィンドウタイトル、CLIの起動画面に表示されます。GUIの「アプリ情報」から現在のLLM設定、GitHub、更新情報、MIT License、第三者ライセンス情報にもアクセスできます。
 
@@ -107,7 +107,7 @@ Wikiへのアクセスではリクエスト間隔を設けています。サー�
 
 ### GUIアプリ（Windows）
 
-GitHub ReleasesからGUI版のZIPをダウンロード・展開して `BrNavi-GUI.exe` を起動します。CLIを使う場合は `BrNavi-CLI.exe` を起動してください。各ZIPはonedir形式のため、exeだけでなくZIP内のファイル一式が必要です。ソースから実行する場合は、[リポジトリのソースZIP](https://github.com/Suigetsu-Lium/BrNavi-FandomJP-GUI/archive/refs/heads/main.zip)を展開し、Python 3.10以降をインストールして次を実行します。
+GitHub ReleasesからGUI版のZIPをダウンロード・展開して `BrNavi-GUI.exe` を起動します。CLI版は配布EXEに含めず、必要な場合は後述のコンソールアプリの手順でPythonから実行します。GUI版のZIPはonedir形式のため、exeだけでなくZIP内のファイル一式が必要です。ソースから実行する場合は、[リポジトリのソースZIP](https://github.com/Suigetsu-Lium/BrNavi-FandomJP-GUI/archive/refs/heads/main.zip)を展開し、Python 3.10以降をインストールして次を実行します。
 
 ```powershell
 python -m venv .venv
@@ -145,14 +145,13 @@ Level検索・情報表示・ルート検索・ローカルデータ閲覧、HTM
 .\build_release.bat
 ```
 
-`.venv` がある場合はそのPythonを使い、なければ `python` を使います。ビルド結果は次の2つのonedirフォルダーに分かれます。
+`.venv` がある場合はそのPythonを使い、なければ `python` を使います。ビルド対象はGUIアプリ（`gui_app.py`）のみです。CLI版のEXEは生成しません。
 
 | 種類 | 実行ファイル |
 | --- | --- |
 | GUI | `dist\BrNavi-GUI\BrNavi-GUI\BrNavi-GUI.exe` |
-| CLI | `dist\BrNavi-CLI\BrNavi-CLI\BrNavi-CLI.exe` |
 
-onedir形式ではexeだけでなく同じ出力フォルダー内のDLL・Python依存ファイルも必要です。配布時は各 `BrNavi-GUI` / `BrNavi-CLI` フォルダーを丸ごと渡してください。取得済みWiki記事・画像、生成済みCSVや利用者データは配布物へコピーせず、実行時に必要な空の保存先だけを作成します。README、アーキテクチャ資料、MIT License、第三者ライセンス一覧、バージョン情報も配布フォルダーに含まれます。出力先は書き込み可能な場所に置いてください。
+onedir形式ではexeだけでなく同じ出力フォルダー内のDLL・Python依存ファイルも必要です。配布時は `dist\BrNavi-GUI\BrNavi-GUI` フォルダー全体を渡してください。取得済みWiki記事・画像、生成済みCSVや利用者データは配布物へコピーせず、実行時に必要な空の保存先だけを作成します。README、アーキテクチャ資料、MIT License、第三者ライセンス一覧、バージョン情報も配布フォルダーに含まれます。出力先は書き込み可能な場所に置いてください。
 
 GUI版はpywebviewをWindows Edge Chromiumバックエンドで起動します。WebView2 Runtimeはexeに含まれないため、配布先Windowsにも必要です。APIキーは同梱せず、利用者の `GROQ_API_KEY` 環境変数から読み込みます。
 

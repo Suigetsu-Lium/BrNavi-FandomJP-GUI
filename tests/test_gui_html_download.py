@@ -479,5 +479,27 @@ class OnlineWikiGuiTests(unittest.TestCase):
         self.assertFalse(self.api._maintenance_lock.locked())
 
 
+class PrintAttributionMarkupTests(unittest.TestCase):
+    def test_about_dialog_exposes_cc_by_sa_license_link(self):
+        self.assertIn("openAboutLink('cc_by_sa')", gui_app.HTML_TEMPLATE)
+        self.assertIn("CC BY-SA 3.0", gui_app.HTML_TEMPLATE)
+
+    def test_print_footer_contains_source_and_license_information(self):
+        self.assertIn('id="print-attribution"', gui_app.HTML_TEMPLATE)
+        self.assertIn('id="print-source-link"', gui_app.HTML_TEMPLATE)
+        self.assertIn(
+            "https://creativecommons.org/licenses/by-sa/3.0/deed.ja",
+            gui_app.HTML_TEMPLATE,
+        )
+        self.assertIn("#print-attribution {", gui_app.HTML_TEMPLATE)
+
+    def test_print_source_url_is_validated_before_display(self):
+        self.assertIn("new URL(String(d.url || ''))", gui_app.HTML_TEMPLATE)
+        self.assertIn(
+            "sourceUrl.protocol === 'https:' || sourceUrl.protocol === 'http:'",
+            gui_app.HTML_TEMPLATE,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

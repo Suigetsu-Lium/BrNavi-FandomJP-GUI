@@ -154,8 +154,18 @@ def get_network_kind():
             pass
         if sys.platform == "win32":
             try:
-                result = subprocess.run(["netsh", "wlan", "show", "interfaces"], capture_output=True,
-                                        text=True, encoding="utf-8", errors="replace", timeout=2, check=False)
+                # The GUI refreshes this status periodically. Suppress the child
+                # console so netsh does not flash a terminal on every refresh.
+                result = subprocess.run(
+                    ["netsh", "wlan", "show", "interfaces"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=2,
+                    check=False,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
                 output = (result.stdout or "").casefold()
                 connected = "connected" in output or "接続済み" in output
                 has_ssid = "ssid" in output

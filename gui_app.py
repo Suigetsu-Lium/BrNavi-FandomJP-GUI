@@ -1503,6 +1503,22 @@ HTML_TEMPLATE = r"""
         color: #202124 !important;
       }
 
+      /*
+       * 綴じ代の安全領域。
+       * マーカーを有効にした場合、記事内の見出し・本文・Infobox・
+       * 出典欄を同じ基準で内側へ寄せ、固定マーカーとの重なりを防ぐ。
+       * マーカー無効時は従来どおり余白を追加しない。
+       */
+      #wiki-page-container {
+        box-sizing: border-box !important;
+      }
+      body[data-print-staple="true"][data-staple-edge="left"] #wiki-page-container {
+        padding-left: 8mm !important;
+      }
+      body[data-print-staple="true"][data-staple-edge="top"] #wiki-page-container {
+        padding-top: 8mm !important;
+      }
+
       .print-exclude,
       #explorer-unsaved-actions,
       #print-options-panel {

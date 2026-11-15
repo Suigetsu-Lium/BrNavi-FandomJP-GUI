@@ -500,6 +500,20 @@ class PrintAttributionMarkupTests(unittest.TestCase):
             gui_app.HTML_TEMPLATE,
         )
 
+    def test_print_staple_markers_reserve_a_shared_safe_area(self):
+        self.assertIn(
+            'body[data-print-staple="true"][data-staple-edge="left"] #wiki-page-container',
+            gui_app.HTML_TEMPLATE,
+        )
+        self.assertIn(
+            'body[data-print-staple="true"][data-staple-edge="top"] #wiki-page-container',
+            gui_app.HTML_TEMPLATE,
+        )
+        self.assertIn("padding-left: 8mm !important;", gui_app.HTML_TEMPLATE)
+        self.assertIn("padding-top: 8mm !important;", gui_app.HTML_TEMPLATE)
+        self.assertIn("box-sizing: border-box !important;", gui_app.HTML_TEMPLATE)
+        self.assertIn('id="print-attribution"', gui_app.HTML_TEMPLATE)
+
 
 if __name__ == "__main__":
     unittest.main()

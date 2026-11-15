@@ -1818,7 +1818,8 @@ HTML_TEMPLATE = r"""
           </div>
           <footer id="print-attribution" class="text-xs text-gray-600">
             <p class="font-semibold mb-1">出典・ライセンス情報</p>
-            <p>出典：<a id="print-source-link" class="break-all underline" target="_blank" rel="noopener noreferrer"></a></p>
+            <p>出典記事：<span id="print-source-title"></span></p>
+            <p>元記事URL：<a id="print-source-link" class="break-all underline" target="_blank" rel="noopener noreferrer"></a></p>
             <p>記事本文のライセンス（原則）：<a href="https://creativecommons.org/licenses/by-sa/3.0/deed.ja">クリエイティブ・コモンズ 表示-継承 3.0（CC BY-SA 3.0）</a></p>
             <p>個別ページ・画像・第三者素材には異なるライセンス条件が適用される場合があります。各素材の権利表示も確認してください。</p>
             <p class="mt-1">BrNavi Fandom JP は個人開発の非公式ツールです。Fandom, Inc.およびBackrooms Wiki運営とは関係ありません。</p>
@@ -3034,6 +3035,7 @@ HTML_TEMPLATE = r"""
 
       document.getElementById('view-level-id').innerText = d.level_id;
       document.getElementById('view-meta-title').innerText = d.title && d.title !== d.level_id ? `"${d.title}"` : "";
+      document.getElementById('print-source-title').textContent = d.level_id || '';
       const printSourceLink = document.getElementById('print-source-link');
       printSourceLink.removeAttribute('href');
       printSourceLink.textContent = '';

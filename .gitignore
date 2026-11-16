@@ -179,6 +179,7 @@ venv.bak/
 /secrets/
 *.secret
 *.key
+*.pem
 
 # Spyder project settings
 .spyderproject

@@ -18,6 +18,7 @@ from .manifest import (
     _RESERVED_ROOTS,
     normalize_version,
     sha256_bytes,
+    is_protected_data_file,
 )
 from .signatures import sign_manifest
 
@@ -68,7 +69,8 @@ def _iter_release_files(root: Path) -> dict[str, Path]:
             pure = PurePosixPath(relative)
             if pure.parts[0].casefold() in {name.casefold() for name in EXCLUDED_ROOTS}:
                 continue
-            if relative.casefold() in {name.casefold() for name in EXCLUDED_FILES}:
+            if (relative.casefold() in {name.casefold() for name in EXCLUDED_FILES}
+                    or is_protected_data_file(relative)):
                 continue
             if path.is_symlink() or _is_reparse_point(path):
                 raise PatchBuildError(f"Release contains a symlink/junction: {relative}")

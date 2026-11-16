@@ -6,9 +6,16 @@ from pathlib import PurePosixPath
 from typing import Any
 
 PATCH_FORMAT = 1
+MAX_MANIFEST_BYTES = 1024 * 1024
+MAX_FILE_BYTES = 512 * 1024 * 1024
+MAX_TOTAL_PAYLOAD_BYTES = 1024 * 1024 * 1024
 _VERSION_RE = re.compile(r"^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:[-+][0-9A-Za-z.-]+)?$")
 _RESERVED_ROOTS = {"database", "downloaded_fandom_html", "extracted_fandom_levels",
-    "downloaded_images", "index_html", "parsed_index", "level_lists", "update_backups", "user_data"}
+    "downloaded_images", "index_html", "parsed_index", "level_lists", "update_backups", "user_data",
+    "config", "settings", "logs"}
+_RESERVED_FILES = {"version.txt", "updater.exe", ".env", "config.json", "settings.json",
+    "api_keys.json", "credentials.json"}
+_WINDOWS_RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
 
 class PatchValidationError(ValueError):
     """Raised when a patch archive is invalid or unsafe."""
@@ -40,6 +47,12 @@ def _safe_relative_path(value: str) -> str:
         raise PatchValidationError(f"Unsafe patch path: {value!r}")
     if not path.parts or path.parts[0].lower() in _RESERVED_ROOTS:
         raise PatchValidationError(f"Patch is not allowed to modify user data: {value!r}")
+    if path.as_posix().lower() in _RESERVED_FILES:
+        raise PatchValidationError(f"Patch targets a protected application file: {value!r}")
+    for part in path.parts:
+        stem = part.rstrip(" .").split(".")[0].lower()
+        if part.endswith((" ", ".")) or ":" in part or stem in _WINDOWS_RESERVED:
+            raise PatchValidationError(f"Invalid Windows path component: {part!r}")
     if path.parts[0].lower() in {".git", ".venv", "build", "dist"}:
         raise PatchValidationError(f"Patch targets a protected path: {value!r}")
     return path.as_posix()
@@ -49,6 +62,9 @@ def sha256_bytes(data: bytes) -> str:
 
 def load_manifest(archive: zipfile.ZipFile) -> PatchManifest:
     try:
+        manifest_info = archive.getinfo("patch_manifest.json")
+        if manifest_info.file_size > MAX_MANIFEST_BYTES:
+            raise PatchValidationError("Patch manifest is too large.")
         raw = json.loads(archive.read("patch_manifest.json").decode("utf-8"))
     except (KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise PatchValidationError("patch_manifest.json is missing or invalid.") from exc
@@ -63,15 +79,20 @@ def load_manifest(archive: zipfile.ZipFile) -> PatchManifest:
     entries = raw.get("files")
     if not isinstance(entries, list) or not entries:
         raise PatchValidationError("Patch contains no file operations.")
-    files, seen = [], set()
-    archive_names = set(archive.namelist())
+    files, seen, payload_total = [], set(), 0
+    infos = archive.infolist()
+    names = [info.filename for info in infos]
+    if len(names) != len(set(names)):
+        raise PatchValidationError("Patch archive contains duplicate ZIP entries.")
+    archive_names = set(names)
     for entry in entries:
         if not isinstance(entry, dict):
             raise PatchValidationError("Invalid file operation.")
         path = _safe_relative_path(entry.get("path"))
-        if path in seen:
+        path_key = path.casefold()
+        if path_key in seen:
             raise PatchValidationError(f"Duplicate patch path: {path}")
-        seen.add(path)
+        seen.add(path_key)
         action, digest = entry.get("action"), entry.get("sha256")
         if action not in ("add", "replace", "delete"):
             raise PatchValidationError(f"Unsupported action for {path}.")
@@ -84,6 +105,12 @@ def load_manifest(archive: zipfile.ZipFile) -> PatchManifest:
             payload_name = f"payload/{path}"
             if payload_name not in archive_names:
                 raise PatchValidationError(f"Missing payload file: {payload_name}")
+            payload_info = archive.getinfo(payload_name)
+            if payload_info.file_size > MAX_FILE_BYTES:
+                raise PatchValidationError(f"Payload file is too large: {path}")
+            payload_total += payload_info.file_size
+            if payload_total > MAX_TOTAL_PAYLOAD_BYTES:
+                raise PatchValidationError("Total patch payload is too large.")
             if sha256_bytes(archive.read(payload_name)) != digest:
                 raise PatchValidationError(f"Payload hash mismatch: {path}")
         files.append(PatchFile(path, action, digest or None))

@@ -18,8 +18,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Install updater test dependency
+        run: python -m pip install "cryptography>=44,<47"
       - name: Run updater unit tests
         run: |
           python -m unittest discover -s tests -p "test_updater.py" -v
           python -m unittest discover -s tests -p "test_patch_builder.py" -v
           python -m unittest discover -s tests -p "test_manifest_hardening.py" -v
+          python -m unittest discover -s tests -p "test_updater_signatures.py" -v

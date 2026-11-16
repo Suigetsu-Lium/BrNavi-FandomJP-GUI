@@ -73,7 +73,8 @@ def _safe_relative_path(value: str) -> str:
         raise PatchValidationError(f"Patch targets a protected application file: {value!r}")
     for part in path.parts:
         stem = part.rstrip(" .").split(".")[0].lower()
-        if part.endswith((" ", ".")) or ":" in part or stem in _WINDOWS_RESERVED:
+        if (part.endswith((" ", ".")) or any(ord(ch) < 32 or ch in '<>:"|?*' for ch in part)
+                or stem in _WINDOWS_RESERVED):
             raise PatchValidationError(f"Invalid Windows path component: {part!r}")
     if path.parts[0].lower() in {".git", ".venv", "build", "dist"}:
         raise PatchValidationError(f"Patch targets a protected path: {value!r}")
@@ -87,6 +88,15 @@ def sha256_bytes(data: bytes) -> str:
 def _zip_entry_is_symlink(info: zipfile.ZipInfo) -> bool:
     mode = (info.external_attr >> 16) & 0xFFFF
     return stat.S_ISLNK(mode)
+
+
+def _reject_duplicate_json_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise PatchValidationError(f"Duplicate JSON key: {key!r}")
+        result[key] = value
+    return result
 
 
 def load_manifest(archive: zipfile.ZipFile) -> PatchManifest:
@@ -103,10 +113,15 @@ def load_manifest(archive: zipfile.ZipFile) -> PatchManifest:
         manifest_info = archive.getinfo("patch_manifest.json")
         if manifest_info.file_size > MAX_MANIFEST_BYTES:
             raise PatchValidationError("Patch manifest is too large.")
-        raw = json.loads(archive.read(manifest_info).decode("utf-8"))
+        raw = json.loads(
+            archive.read(manifest_info).decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
     except (KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise PatchValidationError("patch_manifest.json is missing or invalid.") from exc
-    if not isinstance(raw, dict) or raw.get("patch_format") != PATCH_FORMAT:
+    if (not isinstance(raw, dict)
+            or type(raw.get("patch_format")) is not int
+            or raw.get("patch_format") != PATCH_FORMAT):
         raise PatchValidationError("Unsupported patch format.")
     if raw.get("application") != "BrNavi Fandom JP":
         raise PatchValidationError("This patch is not for BrNavi Fandom JP.")

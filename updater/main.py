@@ -70,8 +70,7 @@ def main() -> int:
     parser.add_argument("--install-dir", type=Path, help="BrNavi installation directory")
     parser.add_argument("--patch", help="Patch ZIP path")
     args = parser.parse_args()
-    install_dir = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else (args.install_dir or Path.cwd())
-    if args.install_dir and not getattr(sys, "frozen", False): install_dir = args.install_dir
+    install_dir = args.install_dir or (Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path.cwd())
     root = tk.Tk(); UpdaterWindow(root, install_dir, args.patch); root.mainloop()
     return 0
 

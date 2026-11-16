@@ -114,8 +114,14 @@ class PatchBuilderTests(unittest.TestCase):
     def test_reproducible_zip(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            old = self._release(base / "old", "1.0.0", {"a.bin": b"old"})
-            new = self._release(base / "new", "1.0.1", {"a.bin": b"new"})
+            old = self._release(base / "old", "1.0.0", {
+                "BrNavi-GUI.exe": b"old executable",
+                "a.bin": b"old",
+            })
+            new = self._release(base / "new", "1.0.1", {
+                "BrNavi-GUI.exe": b"new executable",
+                "a.bin": b"new",
+            })
             first, second = base / "first.zip", base / "second.zip"
             key = self._signing_key(base)
             build_patch(old, new, first, signing_key=key)
@@ -129,7 +135,7 @@ class PatchBuilderTests(unittest.TestCase):
             old = self._release(base / "old", "1.0.0", {"BrNavi-GUI.exe": b"old"})
             new = self._release(base / "new", "1.0.1", {"BrNavi-GUI.exe": b"new"})
             with self.assertRaises(PatchBuildError):
-                build_patch(old, new, base / "unsigned.zip")
+                build_patch(old, new, base / "unsigned.zip", signing_key=None)
 
     def test_builder_signs_patch_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:

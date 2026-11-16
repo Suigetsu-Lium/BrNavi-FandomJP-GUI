@@ -98,7 +98,13 @@ def _preflight(install_dir: Path, manifest, archive: zipfile.ZipFile) -> list[tu
     return planned
 
 
-def apply_patch(install_dir: Path, patch_path: Path) -> tuple[str, Path]:
+def apply_patch(
+    install_dir: Path,
+    patch_path: Path,
+    *,
+    require_signature: bool = True,
+    public_key_bytes: bytes | None = None,
+) -> tuple[str, Path]:
     install_dir = install_dir.resolve()
     patch_path = patch_path.resolve()
     if not patch_path.is_file():
@@ -108,7 +114,11 @@ def apply_patch(install_dir: Path, patch_path: Path) -> tuple[str, Path]:
 
     current_version = read_current_version(install_dir)
     with zipfile.ZipFile(patch_path, "r") as archive:
-        manifest = load_manifest(archive)
+        manifest = load_manifest(
+            archive,
+            require_signature=require_signature,
+            public_key_bytes=public_key_bytes,
+        )
         if current_version != manifest.from_version:
             raise PatchApplyError(
                 f"This patch requires v{manifest.from_version}; installed version is v{current_version}."

@@ -28,5 +28,5 @@ jobs:
           python -m unittest discover -s tests -p "test_updater_signatures.py" -v
       - name: Build standalone Updater.exe
         run: |
-          cmd /c scripts\\build_updater.bat
+          cmd /c scripts\build_updater.bat
           if (!(Test-Path "dist/Updater/Updater.exe")) { throw "Updater.exe was not produced." }

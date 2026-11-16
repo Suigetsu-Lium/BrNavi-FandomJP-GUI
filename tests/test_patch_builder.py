@@ -13,6 +13,16 @@ from updater.manifest import load_manifest
 
 
 class PatchBuilderTests(unittest.TestCase):
+    def _signing_key(self, root: Path) -> Path:
+        key = Ed25519PrivateKey.generate()
+        path = root / "offline-private.pem"
+        path.write_bytes(key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        ))
+        return path
+
     def _release(self, root: Path, version: str, files: dict[str, bytes]) -> Path:
         root.mkdir()
         (root / "VERSION.txt").write_text(f"v{version}\n", encoding="utf-8")
@@ -43,7 +53,7 @@ class PatchBuilderTests(unittest.TestCase):
                 "modules/local.log": b"updated private log",
             })
             patch = base / "update.zip"
-            result = build_patch(old, new, patch)
+            result = build_patch(old, new, patch, signing_key=self._signing_key(base))
             self.assertEqual(result["operation_count"], 4)
             with zipfile.ZipFile(patch) as archive:
                 manifest = load_manifest(archive)
@@ -65,7 +75,7 @@ class PatchBuilderTests(unittest.TestCase):
             updater = base / "Updater.exe"
             updater.write_bytes(b"updater binary")
             patch = base / "bootstrap.zip"
-            build_patch(old, new, patch, updater)
+            build_patch(old, new, patch, updater, self._signing_key(base))
             with zipfile.ZipFile(patch) as archive:
                 manifest = load_manifest(archive)
                 updater_op = [item for item in manifest.files if item.path == "Updater.exe"]
@@ -78,7 +88,7 @@ class PatchBuilderTests(unittest.TestCase):
             old = self._release(base / "old", "1.0.1", {"BrNavi-GUI.exe": b"a"})
             new = self._release(base / "new", "1.0.0", {"BrNavi-GUI.exe": b"b"})
             with self.assertRaises(PatchBuildError):
-                build_patch(old, new, base / "bad.zip")
+                build_patch(old, new, base / "bad.zip", signing_key=self._signing_key(base))
 
     def test_reproducible_zip(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -86,10 +96,19 @@ class PatchBuilderTests(unittest.TestCase):
             old = self._release(base / "old", "1.0.0", {"a.bin": b"old"})
             new = self._release(base / "new", "1.0.1", {"a.bin": b"new"})
             first, second = base / "first.zip", base / "second.zip"
-            build_patch(old, new, first)
-            build_patch(old, new, second)
+            key = self._signing_key(base)
+            build_patch(old, new, first, signing_key=key)
+            build_patch(old, new, second, signing_key=key)
             self.assertEqual(first.read_bytes(), second.read_bytes())
 
+
+    def test_refuses_to_generate_unsigned_patch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            old = self._release(base / "old", "1.0.0", {"BrNavi-GUI.exe": b"old"})
+            new = self._release(base / "new", "1.0.1", {"BrNavi-GUI.exe": b"new"})
+            with self.assertRaises(PatchBuildError):
+                build_patch(old, new, base / "unsigned.zip")
 
     def test_builder_signs_patch_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:

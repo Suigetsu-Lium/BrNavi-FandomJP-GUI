@@ -58,6 +58,24 @@ def _target_path(root: Path, relative: str) -> Path:
     return target
 
 
+def _backup_parent_path(root: Path) -> Path:
+    # update_backups is intentionally excluded from patch manifests, but is
+    # the updater's own trusted rollback location.
+    backup_parent = root / "update_backups"
+    if _is_reparse_point(backup_parent):
+        raise PatchApplyError("update_backups must not be a symbolic link or junction.")
+    resolved_root = root.resolve()
+    resolved_backup = backup_parent.resolve(strict=False)
+    try:
+        if os.path.commonpath((str(resolved_root), str(resolved_backup))) != str(resolved_root):
+            raise PatchApplyError("update_backups resolves outside the installation directory.")
+    except ValueError as exc:
+        raise PatchApplyError("Invalid update_backups directory.") from exc
+    if backup_parent.exists() and not backup_parent.is_dir():
+        raise PatchApplyError("update_backups exists but is not a directory.")
+    return backup_parent
+
+
 def _write_atomic(target: Path, data: bytes) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent))
@@ -124,9 +142,7 @@ def apply_patch(
                 f"This patch requires v{manifest.from_version}; installed version is v{current_version}."
             )
         planned = _preflight(install_dir, manifest, archive)
-        backup_parent = _target_path(install_dir, "update_backups")
-        if backup_parent.exists() and not backup_parent.is_dir():
-            raise PatchApplyError("update_backups exists but is not a directory.")
+        backup_parent = _backup_parent_path(install_dir)
         backup_root = backup_parent / (
             f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{manifest.from_version}_to_{manifest.to_version}"
         )

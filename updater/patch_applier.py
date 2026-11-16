@@ -150,7 +150,7 @@ def apply_patch(
             version_backup = backup_root / "VERSION.txt"
             shutil.copy2(version_target, version_backup)
             touched.append((version_target, version_backup))
-            _write_atomic(version_target, f"v{manifest.to_version}\\n".encode("utf-8"))
+            _write_atomic(version_target, f"v{manifest.to_version}\n".encode("utf-8"))
         except Exception as exc:
             rollback_errors = []
             for target, backup in reversed(touched):

@@ -1,10 +1,10 @@
 from __future__ import annotations
-import hashlib, json, tempfile, unittest, zipfile
+import hashlib, json, os, tempfile, unittest, zipfile
 from pathlib import Path
 from unittest.mock import patch
 import updater.patch_applier as patch_applier
 from updater.manifest import PatchValidationError, load_manifest
-from updater.patch_applier import PatchApplyError, apply_patch
+from updater.patch_applier import PatchApplyError, apply_patch, read_current_version
 
 def make_patch(path: Path, from_version="1.0.0", to_version="1.0.1", operations=None):
     operations = operations or [("modules/sample.txt", "replace", b"new contents")]
@@ -130,6 +130,21 @@ class ApplyTests(unittest.TestCase):
                 apply_patch(root, patch_zip, require_signature=False)
             self.assertEqual(target.read_text(encoding="utf-8"), "original")
             self.assertEqual((root / "VERSION.txt").read_text(encoding="utf-8"), "v1.0.0")
+
+    def test_rejects_redirected_version_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            external = root.parent / f"{root.name}-external-version.txt"
+            external.write_text("v1.0.0", encoding="utf-8")
+            try:
+                (root / "VERSION.txt").symlink_to(external)
+            except (OSError, NotImplementedError):
+                self.skipTest("Symlink creation is unavailable on this runner.")
+            try:
+                with self.assertRaises(PatchApplyError):
+                    read_current_version(root)
+            finally:
+                external.unlink(missing_ok=True)
 
 if __name__ == "__main__":
     unittest.main()

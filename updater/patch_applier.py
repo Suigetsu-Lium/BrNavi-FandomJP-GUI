@@ -13,6 +13,7 @@ from pathlib import Path
 from .manifest import PatchValidationError, _safe_relative_path, load_manifest
 
 JOURNAL_NAME = ".brnavi-update-journal.json"
+TRANSACTION_MARKER_NAME = ".brnavi-transaction"
 JOURNAL_SCHEMA = 1
 _TRANSACTION_STATES = {"preparing", "applying", "rolling_back", "rolled_back", "committed"}
 
@@ -113,6 +114,11 @@ def _write_journal(backup_root: Path, journal: dict) -> None:
 
 
 def _read_journal(backup_root: Path) -> dict:
+    marker_path = backup_root / TRANSACTION_MARKER_NAME
+    if _is_reparse_point(marker_path) or not marker_path.is_file():
+        raise PatchApplyError(f"Update transaction marker is missing or redirected: {marker_path}")
+    if marker_path.read_bytes() != f"BrNavi updater transaction schema {JOURNAL_SCHEMA}\\n".encode("ascii"):
+        raise PatchApplyError(f"Update transaction marker is invalid: {marker_path}")
     journal_path = backup_root / JOURNAL_NAME
     if _is_reparse_point(journal_path) or not journal_path.is_file():
         raise PatchApplyError(f"Update recovery journal is missing or redirected: {journal_path}")
@@ -209,7 +215,11 @@ def recover_interrupted_updates(install_dir: Path) -> list[Path]:
     for backup_root in sorted(backup_parent.iterdir()):
         if _is_reparse_point(backup_root):
             raise PatchApplyError(f"An update backup entry is a symbolic link or junction: {backup_root}")
-        if not backup_root.is_dir() or not (backup_root / JOURNAL_NAME).exists():
+        if not backup_root.is_dir():
+            continue
+        marker_path = backup_root / TRANSACTION_MARKER_NAME
+        if not marker_path.exists() and not _is_reparse_point(marker_path):
+            # Older backup folders and a crash immediately after mkdir have no transaction marker.
             continue
         journal = _read_journal(backup_root)
         state = journal["state"]
@@ -279,6 +289,10 @@ def apply_patch(
             f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{manifest.from_version}_to_{manifest.to_version}"
         )
         backup_root.mkdir(parents=True, exist_ok=False)
+        _write_atomic(
+            backup_root / TRANSACTION_MARKER_NAME,
+            f"BrNavi updater transaction schema {JOURNAL_SCHEMA}\\n".encode("ascii"),
+        )
 
         entries = []
         for item, target in planned:

@@ -61,6 +61,9 @@ def normalize_version(value: str) -> tuple[int, int, int]:
 def _safe_relative_path(value: str) -> str:
     if not isinstance(value, str) or not value or "\\\\" in value:
         raise PatchValidationError("Invalid patch file path.")
+    raw_parts = value.split("/")
+    if any(part in ("", ".", "..") for part in raw_parts):
+        raise PatchValidationError(f"Unsafe patch path: {value!r}")
     path = PurePosixPath(value)
     if path.is_absolute() or any(part in ("", ".", "..") for part in path.parts):
         raise PatchValidationError(f"Unsafe patch path: {value!r}")
@@ -91,6 +94,9 @@ def load_manifest(archive: zipfile.ZipFile) -> PatchManifest:
     names = [info.filename for info in infos]
     if len(names) != len(set(names)):
         raise PatchValidationError("Patch archive contains duplicate ZIP entries.")
+    folded_names = [name.casefold() for name in names]
+    if len(folded_names) != len(set(folded_names)):
+        raise PatchValidationError("Patch archive contains case-insensitive duplicate entries.")
     if any(info.is_dir() or _zip_entry_is_symlink(info) for info in infos):
         raise PatchValidationError("Patch archive contains an unsupported directory or link entry.")
     try:

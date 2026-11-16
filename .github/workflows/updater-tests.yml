@@ -21,6 +21,7 @@ jobs:
           python -m unittest discover -s tests -p "test_patch_builder.py" -v
           python -m unittest discover -s tests -p "test_manifest_hardening.py" -v
           python -m unittest discover -s tests -p "test_updater_signatures.py" -v
+          python -m unittest discover -s tests -p "test_updater_process.py" -v
       - name: Build standalone Updater.exe
         run: |
           cmd /c scripts\build_updater.bat

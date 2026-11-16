@@ -1,0 +1,22 @@
+name: Updater tests
+
+on:
+  push:
+    branches:
+      - feature/standalone-updater
+  pull_request:
+    paths:
+      - "updater/**"
+      - "tests/test_updater.py"
+      - ".github/workflows/updater-tests.yml"
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Run updater tests
+        run: python -m unittest discover -s tests -v

@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse, os, subprocess, sys, tkinter as tk, zipfile
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from updater.patch_applier import PatchApplyError, apply_patch, validate_installation
+from updater.patch_applier import (\n    PatchApplyError, apply_patch, recover_interrupted_updates, validate_installation,\n)
 
 APP_NAME = "BrNavi Fandom JP Updater"
 
@@ -101,7 +101,29 @@ def main() -> int:
     parser.add_argument("--patch", help="Patch ZIP path")
     args = parser.parse_args()
     install_dir = args.install_dir or (Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path.cwd())
-    root = tk.Tk(); UpdaterWindow(root, install_dir, args.patch); root.mainloop()
+    try:
+        recovered = recover_interrupted_updates(install_dir)
+    except (PatchApplyError, OSError, ValueError) as exc:
+        # Recovery must finish before the updater offers another patch operation.
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(
+            APP_NAME,
+            "前回の更新状態を安全に復旧できませんでした。"
+            "\n安全のため、新しい更新は中止しました。"
+            f"\n\n詳細: {exc}",
+        )
+        root.destroy()
+        return 1
+
+    root = tk.Tk()
+    window = UpdaterWindow(root, install_dir, args.patch)
+    if recovered:
+        window.status.set(
+            f"前回中断された更新を自動的にロールバックしました（{len(recovered)}件）。"
+            "必要であれば、パッチZIPを選択してください。"
+        )
+    root.mainloop()
     return 0
 
 if __name__ == "__main__":

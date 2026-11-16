@@ -18,6 +18,8 @@ class PatchApplyError(RuntimeError):
 
 def read_current_version(install_dir: Path) -> str:
     version_file = install_dir / "VERSION.txt"
+    if _is_reparse_point(version_file):
+        raise PatchApplyError("VERSION.txt must not be a symbolic link or junction.")
     if not version_file.is_file():
         raise PatchApplyError("VERSION.txt was not found. This installation cannot be patched.")
     value = version_file.read_text(encoding="utf-8-sig").strip()

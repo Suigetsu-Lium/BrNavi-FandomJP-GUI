@@ -7,7 +7,27 @@ import zipfile
 from pathlib import Path
 
 from updater.manifest import PatchValidationError, load_manifest
-from tests.test_updater import make_patch
+import hashlib
+
+def make_patch(path: Path, from_version: str, to_version: str, operations):
+    entries, payloads = [], {}
+    for relative, action, data in operations:
+        entry = {"path": relative, "action": action}
+        if action != "delete":
+            entry["sha256"] = hashlib.sha256(data).hexdigest()
+            payloads[f"payload/{relative}"] = data
+        entries.append(entry)
+    manifest = {
+        "patch_format": 1,
+        "application": "BrNavi Fandom JP",
+        "from_version": from_version,
+        "to_version": to_version,
+        "files": entries,
+    }
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("patch_manifest.json", json.dumps(manifest))
+        for name, data in payloads.items():
+            archive.writestr(name, data)
 
 
 class ManifestHardeningTests(unittest.TestCase):

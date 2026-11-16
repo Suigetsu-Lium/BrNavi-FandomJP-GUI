@@ -4,11 +4,6 @@ on:
   push:
     branches:
       - feature/standalone-updater
-  pull_request:
-    paths:
-      - "updater/**"
-      - "tests/test_*.py"
-      - ".github/workflows/updater-tests.yml"
 
 jobs:
   test:

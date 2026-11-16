@@ -61,6 +61,7 @@ class ApplyTests(unittest.TestCase):
     def test_replace_and_preserve_database(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            (root / "BrNavi-GUI.exe").write_bytes(b"test executable")
             (root / "VERSION.txt").write_text("v1.0.0", encoding="utf-8")
             (root / "modules").mkdir()
             (root / "modules/sample.txt").write_text("old", encoding="utf-8")
@@ -78,6 +79,7 @@ class ApplyTests(unittest.TestCase):
     def test_rejects_wrong_source_version_without_changes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            (root / "BrNavi-GUI.exe").write_bytes(b"test executable")
             (root / "VERSION.txt").write_text("v1.0.0", encoding="utf-8")
             (root / "modules").mkdir()
             (root / "modules/sample.txt").write_text("old", encoding="utf-8")
@@ -90,6 +92,7 @@ class ApplyTests(unittest.TestCase):
     def test_add_and_delete(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            (root / "BrNavi-GUI.exe").write_bytes(b"test executable")
             (root / "VERSION.txt").write_text("v1.0.0", encoding="utf-8")
             (root / "old.txt").write_text("remove", encoding="utf-8")
             patch = root / "patch.zip"
@@ -104,6 +107,7 @@ class ApplyTests(unittest.TestCase):
     def test_failed_write_rolls_back_files_and_keeps_version(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            (root / "BrNavi-GUI.exe").write_bytes(b"test executable")
             (root / "VERSION.txt").write_text("v1.0.0", encoding="utf-8")
             (root / "modules").mkdir()
             target = root / "modules/sample.txt"
@@ -119,6 +123,7 @@ class ApplyTests(unittest.TestCase):
     def test_refuses_non_directory_backup_location_without_modifying_install(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            (root / "BrNavi-GUI.exe").write_bytes(b"test executable")
             (root / "VERSION.txt").write_text("v1.0.0", encoding="utf-8")
             (root / "modules").mkdir()
             target = root / "modules/sample.txt"

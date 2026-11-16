@@ -218,8 +218,11 @@ def recover_interrupted_updates(install_dir: Path) -> list[Path]:
         if not backup_root.is_dir():
             continue
         marker_path = backup_root / TRANSACTION_MARKER_NAME
-        if not marker_path.exists() and not _is_reparse_point(marker_path):
-            # Older backup folders and a crash immediately after mkdir have no transaction marker.
+        journal_path = backup_root / JOURNAL_NAME
+        has_marker = marker_path.exists() or _is_reparse_point(marker_path)
+        has_journal = journal_path.exists() or _is_reparse_point(journal_path)
+        if not has_marker and not has_journal:
+            # Older backup folders and a crash immediately after mkdir have no transaction metadata.
             continue
         journal = _read_journal(backup_root)
         state = journal["state"]

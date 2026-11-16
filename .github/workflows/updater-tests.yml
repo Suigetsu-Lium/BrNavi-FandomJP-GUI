@@ -26,3 +26,5 @@ jobs:
         run: |
           cmd /c scripts\build_updater.bat
           if (!(Test-Path "dist/Updater/Updater.exe")) { throw "Updater.exe was not produced." }
+          & "dist/Updater/Updater.exe" --help
+          if ($LASTEXITCODE -ne 0) { throw "Packaged Updater.exe smoke test failed." }

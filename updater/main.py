@@ -1,6 +1,6 @@
 """Tkinter entry point for the standalone BrNavi updater."""
 from __future__ import annotations
-import argparse, subprocess, sys, tkinter as tk
+import argparse, subprocess, sys, tkinter as tk, zipfile
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from updater.patch_applier import PatchApplyError, apply_patch, read_current_version
@@ -58,7 +58,7 @@ class UpdaterWindow:
         self.apply_button.configure(state="disabled"); self.status.set("パッチを検証・適用しています...")
         self.root.update_idletasks()
         try: version, backup = apply_patch(self.install_dir, Path(value))
-        except (PatchApplyError, OSError, ValueError) as exc:
+        except (PatchApplyError, OSError, ValueError, zipfile.BadZipFile, RuntimeError) as exc:
             self.status.set("適用に失敗しました。"); messagebox.showerror(APP_NAME, str(exc))
             self.apply_button.configure(state="normal"); return
         self.status.set(f"v{version}への更新が完了しました。")

@@ -8,29 +8,34 @@
 - No dependency on the BrNavi runtime or third-party Python packages at runtime.
 
 ## Repository layout
-- updater/: updater source and patch validation/application.
+- updater/: updater source, manifest validation, patch building and application.
 - scripts/build_updater.bat: independent Updater.exe build.
-- docs/updater_design.md: architecture and safety boundaries.
+- tests/: updater validation, builder and application tests.
 - Generated executables and patch ZIPs are not committed; release assets belong on GitHub Releases.
 
 ## Installed layout
 Updater.exe is placed beside BrNavi-GUI.exe. Normally its installation root is the directory containing the executable. For the initial bootstrap only, the extracted updater is launched from a temporary directory with --install-dir set to the existing BrNavi-GUI.exe directory; the patch adds Updater.exe there. A running Updater.exe cannot overwrite itself, so later patches must not replace it. A patch ZIP contains patch_manifest.json and payload/<relative-path> entries.
 
+## Patch build process
+1. Build old and new releases using build_release.bat.
+2. Supply the inner deployed folders (each contains BrNavi-GUI.exe and VERSION.txt) to python -m updater.build_patch.
+3. The builder compares all deployed files, not source files alone, and emits add/replace/delete operations.
+4. The builder excludes user data, mutable settings, VERSION.txt, and Updater.exe. For the first transition from a legacy installation, --bootstrap-updater adds the separately built Updater.exe as an add operation.
+5. The ZIP has stable entry ordering and timestamps for reproducible output.
+
 ## Application sequence
 1. User closes BrNavi and launches Updater.exe.
 2. User selects a downloaded patch ZIP.
-3. Updater validates format, application ID, versions, paths, unique operations, payload presence, and SHA-256.
-4. Installed VERSION.txt must exactly match the patch from_version.
-5. Every touched file is backed up under update_backups/<timestamp>_<from>_to_<to>/.
-6. Add/replace/delete operations are applied; replacement writes use a temporary file and atomic replace.
-7. VERSION.txt is updated only after all payload operations succeed.
-8. On failure, the updater attempts to restore touched files.
+3. Updater validates format, application ID, strict numeric versions, safe Windows paths, case collisions, path-prefix collisions, archive contents, payload presence, size caps, and SHA-256.
+4. Installation VERSION.txt must exactly match the patch from_version.
+5. The updater rejects symlink/junction traversal and preflights all operations before mutation.
+6. Every touched file is backed up under update_backups/<timestamp>_<from>_to_<to>/.
+7. Add/replace/delete operations are applied; replacement writes use a temporary file and atomic replace.
+8. VERSION.txt is updated only after all payload operations succeed.
+9. On failure, the updater attempts to restore touched files from backup.
 
 ## Data protection
-The manifest validator rejects paths rooted at database/, downloaded_fandom_html/, extracted_fandom_levels/, downloaded_images/, index_html/, parsed_index/, level_lists/, update_backups/, and user_data/. Absolute paths and traversal are rejected. SQLite files are never opened or migrated by the updater.
+The builder and validator both exclude database, downloaded_fandom_html, extracted_fandom_levels, downloaded_images, index_html, parsed_index, level_lists, update_backups, user_data, config, settings, logs, cache, exports and backups. VERSION.txt is controlled only by the updater after successful application. Secrets and settings files are protected. No database migration is performed by this updater design.
 
-## Before public distribution
-- Implement detached digital signature verification; SHA-256 alone is not publisher authentication.
-- Implement deterministic patch creation between consecutive built release folders, including the first Updater.exe bootstrap (the bootstrap updater must be run from a temporary folder with an explicit --install-dir).
-- Test traversal, protected data paths, corrupt hashes, wrong source versions, add/replace/delete, and rollback.
-- Verify the actual PyInstaller onedir layout and test on clean Windows 10/11 installations.
+## Trust model / remaining work
+SHA-256 verifies payload integrity only; it does not prove publisher identity. Before production distribution, implement detached signature verification (for example Ed25519 with an embedded public key and an offline private signing key). Do not embed a private signing key in the repository, builder, or updater. Complete Windows end-to-end testing before marking the updater release-ready.

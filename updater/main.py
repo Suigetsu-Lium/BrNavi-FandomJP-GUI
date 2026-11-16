@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse, os, subprocess, sys, tkinter as tk, zipfile
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from updater.patch_applier import (\n    PatchApplyError, apply_patch, recover_interrupted_updates, validate_installation,\n)
+from updater.patch_applier import (
+    PatchApplyError, apply_patch, recover_interrupted_updates, validate_installation,
+)
 
 APP_NAME = "BrNavi Fandom JP Updater"
 

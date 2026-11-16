@@ -191,7 +191,10 @@ class ApplyTests(unittest.TestCase):
                 "state": "preparing",
                 "from_version": "1.0.0",
                 "to_version": "1.0.1",
-                "entries": [\n                    {"path": "modules/sample.txt", "existed": True, "sha256": None},\n                    {"path": "VERSION.txt", "existed": True, "sha256": None},\n                ],
+                "entries": [
+                    {"path": "modules/sample.txt", "existed": True, "sha256": None},
+                    {"path": "VERSION.txt", "existed": True, "sha256": None},
+                ],
             }
             patch_applier._write_journal(backup_root, journal)
 
@@ -217,7 +220,8 @@ class ApplyTests(unittest.TestCase):
                 "from_version": "1.0.0",
                 "to_version": "1.0.1",
                 "entries": [
-                    {"path": "modules/sample.txt", "existed": True, "sha256": hashlib.sha256(b"original").hexdigest()}
+                    {"path": "modules/sample.txt", "existed": True, "sha256": hashlib.sha256(b"original").hexdigest()},
+                    {"path": "VERSION.txt", "existed": True, "sha256": hashlib.sha256(b"v1.0.0\n").hexdigest()},
                 ],
             }
             patch_applier._write_journal(backup_root, journal)

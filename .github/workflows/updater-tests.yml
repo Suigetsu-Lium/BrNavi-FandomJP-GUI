@@ -7,7 +7,7 @@ on:
   pull_request:
     paths:
       - "updater/**"
-      - "tests/test_updater.py"
+      - "tests/test_*.py"
       - ".github/workflows/updater-tests.yml"
 
 jobs:

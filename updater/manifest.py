@@ -10,6 +10,12 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
 
+from .signatures import (
+    SignatureError,
+    trusted_public_key_bytes,
+    verify_manifest_signature,
+)
+
 PATCH_FORMAT = 1
 MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_FILE_BYTES = 512 * 1024 * 1024
@@ -99,7 +105,12 @@ def _reject_duplicate_json_keys(pairs):
     return result
 
 
-def load_manifest(archive: zipfile.ZipFile) -> PatchManifest:
+def load_manifest(
+    archive: zipfile.ZipFile,
+    *,
+    require_signature: bool = False,
+    public_key_bytes: bytes | None = None,
+) -> PatchManifest:
     infos = archive.infolist()
     names = [info.filename for info in infos]
     if len(names) != len(set(names)):
@@ -113,8 +124,17 @@ def load_manifest(archive: zipfile.ZipFile) -> PatchManifest:
         manifest_info = archive.getinfo("patch_manifest.json")
         if manifest_info.file_size > MAX_MANIFEST_BYTES:
             raise PatchValidationError("Patch manifest is too large.")
+        manifest_bytes = archive.read(manifest_info)
+        signature_info = archive.getinfo("patch_manifest.sig") if "patch_manifest.sig" in archive.namelist() else None
+        if require_signature and signature_info is None:
+            raise SignatureError("This patch is unsigned. A trusted Ed25519 signature is required.")
+        if signature_info is not None:
+            if signature_info.file_size != 64:
+                raise SignatureError("Patch manifest signature must be exactly 64 bytes.")
+            trusted_key = public_key_bytes if public_key_bytes is not None else trusted_public_key_bytes()
+            verify_manifest_signature(archive.read(signature_info), manifest_bytes, trusted_key)
         raw = json.loads(
-            archive.read(manifest_info).decode("utf-8"),
+            manifest_bytes.decode("utf-8"),
             object_pairs_hook=_reject_duplicate_json_keys,
         )
     except (KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -184,6 +204,8 @@ def load_manifest(archive: zipfile.ZipFile) -> PatchManifest:
         files.append(PatchFile(path, action, digest or None))
 
     expected_entries = {"patch_manifest.json"} | payload_names
+    if "patch_manifest.sig" in archive_names:
+        expected_entries.add("patch_manifest.sig")
     unexpected = archive_names - expected_entries
     missing = expected_entries - archive_names
     if unexpected or missing:

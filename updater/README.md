@@ -16,7 +16,8 @@ Example for a normal update:
 python -m updater.build_patch ^
   --from-dir "releases\\v1.0.0\\BrNavi-GUI" ^
   --to-dir "releases\\v1.0.1\\BrNavi-GUI" ^
-  --output "artifacts\\BrNavi-v1.0.0-to-v1.0.1.zip"
+  --output "artifacts\\BrNavi-v1.0.0-to-v1.0.1.zip" ^
+  --signing-key "E:\\SecureKeys\\BrNavi-update-private.pem"
 ```
 
 For the initial v1.0.0 bootstrap, include the separately built updater:
@@ -26,10 +27,11 @@ python -m updater.build_patch ^
   --from-dir "releases\\v1.0.0\\BrNavi-GUI" ^
   --to-dir "releases\\v1.0.1\\BrNavi-GUI" ^
   --bootstrap-updater "dist\\Updater\\Updater.exe" ^
-  --output "artifacts\\BrNavi-v1.0.0-to-v1.0.1-bootstrap.zip"
+  --output "artifacts\\BrNavi-v1.0.0-to-v1.0.1-bootstrap.zip" ^
+  --signing-key "E:\\SecureKeys\\BrNavi-update-private.pem"
 ```
 
-The builder compares the full deployed PyInstaller onedir folders, including the executable and runtime DLLs. It creates add/replace/delete operations, sorts entries deterministically, and writes a reproducible ZIP. User data roots (SQLite database, downloaded Wiki HTML/images, indexes, settings, caches, logs and backups) and `VERSION.txt` are excluded. `Updater.exe` is excluded from normal diffs; the bootstrap option can add it exactly once. Generated ZIPs and EXEs must be published as release assets, not committed to Git.
+The builder compares the full deployed PyInstaller onedir folders, including the executable and runtime DLLs. It creates add/replace/delete operations, sorts entries deterministically, and writes a reproducible ZIP. The CLI requires an Ed25519 private signing key and adds a detached signature over the exact manifest bytes. User data roots (SQLite database, downloaded Wiki HTML/images, indexes, settings, caches, logs and backups) and `VERSION.txt` are excluded. `Updater.exe` is excluded from normal diffs; the bootstrap option can add it exactly once. Generated ZIPs and EXEs must be published as release assets, not committed to Git.
 
 ## Patch archive format (v1)
 
@@ -55,8 +57,19 @@ The updater validates the application ID, strict numeric version sequence, uniqu
 
 The bootstrap patch may add `Updater.exe` once; the running updater cannot update itself. To bootstrap an existing v1.0.0 installation, extract the bootstrap `Updater.exe` to a temporary folder and run it with `--install-dir` pointing to the existing `BrNavi-GUI.exe` folder. The patch then adds `Updater.exe` beside the main application.
 
+## Update signing key setup
+
+Generate the key pair once on a trusted offline machine:
+
+```bat
+python scripts\\generate_update_signing_key.py --private-key "E:\\SecureKeys\\BrNavi-update-private.pem"
+```
+
+The script prints a Base64 public key. Copy it into `updater/trusted_public_key.py` as `TRUSTED_PUBLIC_KEY_B64`, then build and distribute a new trusted `Updater.exe`. Keep the private PEM outside the repository, restrict access, and maintain a secure backup. The builder requires `--signing-key`; the updater rejects unsigned or invalidly signed patches. A public-key change requires distributing a newly built updater through a trusted channel.
+
 ## Security status and limitations
 
 - User databases, Wiki HTML/images, indexes, settings, credentials, and other runtime data are excluded by both the builder and the manifest validator.
-- SHA-256 detects accidental corruption but does **not** authenticate the publisher. Do not distribute production patches until detached signature verification is implemented.
+- SHA-256 checks payload integrity; Ed25519 authenticates the manifest and therefore the payload hashes and version transition.
+- The checked-in public key is intentionally blank until the maintainer creates and pins a real key. As a result, the current updater build fails closed and cannot apply production patches yet.
 - Windows end-to-end testing is still required, including v1.0.0 bootstrap, sequential updates, process detection, and rollback.

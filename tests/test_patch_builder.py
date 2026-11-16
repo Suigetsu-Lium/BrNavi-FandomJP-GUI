@@ -75,7 +75,7 @@ class PatchBuilderTests(unittest.TestCase):
             updater = base / "Updater.exe"
             updater.write_bytes(b"updater binary")
             patch = base / "bootstrap.zip"
-            build_patch(old, new, patch, updater, self._signing_key(base))
+            build_patch(old, new, patch, updater, signing_key=self._signing_key(base))
             with zipfile.ZipFile(patch) as archive:
                 manifest = load_manifest(archive)
                 updater_op = [item for item in manifest.files if item.path == "Updater.exe"]

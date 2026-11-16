@@ -10,7 +10,15 @@ import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
 
-from .manifest import _RESERVED_FILES, _RESERVED_ROOTS, normalize_version, sha256_bytes
+from .manifest import (
+    MAX_FILE_BYTES,
+    MAX_MANIFEST_BYTES,
+    MAX_TOTAL_PAYLOAD_BYTES,
+    _RESERVED_FILES,
+    _RESERVED_ROOTS,
+    normalize_version,
+    sha256_bytes,
+)
 
 APP_ID = "BrNavi Fandom JP"
 EXCLUDED_ROOTS = _RESERVED_ROOTS | {
@@ -100,6 +108,11 @@ def build_patch(
     from_version, to_version = _read_version(from_dir), _read_version(to_dir)
     if normalize_version(to_version) <= normalize_version(from_version):
         raise PatchBuildError("Target release must have a higher version than source release.")
+    for label, folder in (("source", from_dir), ("target", to_dir)):
+        if not (folder / "BrNavi-GUI.exe").is_file():
+            raise PatchBuildError(f"{label} release is missing BrNavi-GUI.exe: {folder}")
+    if output.is_relative_to(from_dir) or output.is_relative_to(to_dir):
+        raise PatchBuildError("Output ZIP must be outside both release folders.")
 
     old_files = _iter_release_files(from_dir)
     new_files = _iter_release_files(to_dir)
@@ -131,7 +144,11 @@ def build_patch(
             raise PatchBuildError("--bootstrap-updater must point to a built Updater.exe.")
         if "updater.exe" in old_files:
             raise PatchBuildError("Source release already contains Updater.exe; bootstrap is only for legacy installs.")
+        if any(path.name.casefold() == "updater.exe" for path in from_dir.iterdir()):
+            raise PatchBuildError("Source release already contains Updater.exe; bootstrap is only for legacy installs.")
         data = bootstrap_updater.read_bytes()
+        if len(data) > MAX_FILE_BYTES:
+            raise PatchBuildError("Updater.exe exceeds the maximum supported patch file size.")
         operations.append({
             "path": "Updater.exe",
             "action": "add",
@@ -152,6 +169,15 @@ def build_patch(
         "files": operations,
     }
     manifest_bytes = (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    if len(manifest_bytes) > MAX_MANIFEST_BYTES:
+        raise PatchBuildError("Generated patch manifest exceeds the supported size limit.")
+    payload_total = 0
+    for name, data in payloads.items():
+        if len(data) > MAX_FILE_BYTES:
+            raise PatchBuildError(f"Patch payload exceeds the per-file size limit: {name}")
+        payload_total += len(data)
+        if payload_total > MAX_TOTAL_PAYLOAD_BYTES:
+            raise PatchBuildError("Generated patch payload exceeds the total size limit.")
     output.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix=f".{output.name}.", suffix=".tmp", dir=str(output.parent))
     os.close(fd)

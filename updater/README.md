@@ -26,7 +26,7 @@ A patch ZIP contains patch_manifest.json and payload/<relative-path>. Example ma
 
 For add and replace, the archive must contain payload/<path>. SHA-256 covers the exact payload bytes. Delete operations have no payload or hash.
 
-The updater validates the application ID, format, version sequence, unique safe paths, protected data directories, payload presence, and hashes. It requires installed VERSION.txt to match from_version. Backups are stored under update_backups/. A failed operation triggers best-effort rollback.
+The updater validates the application ID, format, version sequence, unique safe paths, protected data directories, payload presence, size limits, and hashes. It requires installed VERSION.txt to match from_version. Backups are stored under update_backups/. A failed operation triggers best-effort rollback. The bootstrap patch may add Updater.exe once; the running updater cannot replace itself. To bootstrap an existing v1.0.0 installation, extract the bootstrap Updater.exe to a temporary folder and run it with --install-dir pointing to the BrNavi-GUI.exe folder. The patch then adds Updater.exe beside the main application.
 
 ## Security and limitations
 

@@ -55,6 +55,12 @@ class ManifestHardeningTests(unittest.TestCase):
     def test_rejects_empty_path_segment(self):
         self._assert_invalid([("modules//sample.py", "delete", None)])
 
+    def test_rejects_database_files_even_outside_protected_directories(self):
+        self._assert_invalid([("cache/session.sqlite3", "delete", None)])
+
+    def test_rejects_secret_files_in_nested_directories(self):
+        self._assert_invalid([("modules/private.pem", "delete", None)])
+
     def test_rejects_unreferenced_zip_payload(self):
         with tempfile.TemporaryDirectory() as tmp:
             patch = Path(tmp) / "patch.zip"

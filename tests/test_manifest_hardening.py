@@ -9,7 +9,7 @@ from pathlib import Path
 from updater.manifest import PatchValidationError, load_manifest
 import hashlib
 
-def make_patch(path: Path, from_version: str, to_version: str, operations):
+def make_patch(path: Path, from_version: str = "1.0.0", to_version: str = "1.0.1", operations=None):\n    operations = operations or [("modules/sample.txt", "replace", b"new contents")]
     entries, payloads = [], {}
     for relative, action, data in operations:
         entry = {"path": relative, "action": action}

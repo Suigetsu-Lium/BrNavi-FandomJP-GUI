@@ -19,6 +19,7 @@ from .manifest import (
     normalize_version,
     sha256_bytes,
 )
+from .signatures import sign_manifest
 
 APP_ID = "BrNavi Fandom JP"
 EXCLUDED_ROOTS = _RESERVED_ROOTS | {
@@ -103,6 +104,7 @@ def build_patch(
     to_dir: Path,
     output: Path,
     bootstrap_updater: Path | None = None,
+    signing_key: Path | None = None,
 ) -> dict:
     from_dir, to_dir, output = from_dir.resolve(), to_dir.resolve(), output.resolve()
     from_version, to_version = _read_version(from_dir), _read_version(to_dir)
@@ -178,12 +180,15 @@ def build_patch(
         payload_total += len(data)
         if payload_total > MAX_TOTAL_PAYLOAD_BYTES:
             raise PatchBuildError("Generated patch payload exceeds the total size limit.")
+    signature_bytes = sign_manifest(manifest_bytes, signing_key) if signing_key is not None else None
     output.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix=f".{output.name}.", suffix=".tmp", dir=str(output.parent))
     os.close(fd)
     try:
         with zipfile.ZipFile(temp_name, "w") as archive:
             _zip_write(archive, "patch_manifest.json", manifest_bytes)
+            if signature_bytes is not None:
+                _zip_write(archive, "patch_manifest.sig", signature_bytes)
             for name in sorted(payloads, key=str.casefold):
                 _zip_write(archive, name, payloads[name])
         os.replace(temp_name, output)
@@ -211,9 +216,16 @@ def main() -> int:
         "--bootstrap-updater", type=Path,
         help="Optional Updater.exe to add to a legacy installation that has no updater",
     )
+    parser.add_argument(
+        "--signing-key", required=True, type=Path,
+        help="Offline Ed25519 PEM private key; keep it outside the repository",
+    )
     args = parser.parse_args()
     try:
-        result = build_patch(args.from_dir, args.to_dir, args.output, args.bootstrap_updater)
+        result = build_patch(
+            args.from_dir, args.to_dir, args.output,
+            args.bootstrap_updater, args.signing_key,
+        )
     except (OSError, PatchBuildError, ValueError) as exc:
         parser.error(str(exc))
     print(

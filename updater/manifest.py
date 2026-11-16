@@ -14,7 +14,7 @@ PATCH_FORMAT = 1
 MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_FILE_BYTES = 512 * 1024 * 1024
 MAX_TOTAL_PAYLOAD_BYTES = 1024 * 1024 * 1024
-_VERSION_RE = re.compile(r"^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+_VERSION_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 _RESERVED_ROOTS = {
     "database", "downloaded_fandom_html", "extracted_fandom_levels",
     "downloaded_images", "index_html", "parsed_index", "level_lists",

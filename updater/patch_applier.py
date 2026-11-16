@@ -117,7 +117,7 @@ def _read_journal(backup_root: Path) -> dict:
     marker_path = backup_root / TRANSACTION_MARKER_NAME
     if _is_reparse_point(marker_path) or not marker_path.is_file():
         raise PatchApplyError(f"Update transaction marker is missing or redirected: {marker_path}")
-    if marker_path.read_bytes() != f"BrNavi updater transaction schema {JOURNAL_SCHEMA}\\n".encode("ascii"):
+    if marker_path.read_bytes() != b"BRNAVI-UPDATE-TRANSACTION-1":
         raise PatchApplyError(f"Update transaction marker is invalid: {marker_path}")
     journal_path = backup_root / JOURNAL_NAME
     if _is_reparse_point(journal_path) or not journal_path.is_file():

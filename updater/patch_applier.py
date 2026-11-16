@@ -8,7 +8,7 @@ import stat
 import tempfile
 import zipfile
 from datetime import datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from .manifest import PatchValidationError, _safe_relative_path, load_manifest
 
@@ -320,7 +320,7 @@ def apply_patch(
         except Exception as exc:
             rollback_error = None
             try:
-                if journal["state"] == "applying":
+                if journal["state"] in ("applying", "committed"):
                     _rollback_transaction(install_dir, backup_root, journal)
                 else:
                     journal["state"] = "rolled_back"

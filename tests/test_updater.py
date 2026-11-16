@@ -4,7 +4,9 @@ from pathlib import Path
 from unittest.mock import patch
 import updater.patch_applier as patch_applier
 from updater.manifest import PatchValidationError, load_manifest
-from updater.patch_applier import (\n    PatchApplyError, apply_patch, read_current_version, recover_interrupted_updates, validate_installation,\n)
+from updater.patch_applier import (
+    PatchApplyError, apply_patch, read_current_version, recover_interrupted_updates, validate_installation,
+)
 
 def make_patch(path: Path, from_version="1.0.0", to_version="1.0.1", operations=None):
     operations = operations or [("modules/sample.txt", "replace", b"new contents")]

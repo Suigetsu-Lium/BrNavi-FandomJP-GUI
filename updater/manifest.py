@@ -13,7 +13,7 @@ _VERSION_RE = re.compile(r"^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:[-+][0-
 _RESERVED_ROOTS = {"database", "downloaded_fandom_html", "extracted_fandom_levels",
     "downloaded_images", "index_html", "parsed_index", "level_lists", "update_backups", "user_data",
     "config", "settings", "logs"}
-_RESERVED_FILES = {"version.txt", "updater.exe", ".env", "config.json", "settings.json",
+_RESERVED_FILES = {"version.txt", ".env", "config.json", "settings.json",
     "api_keys.json", "credentials.json"}
 _WINDOWS_RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
 
@@ -96,6 +96,8 @@ def load_manifest(archive: zipfile.ZipFile) -> PatchManifest:
         action, digest = entry.get("action"), entry.get("sha256")
         if action not in ("add", "replace", "delete"):
             raise PatchValidationError(f"Unsupported action for {path}.")
+        if path.casefold() == "updater.exe" and action != "add":
+            raise PatchValidationError("Updater.exe may only be installed by the bootstrap patch; it cannot update itself.")
         if action == "delete":
             if digest not in (None, ""):
                 raise PatchValidationError("Delete operations must not specify sha256.")

@@ -191,7 +191,7 @@ class ApplyTests(unittest.TestCase):
                 "state": "preparing",
                 "from_version": "1.0.0",
                 "to_version": "1.0.1",
-                "entries": [{"path": "modules/sample.txt", "existed": True, "sha256": None}],
+                "entries": [\n                    {"path": "modules/sample.txt", "existed": True, "sha256": None},\n                    {"path": "VERSION.txt", "existed": True, "sha256": None},\n                ],
             }
             patch_applier._write_journal(backup_root, journal)
 

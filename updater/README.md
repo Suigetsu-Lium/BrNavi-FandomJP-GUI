@@ -35,7 +35,7 @@ The builder compares the full deployed PyInstaller onedir folders, including the
 
 ## Patch archive format (v1)
 
-A patch ZIP contains `patch_manifest.json` and only the payload files referenced by that manifest:
+A signed patch ZIP contains `patch_manifest.json`, the 64-byte raw Ed25519 signature `patch_manifest.sig`, and only the payload files referenced by the manifest. The signature covers the exact UTF-8 bytes of `patch_manifest.json`:
 
 ```json
 {
@@ -51,7 +51,7 @@ A patch ZIP contains `patch_manifest.json` and only the payload files referenced
 }
 ```
 
-For add and replace, the archive must contain `payload/<path>`. SHA-256 covers the exact payload bytes. Delete operations have no payload or hash.
+For add and replace, the archive must contain `payload/<path>`. SHA-256 covers the exact payload bytes. Delete operations have no payload or hash. The updater verifies the signature before parsing or applying the manifest.
 
 The updater validates the application ID, strict numeric version sequence, unique safe Windows paths, path-prefix collisions, protected data directories, ZIP entry names, payload presence, size limits, and hashes. It rejects symbolic-link/junction traversal in the installation path. It requires installed `VERSION.txt` to match `from_version`. Backups are stored under `update_backups/`. The updater writes `VERSION.txt` only after all file operations succeed and attempts rollback if an operation fails.
 

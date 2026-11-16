@@ -1,22 +1,47 @@
 """Tkinter entry point for the standalone BrNavi updater."""
 from __future__ import annotations
-import argparse, subprocess, sys, tkinter as tk, zipfile
+import argparse, os, subprocess, sys, tkinter as tk, zipfile
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from updater.patch_applier import PatchApplyError, apply_patch, read_current_version
 
 APP_NAME = "BrNavi Fandom JP Updater"
 
-def _is_app_running() -> bool:
-    if sys.platform != "win32": return False
+def _is_app_running(install_dir: Path) -> bool:
+    """Check only the BrNavi process belonging to this installation.
+
+    If Windows cannot provide a reliable answer, fail closed rather than risk
+    replacing files while the application is running.
+    """
+    if sys.platform != "win32":
+        return False
+    target = str((install_dir / "BrNavi-GUI.exe").resolve())
+    script = (
+        "$ErrorActionPreference = 'Stop'; "
+        "$target = [IO.Path]::GetFullPath($env:BRNAVI_TARGET); "
+        "$items = Get-CimInstance Win32_Process -Filter \"Name='BrNavi-GUI.exe'\"; "
+        "foreach ($item in $items) { "
+        "if ($item.ExecutablePath -and "
+        "[String]::Equals([IO.Path]::GetFullPath($item.ExecutablePath), "
+        "$target, [StringComparison]::OrdinalIgnoreCase)) { exit 10 } }; exit 0"
+    )
+    env = os.environ.copy()
+    env["BRNAVI_TARGET"] = target
     try:
         result = subprocess.run(
-            ["tasklist", "/FI", "IMAGENAME eq BrNavi-GUI.exe", "/FO", "CSV", "/NH"],
-            capture_output=True, text=True, encoding="mbcs", errors="replace",
-            timeout=5, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), check=False)
-        return "BrNavi-GUI.exe" in result.stdout
-    except (OSError, subprocess.SubprocessError):
-        return False
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=10, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            check=False, env=env,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"BrNaviの起動状態を確認できません: {exc}") from exc
+    if result.returncode == 10:
+        return True
+    if result.returncode != 0:
+        detail = result.stderr.strip() or f"PowerShell exit code: {result.returncode}"
+        raise RuntimeError(f"BrNaviの起動状態を確認できません: {detail}")
+    return False
 
 class UpdaterWindow:
     def __init__(self, root: tk.Tk, install_dir: Path, patch_arg: str | None = None):
@@ -51,8 +76,12 @@ class UpdaterWindow:
         value = self.path_var.get().strip()
         if not value:
             messagebox.showwarning(APP_NAME, "先にパッチZIPを選択してください。"); return
-        if _is_app_running():
-            messagebox.showwarning(APP_NAME, "BrNavi-GUI.exeが起動中です。終了してから再試行してください。"); return
+        try:
+            app_running = _is_app_running(self.install_dir)
+        except RuntimeError as exc:
+            messagebox.showerror(APP_NAME, f"{exc}\n安全のため更新を中止しました。"); return
+        if app_running:
+            messagebox.showwarning(APP_NAME, "このインストール先のBrNavi-GUI.exeが起動中です。終了してから再試行してください。"); return
         if not messagebox.askyesno(APP_NAME, "パッチを適用します。既存のユーザーデータとデータベースは変更しません。続行しますか？"):
             return
         self.apply_button.configure(state="disabled"); self.status.set("パッチを検証・適用しています...")

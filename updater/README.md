@@ -31,7 +31,7 @@ python -m updater.build_patch ^
   --signing-key "E:\\SecureKeys\\BrNavi-update-private.pem"
 ```
 
-The builder compares the full deployed PyInstaller onedir folders, including the executable and runtime DLLs. It creates add/replace/delete operations, sorts entries deterministically, and writes a reproducible ZIP. The CLI requires an Ed25519 private signing key and adds a detached signature over the exact manifest bytes. User data roots (SQLite database, downloaded Wiki HTML/images, indexes, settings, caches, logs and backups) and `VERSION.txt` are excluded. `Updater.exe` is excluded from normal diffs; the bootstrap option can add it exactly once. Generated ZIPs and EXEs must be published as release assets, not committed to Git.
+The builder compares the full deployed PyInstaller onedir folders, including the executable and runtime DLLs. It creates add/replace/delete operations, sorts entries deterministically, and writes a reproducible ZIP. The CLI requires an Ed25519 private signing key and adds a detached signature over the exact manifest bytes. User data roots (SQLite database, downloaded Wiki HTML/images, indexes, settings, caches, logs and backups) and `VERSION.txt` are excluded. Database, SQLite sidecar, log, credential, secret, key, and PEM file types are also excluded regardless of their directory. `Updater.exe` is excluded from normal diffs; the bootstrap option can add it exactly once. Generated ZIPs and EXEs must be published as release assets, not committed to Git.
 
 ## Patch archive format (v1)
 
@@ -53,7 +53,7 @@ A signed patch ZIP contains `patch_manifest.json`, the 64-byte raw Ed25519 signa
 
 For add and replace, the archive must contain `payload/<path>`. SHA-256 covers the exact payload bytes. Delete operations have no payload or hash. The updater verifies the signature before parsing or applying the manifest.
 
-The updater validates the application ID, strict numeric version sequence, unique safe Windows paths, path-prefix collisions, protected data directories, ZIP entry names, payload presence, size limits, and hashes. It rejects symbolic-link/junction traversal in the installation path. It requires installed `VERSION.txt` to match `from_version`. Backups are stored under `update_backups/`. The updater writes `VERSION.txt` only after all file operations succeed and attempts rollback if an operation fails.
+The updater validates the application ID, strict numeric version sequence, unique safe Windows paths, path-prefix collisions, protected data directories, ZIP entry names, payload presence, size limits, and hashes. It rejects symbolic-link/junction traversal in the installation path, including redirected `VERSION.txt` and backup locations. It requires installed `VERSION.txt` to match `from_version`. Backups are stored under `update_backups/`. The updater writes `VERSION.txt` only after all file operations succeed and attempts rollback if an operation fails.
 
 The bootstrap patch may add `Updater.exe` once; the running updater cannot update itself. To bootstrap an existing v1.0.0 installation, extract the bootstrap `Updater.exe` to a temporary folder and run it with `--install-dir` pointing to the existing `BrNavi-GUI.exe` folder. The patch then adds `Updater.exe` beside the main application.
 

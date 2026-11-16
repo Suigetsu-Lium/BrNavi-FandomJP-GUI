@@ -6,7 +6,7 @@ if errorlevel 1 exit /b 1
 set "PYTHON=python"
 if exist "%ROOT%\.venv\Scripts\python.exe" set "PYTHON=%ROOT%\.venv\Scripts\python.exe"
 echo [1/2] Checking PyInstaller and Tkinter...
-"%PYTHON%" -c "import PyInstaller, tkinter"
+"%PYTHON%" -c "import PyInstaller, tkinter, cryptography"
 if errorlevel 1 goto missing_dependencies
 echo [2/2] Building standalone Updater.exe...
 "%PYTHON%" -m PyInstaller --clean --noconfirm --onefile --windowed --name Updater --distpath "dist\Updater" --workpath "build\pyinstaller-updater" --specpath "build\spec-updater" --paths "%ROOT%" "updater\main.py"

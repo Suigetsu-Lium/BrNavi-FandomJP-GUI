@@ -5,7 +5,7 @@
 - A standalone Updater.exe, separate from BrNavi-GUI.exe.
 - Preserve the installed database and all user-generated Wiki data.
 - Human downloads and selects a patch ZIP; no automatic download or silent application.
-- No dependency on the BrNavi runtime or third-party Python packages at runtime.
+- No separate Python installation or BrNavi runtime dependency; the required cryptography runtime is bundled inside the standalone Updater.exe by PyInstaller.
 
 ## Repository layout
 - updater/: updater source, manifest validation, patch building and application.

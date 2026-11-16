@@ -31,12 +31,16 @@ class PatchBuilderTests(unittest.TestCase):
                 "modules/removed.py": b"remove",
                 "database/app.db": b"private database",
                 "downloaded_images/photo.png": b"private image",
+                "session.sqlite3": b"private sqlite data",
+                "modules/local.log": b"private log",
             })
             new = self._release(base / "new", "1.0.1", {
                 "BrNavi-GUI.exe": b"new exe",
                 "modules/changed.py": b"new",
                 "modules/added.py": b"added",
                 "database/app.db": b"should never be packaged",
+                "session.sqlite3": b"updated private sqlite data",
+                "modules/local.log": b"updated private log",
             })
             patch = base / "update.zip"
             result = build_patch(old, new, patch)

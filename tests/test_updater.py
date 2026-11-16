@@ -68,7 +68,7 @@ class ApplyTests(unittest.TestCase):
             (root / "database/app.db").write_bytes(b"valuable")
             patch = root / "patch.zip"
             make_patch(patch)
-            version, backup = apply_patch(root, patch)
+            version, backup = apply_patch(root, patch, require_signature=False)
             self.assertEqual(version, "1.0.1")
             self.assertEqual((root / "modules/sample.txt").read_text(), "new contents")
             self.assertEqual((root / "database/app.db").read_bytes(), b"valuable")
@@ -83,7 +83,7 @@ class ApplyTests(unittest.TestCase):
             patch = root / "patch.zip"
             make_patch(patch, from_version="1.0.2", to_version="1.0.3")
             with self.assertRaises(PatchApplyError):
-                apply_patch(root, patch)
+                apply_patch(root, patch, require_signature=False)
             self.assertEqual((root / "modules/sample.txt").read_text(), "old")
 
     def test_add_and_delete(self):
@@ -96,7 +96,7 @@ class ApplyTests(unittest.TestCase):
                 ("old.txt", "delete", None),
                 ("new.txt", "add", b"added"),
             ])
-            apply_patch(root, patch)
+            apply_patch(root, patch, require_signature=False)
             self.assertFalse((root / "old.txt").exists())
             self.assertEqual((root / "new.txt").read_bytes(), b"added")
 
@@ -111,7 +111,7 @@ class ApplyTests(unittest.TestCase):
             make_patch(patch_zip)
             with patch.object(patch_applier, "_write_atomic", side_effect=OSError("simulated disk error")):
                 with self.assertRaises(PatchApplyError):
-                    apply_patch(root, patch_zip)
+                    apply_patch(root, patch_zip, require_signature=False)
             self.assertEqual(target.read_text(encoding="utf-8"), "original")
             self.assertEqual((root / "VERSION.txt").read_text(encoding="utf-8"), "v1.0.0")
 

@@ -104,8 +104,12 @@ def main() -> int:
     args = parser.parse_args()
     install_dir = args.install_dir or (Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path.cwd())
     try:
+        if _is_app_running(install_dir):
+            raise PatchApplyError(
+                "BrNavi-GUI.exe is running. Close this installation before automatic recovery."
+            )
         recovered = recover_interrupted_updates(install_dir)
-    except (PatchApplyError, OSError, ValueError) as exc:
+    except (PatchApplyError, OSError, ValueError, RuntimeError) as exc:
         # Recovery must finish before the updater offers another patch operation.
         root = tk.Tk()
         root.withdraw()

@@ -5,6 +5,9 @@ import unittest
 import zipfile
 from pathlib import Path
 
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
 from updater.build_patch import PatchBuildError, build_patch
 from updater.manifest import load_manifest
 
@@ -83,6 +86,28 @@ class PatchBuilderTests(unittest.TestCase):
             build_patch(old, new, second)
             self.assertEqual(first.read_bytes(), second.read_bytes())
 
+
+    def test_builder_signs_patch_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            old = self._release(base / "old", "1.0.0", {"BrNavi-GUI.exe": b"old"})
+            new = self._release(base / "new", "1.0.1", {"BrNavi-GUI.exe": b"new"})
+            private_key = Ed25519PrivateKey.generate()
+            private_path = base / "offline-private.pem"
+            private_path.write_bytes(private_key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            ))
+            public_bytes = private_key.public_key().public_bytes(
+                serialization.Encoding.Raw, serialization.PublicFormat.Raw
+            )
+            patch = base / "signed.zip"
+            build_patch(old, new, patch, signing_key=private_path)
+            with zipfile.ZipFile(patch) as archive:
+                self.assertIn("patch_manifest.sig", archive.namelist())
+                manifest = load_manifest(archive, require_signature=True, public_key_bytes=public_bytes)
+            self.assertEqual(manifest.to_version, "1.0.1")
 
 if __name__ == "__main__":
     unittest.main()

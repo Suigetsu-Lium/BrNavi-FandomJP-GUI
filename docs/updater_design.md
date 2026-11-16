@@ -14,7 +14,7 @@
 - Generated executables and patch ZIPs are not committed; release assets belong on GitHub Releases.
 
 ## Installed layout
-Updater.exe is placed beside BrNavi-GUI.exe. Its installation root is the directory containing the executable. A patch ZIP contains patch_manifest.json and payload/<relative-path> entries.
+Updater.exe is placed beside BrNavi-GUI.exe. Normally its installation root is the directory containing the executable. For the initial bootstrap only, the extracted updater is launched from a temporary directory with --install-dir set to the existing BrNavi-GUI.exe directory; the patch adds Updater.exe there. A running Updater.exe cannot overwrite itself, so later patches must not replace it. A patch ZIP contains patch_manifest.json and payload/<relative-path> entries.
 
 ## Application sequence
 1. User closes BrNavi and launches Updater.exe.
@@ -31,6 +31,6 @@ The manifest validator rejects paths rooted at database/, downloaded_fandom_html
 
 ## Before public distribution
 - Implement detached digital signature verification; SHA-256 alone is not publisher authentication.
-- Implement deterministic patch creation between consecutive built release folders, including the first Updater.exe bootstrap.
+- Implement deterministic patch creation between consecutive built release folders, including the first Updater.exe bootstrap (the bootstrap updater must be run from a temporary folder with an explicit --install-dir).
 - Test traversal, protected data paths, corrupt hashes, wrong source versions, add/replace/delete, and rollback.
 - Verify the actual PyInstaller onedir layout and test on clean Windows 10/11 installations.

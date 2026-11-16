@@ -49,6 +49,8 @@ class PatchBuilderTests(unittest.TestCase):
                 "downloaded_images/photo.png": b"private image",
                 "session.sqlite3": b"private sqlite data",
                 "modules/local.log": b"private log",
+                "modules/id_ed25519": b"private key",
+                "cache/session.sqlite3-wal": b"private database journal",
             })
             new = self._release(base / "new", "1.0.1", {
                 "BrNavi-GUI.exe": b"new exe",
@@ -57,6 +59,8 @@ class PatchBuilderTests(unittest.TestCase):
                 "database/app.db": b"should never be packaged",
                 "session.sqlite3": b"updated private sqlite data",
                 "modules/local.log": b"updated private log",
+                "modules/id_ed25519": b"updated private key",
+                "cache/session.sqlite3-wal": b"updated private database journal",
             })
             patch = base / "update.zip"
             signing_key = self._signing_key(base)
@@ -74,7 +78,12 @@ class PatchBuilderTests(unittest.TestCase):
                     "modules/removed.py": "delete",
                 })
                 names = archive.namelist()
-                self.assertFalse(any("database" in name or "downloaded_images" in name for name in names))
+                self.assertFalse(any(
+                    any(token in name.casefold() for token in (
+                        "database", "downloaded_images", "sqlite3-wal", "id_ed25519", "local.log"
+                    ))
+                    for name in names
+                ))
 
     def test_bootstrap_adds_updater_only_once(self):
         with tempfile.TemporaryDirectory() as tmp:

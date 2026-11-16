@@ -116,5 +116,20 @@ class ApplyTests(unittest.TestCase):
             self.assertEqual(target.read_text(encoding="utf-8"), "original")
             self.assertEqual((root / "VERSION.txt").read_text(encoding="utf-8"), "v1.0.0")
 
+    def test_refuses_non_directory_backup_location_without_modifying_install(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "VERSION.txt").write_text("v1.0.0", encoding="utf-8")
+            (root / "modules").mkdir()
+            target = root / "modules/sample.txt"
+            target.write_text("original", encoding="utf-8")
+            (root / "update_backups").write_text("not a directory", encoding="utf-8")
+            patch_zip = root / "patch.zip"
+            make_patch(patch_zip)
+            with self.assertRaises(PatchApplyError):
+                apply_patch(root, patch_zip, require_signature=False)
+            self.assertEqual(target.read_text(encoding="utf-8"), "original")
+            self.assertEqual((root / "VERSION.txt").read_text(encoding="utf-8"), "v1.0.0")
+
 if __name__ == "__main__":
     unittest.main()

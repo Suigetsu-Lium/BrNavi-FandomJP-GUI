@@ -31,6 +31,26 @@ _RESERVED_FILES = {
     "version.txt", ".env", "config.json", "settings.json",
     "api_keys.json", "credentials.json", "secrets.json",
 }
+_PROTECTED_DATA_NAMES = {
+    ".env", "config.json", "settings.json", "api_keys.json",
+    "credentials.json", "secrets.json",
+}
+_PROTECTED_DATA_SUFFIXES = (
+    ".db", ".sqlite", ".sqlite3", ".db-wal", ".db-shm",
+    ".sqlite-wal", ".sqlite-shm", ".log", ".secret", ".key", ".pem",
+)
+
+
+def is_protected_data_file(value: str) -> bool:
+    """Return True for database, credential, log, and transient data files."""
+    name = value.rsplit("/", 1)[-1].casefold()
+    return (
+        name in _PROTECTED_DATA_NAMES
+        or name.startswith(".env.")
+        or name.endswith(_PROTECTED_DATA_SUFFIXES)
+    )
+
+
 _WINDOWS_RESERVED = {
     "con", "prn", "aux", "nul",
     *(f"com{i}" for i in range(1, 10)),
@@ -75,8 +95,8 @@ def _safe_relative_path(value: str) -> str:
         raise PatchValidationError(f"Unsafe patch path: {value!r}")
     if not path.parts or path.parts[0].lower() in _RESERVED_ROOTS:
         raise PatchValidationError(f"Patch is not allowed to modify user data: {value!r}")
-    if path.as_posix().lower() in _RESERVED_FILES:
-        raise PatchValidationError(f"Patch targets a protected application file: {value!r}")
+    if path.as_posix().lower() in _RESERVED_FILES or is_protected_data_file(path.as_posix()):
+        raise PatchValidationError(f"Patch targets a protected application or user-data file: {value!r}")
     for part in path.parts:
         stem = part.rstrip(" .").split(".")[0].lower()
         if (part.endswith((" ", ".")) or any(ord(ch) < 32 or ch in '<>:"|?*' for ch in part)

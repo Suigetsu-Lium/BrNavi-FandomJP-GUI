@@ -30,6 +30,17 @@ def read_current_version(install_dir: Path) -> str:
     return value
 
 
+def validate_installation(install_dir: Path) -> str:
+    """Validate that the target is a deployed BrNavi GUI installation."""
+    install_dir = install_dir.resolve()
+    executable = install_dir / "BrNavi-GUI.exe"
+    if _is_reparse_point(executable):
+        raise PatchApplyError("BrNavi-GUI.exe must not be a symbolic link or junction.")
+    if not executable.is_file():
+        raise PatchApplyError("BrNavi-GUI.exe was not found. Select the deployed application folder.")
+    return read_current_version(install_dir)
+
+
 def _is_reparse_point(path: Path) -> bool:
     try:
         info = path.lstat()
@@ -132,7 +143,7 @@ def apply_patch(
     if not install_dir.is_dir():
         raise PatchApplyError("BrNavi installation directory was not found.")
 
-    current_version = read_current_version(install_dir)
+    current_version = validate_installation(install_dir)
     with zipfile.ZipFile(patch_path, "r") as archive:
         manifest = load_manifest(
             archive,

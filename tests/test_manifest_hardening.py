@@ -61,6 +61,11 @@ class ManifestHardeningTests(unittest.TestCase):
     def test_rejects_secret_files_in_nested_directories(self):
         self._assert_invalid([("modules/private.pem", "delete", None)])
 
+    def test_rejects_sqlite3_sidecars_and_ssh_private_keys(self):
+        self._assert_invalid([("cache/session.sqlite3-wal", "delete", None)])
+        self._assert_invalid([("modules/id_ed25519", "delete", None)])
+        self._assert_invalid([("modules/backup.p12", "delete", None)])
+
     def test_rejects_unreferenced_zip_payload(self):
         with tempfile.TemporaryDirectory() as tmp:
             patch = Path(tmp) / "patch.zip"

@@ -21,6 +21,7 @@ def _is_app_running(install_dir: Path) -> bool:
         "$target = [IO.Path]::GetFullPath($env:BRNAVI_TARGET); "
         "$items = Get-CimInstance Win32_Process -Filter \"Name='BrNavi-GUI.exe'\"; "
         "foreach ($item in $items) { "
+        "if (-not $item.ExecutablePath) { exit 10 }; "
         "if ($item.ExecutablePath -and "
         "[String]::Equals([IO.Path]::GetFullPath($item.ExecutablePath), "
         "$target, [StringComparison]::OrdinalIgnoreCase)) { exit 10 } }; exit 0"

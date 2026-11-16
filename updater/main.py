@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse, os, subprocess, sys, tkinter as tk, zipfile
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from updater.patch_applier import PatchApplyError, apply_patch, read_current_version
+from updater.patch_applier import PatchApplyError, apply_patch, validate_installation
 
 APP_NAME = "BrNavi Fandom JP Updater"
 
@@ -51,7 +51,7 @@ class UpdaterWindow:
         frame = ttk.Frame(root, padding=20); frame.pack(fill="both", expand=True)
         ttk.Label(frame, text=APP_NAME, font=("Segoe UI", 16, "bold")).pack(anchor="w")
         ttk.Label(frame, text=f"インストール先: {self.install_dir}", wraplength=510).pack(anchor="w", pady=(8, 4))
-        try: current = read_current_version(self.install_dir); startup_error = None
+        try: current = validate_installation(self.install_dir); startup_error = None
         except PatchApplyError as exc: current, startup_error = "不明", str(exc)
         ttk.Label(frame, text=f"現在のバージョン: v{current}").pack(anchor="w", pady=(4, 12))
         row = ttk.Frame(frame); row.pack(fill="x")

@@ -53,8 +53,8 @@ class PatchBuilderTests(unittest.TestCase):
     def test_bootstrap_adds_updater_only_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            old = self._release(base / "old", "1.0.0", {"app.exe": b"same"})
-            new = self._release(base / "new", "1.0.1", {"app.exe": b"same"})
+            old = self._release(base / "old", "1.0.0", {"BrNavi-GUI.exe": b"same"})
+            new = self._release(base / "new", "1.0.1", {"BrNavi-GUI.exe": b"same"})
             updater = base / "Updater.exe"
             updater.write_bytes(b"updater binary")
             patch = base / "bootstrap.zip"
@@ -68,8 +68,8 @@ class PatchBuilderTests(unittest.TestCase):
     def test_rejects_non_sequential_release(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            old = self._release(base / "old", "1.0.1", {"app.exe": b"a"})
-            new = self._release(base / "new", "1.0.0", {"app.exe": b"b"})
+            old = self._release(base / "old", "1.0.1", {"BrNavi-GUI.exe": b"a"})
+            new = self._release(base / "new", "1.0.0", {"BrNavi-GUI.exe": b"b"})
             with self.assertRaises(PatchBuildError):
                 build_patch(old, new, base / "bad.zip")
 

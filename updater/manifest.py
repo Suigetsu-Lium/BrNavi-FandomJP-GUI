@@ -33,11 +33,14 @@ _RESERVED_FILES = {
 }
 _PROTECTED_DATA_NAMES = {
     ".env", "config.json", "settings.json", "api_keys.json",
-    "credentials.json", "secrets.json",
+    "credentials.json", "secrets.json", "id_rsa", "id_ed25519",
+    "id_ecdsa", "id_dsa", "private.key", "master.key",
 }
 _PROTECTED_DATA_SUFFIXES = (
-    ".db", ".sqlite", ".sqlite3", ".db-wal", ".db-shm",
-    ".sqlite-wal", ".sqlite-shm", ".log", ".secret", ".key", ".pem",
+    ".db", ".sqlite", ".sqlite3", ".s3db", ".sl3",
+    ".db-wal", ".db-shm", ".sqlite-wal", ".sqlite-shm",
+    ".sqlite3-wal", ".sqlite3-shm", ".log", ".secret",
+    ".key", ".pem", ".p12", ".pfx", ".ppk", ".asc", ".gpg", ".kdbx",
 )
 
 

@@ -114,7 +114,10 @@ def apply_patch(install_dir: Path, patch_path: Path) -> tuple[str, Path]:
                 f"This patch requires v{manifest.from_version}; installed version is v{current_version}."
             )
         planned = _preflight(install_dir, manifest, archive)
-        backup_root = install_dir / "update_backups" / (
+        backup_parent = _target_path(install_dir, "update_backups")
+        if backup_parent.exists() and not backup_parent.is_dir():
+            raise PatchApplyError("update_backups exists but is not a directory.")
+        backup_root = backup_parent / (
             f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{manifest.from_version}_to_{manifest.to_version}"
         )
         backup_root.mkdir(parents=True, exist_ok=False)

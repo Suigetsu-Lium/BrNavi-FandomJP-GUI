@@ -23,6 +23,12 @@ class PatchBuilderTests(unittest.TestCase):
         ))
         return path
 
+    def _public_key(self, private_path: Path) -> bytes:
+        private_key = serialization.load_pem_private_key(private_path.read_bytes(), password=None)
+        return private_key.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw
+        )
+
     def _release(self, root: Path, version: str, files: dict[str, bytes]) -> Path:
         root.mkdir()
         (root / "VERSION.txt").write_text(f"v{version}\n", encoding="utf-8")
@@ -53,10 +59,13 @@ class PatchBuilderTests(unittest.TestCase):
                 "modules/local.log": b"updated private log",
             })
             patch = base / "update.zip"
-            result = build_patch(old, new, patch, signing_key=self._signing_key(base))
+            signing_key = self._signing_key(base)
+            result = build_patch(old, new, patch, signing_key=signing_key)
             self.assertEqual(result["operation_count"], 4)
             with zipfile.ZipFile(patch) as archive:
-                manifest = load_manifest(archive)
+                manifest = load_manifest(
+                    archive, require_signature=True, public_key_bytes=self._public_key(signing_key)
+                )
                 paths = {item.path: item.action for item in manifest.files}
                 self.assertEqual(paths, {
                     "BrNavi-GUI.exe": "replace",
@@ -75,9 +84,12 @@ class PatchBuilderTests(unittest.TestCase):
             updater = base / "Updater.exe"
             updater.write_bytes(b"updater binary")
             patch = base / "bootstrap.zip"
-            build_patch(old, new, patch, updater, signing_key=self._signing_key(base))
+            signing_key = self._signing_key(base)
+            build_patch(old, new, patch, updater, signing_key=signing_key)
             with zipfile.ZipFile(patch) as archive:
-                manifest = load_manifest(archive)
+                manifest = load_manifest(
+                    archive, require_signature=True, public_key_bytes=self._public_key(signing_key)
+                )
                 updater_op = [item for item in manifest.files if item.path == "Updater.exe"]
                 self.assertEqual(len(updater_op), 1)
                 self.assertEqual(updater_op[0].action, "add")

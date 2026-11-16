@@ -79,7 +79,7 @@ class ApplyTests(unittest.TestCase):
             (root / "modules").mkdir()
             (root / "modules/sample.txt").write_text("old", encoding="utf-8")
             patch = root / "patch.zip"
-            make_patch(patch, from_version="1.0.2")
+            make_patch(patch, from_version="1.0.2", to_version="1.0.3")
             with self.assertRaises(PatchApplyError):
                 apply_patch(root, patch)
             self.assertEqual((root / "modules/sample.txt").read_text(), "old")

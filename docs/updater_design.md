@@ -24,7 +24,7 @@ Updater.exe is placed beside BrNavi-GUI.exe. Normally its installation root is t
 5. The ZIP has stable entry ordering and timestamps for reproducible output.
 
 ## Application sequence
-1. User closes BrNavi and launches Updater.exe.
+1. User closes BrNavi and launches Updater.exe. On Windows, the updater checks the exact executable path for this installation and refuses to proceed if it is running; an indeterminate process check also blocks the update.
 2. User selects a downloaded patch ZIP.
 3. Updater validates format, application ID, strict numeric versions, safe Windows paths, case collisions, path-prefix collisions, archive contents, payload presence, size caps, and SHA-256.
 4. Installation VERSION.txt must exactly match the patch from_version.

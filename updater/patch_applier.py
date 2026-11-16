@@ -10,7 +10,7 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
-from .manifest import PatchValidationError, _safe_relative_path, load_manifest
+from .manifest import PatchValidationError, _safe_relative_path, load_manifest, normalize_version
 
 JOURNAL_NAME = ".brnavi-update-journal.json"
 TRANSACTION_MARKER_NAME = ".brnavi-transaction"
@@ -126,10 +126,25 @@ def _read_journal(backup_root: Path) -> dict:
         journal = json.loads(journal_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise PatchApplyError(f"Update recovery journal is unreadable: {journal_path}") from exc
-    if (not isinstance(journal, dict) or journal.get("schema") != JOURNAL_SCHEMA
+    if (not isinstance(journal, dict) or type(journal.get("schema")) is not int
+            or journal.get("schema") != JOURNAL_SCHEMA
             or journal.get("state") not in _TRANSACTION_STATES
-            or not isinstance(journal.get("entries"), list) or not journal["entries"]):
+            or not isinstance(journal.get("entries"), list) or not journal["entries"]
+            or not isinstance(journal.get("from_version"), str)
+            or not isinstance(journal.get("to_version"), str)):
         raise PatchApplyError(f"Update recovery journal has an unsupported or invalid structure: {journal_path}")
+    try:
+        if normalize_version(journal["to_version"]) <= normalize_version(journal["from_version"]):
+            raise PatchApplyError("Update recovery journal contains an invalid version transition.")
+    except PatchValidationError as exc:
+        raise PatchApplyError("Update recovery journal contains an invalid version.") from exc
+    paths = []
+    for entry in journal["entries"]:
+        if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+            raise PatchApplyError("Update recovery journal contains an invalid target entry.")
+        paths.append(entry["path"].casefold())
+    if len(paths) != len(set(paths)) or paths.count("version.txt") != 1:
+        raise PatchApplyError("Update recovery journal has duplicate paths or no unique VERSION.txt entry.")
     return journal
 
 

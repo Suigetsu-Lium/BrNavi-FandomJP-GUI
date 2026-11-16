@@ -106,7 +106,8 @@ def build_patch(
     to_dir: Path,
     output: Path,
     bootstrap_updater: Path | None = None,
-    signing_key: Path | None = None,
+    *,
+    signing_key: Path,
 ) -> dict:
     if signing_key is None:
         raise PatchBuildError("A private Ed25519 signing key is required; unsigned patches are not supported.")
@@ -228,7 +229,7 @@ def main() -> int:
     try:
         result = build_patch(
             args.from_dir, args.to_dir, args.output,
-            args.bootstrap_updater, args.signing_key,
+            args.bootstrap_updater, signing_key=args.signing_key,
         )
     except (OSError, PatchBuildError, ValueError) as exc:
         parser.error(str(exc))

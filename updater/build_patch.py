@@ -108,7 +108,10 @@ def build_patch(
     bootstrap_updater: Path | None = None,
     signing_key: Path | None = None,
 ) -> dict:
+    if signing_key is None:
+        raise PatchBuildError("A private Ed25519 signing key is required; unsigned patches are not supported.")
     from_dir, to_dir, output = from_dir.resolve(), to_dir.resolve(), output.resolve()
+    signing_key = signing_key.resolve()
     from_version, to_version = _read_version(from_dir), _read_version(to_dir)
     if normalize_version(to_version) <= normalize_version(from_version):
         raise PatchBuildError("Target release must have a higher version than source release.")
@@ -182,15 +185,14 @@ def build_patch(
         payload_total += len(data)
         if payload_total > MAX_TOTAL_PAYLOAD_BYTES:
             raise PatchBuildError("Generated patch payload exceeds the total size limit.")
-    signature_bytes = sign_manifest(manifest_bytes, signing_key) if signing_key is not None else None
+    signature_bytes = sign_manifest(manifest_bytes, signing_key)
     output.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix=f".{output.name}.", suffix=".tmp", dir=str(output.parent))
     os.close(fd)
     try:
         with zipfile.ZipFile(temp_name, "w") as archive:
             _zip_write(archive, "patch_manifest.json", manifest_bytes)
-            if signature_bytes is not None:
-                _zip_write(archive, "patch_manifest.sig", signature_bytes)
+            _zip_write(archive, "patch_manifest.sig", signature_bytes)
             for name in sorted(payloads, key=str.casefold):
                 _zip_write(archive, name, payloads[name])
         os.replace(temp_name, output)

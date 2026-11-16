@@ -146,6 +146,7 @@ class ApplyTests(unittest.TestCase):
             backup_file = backup_root / "files/modules/sample.txt"
             version_backup = backup_root / "files/VERSION.txt"
             backup_file.parent.mkdir(parents=True)
+            (backup_root / patch_applier.TRANSACTION_MARKER_NAME).write_bytes(b"BRNAVI-UPDATE-TRANSACTION-1")
             backup_file.write_bytes(b"original")
             version_backup.write_bytes(b"v1.0.0\n")
             journal = {
@@ -182,6 +183,7 @@ class ApplyTests(unittest.TestCase):
             target.write_bytes(b"original")
             backup_root = root / "update_backups" / "preparing"
             backup_root.mkdir(parents=True)
+            (backup_root / patch_applier.TRANSACTION_MARKER_NAME).write_bytes(b"BRNAVI-UPDATE-TRANSACTION-1")
             journal = {
                 "schema": patch_applier.JOURNAL_SCHEMA,
                 "state": "preparing",
@@ -206,6 +208,7 @@ class ApplyTests(unittest.TestCase):
             target.write_bytes(b"possibly updated")
             backup_root = root / "update_backups" / "incomplete"
             backup_root.mkdir(parents=True)
+            (backup_root / patch_applier.TRANSACTION_MARKER_NAME).write_bytes(b"BRNAVI-UPDATE-TRANSACTION-1")
             journal = {
                 "schema": patch_applier.JOURNAL_SCHEMA,
                 "state": "applying",

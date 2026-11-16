@@ -1,6 +1,8 @@
 from __future__ import annotations
 import hashlib, json, tempfile, unittest, zipfile
 from pathlib import Path
+from unittest.mock import patch
+import updater.patch_applier as patch_applier
 from updater.manifest import PatchValidationError, load_manifest
 from updater.patch_applier import PatchApplyError, apply_patch
 
@@ -97,6 +99,21 @@ class ApplyTests(unittest.TestCase):
             apply_patch(root, patch)
             self.assertFalse((root / "old.txt").exists())
             self.assertEqual((root / "new.txt").read_bytes(), b"added")
+
+    def test_failed_write_rolls_back_files_and_keeps_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "VERSION.txt").write_text("v1.0.0", encoding="utf-8")
+            (root / "modules").mkdir()
+            target = root / "modules/sample.txt"
+            target.write_text("original", encoding="utf-8")
+            patch_zip = root / "patch.zip"
+            make_patch(patch_zip)
+            with patch.object(patch_applier, "_write_atomic", side_effect=OSError("simulated disk error")):
+                with self.assertRaises(PatchApplyError):
+                    apply_patch(root, patch_zip)
+            self.assertEqual(target.read_text(encoding="utf-8"), "original")
+            self.assertEqual((root / "VERSION.txt").read_text(encoding="utf-8"), "v1.0.0")
 
 if __name__ == "__main__":
     unittest.main()

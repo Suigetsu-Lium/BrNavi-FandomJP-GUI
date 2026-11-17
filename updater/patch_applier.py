@@ -15,6 +15,7 @@ from .manifest import PatchValidationError, _safe_relative_path, load_manifest, 
 JOURNAL_NAME = ".brnavi-update-journal.json"
 TRANSACTION_MARKER_NAME = ".brnavi-transaction"
 JOURNAL_SCHEMA = 1
+TRANSACTION_MARKER = b"BRNAVI-UPDATE-TRANSACTION-1"
 _TRANSACTION_STATES = {"preparing", "applying", "rolling_back", "rolled_back", "committed"}
 
 
@@ -309,7 +310,7 @@ def apply_patch(
         backup_root.mkdir(parents=True, exist_ok=False)
         _write_atomic(
             backup_root / TRANSACTION_MARKER_NAME,
-            f"BrNavi updater transaction schema {JOURNAL_SCHEMA}\\n".encode("ascii"),
+            TRANSACTION_MARKER,
         )
 
         entries = []

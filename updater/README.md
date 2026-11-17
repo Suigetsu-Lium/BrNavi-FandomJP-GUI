@@ -71,5 +71,5 @@ The script prints a Base64 public key. Copy it into `updater/trusted_public_key.
 
 - User databases, Wiki HTML/images, indexes, settings, credentials, and other runtime data are excluded by both the builder and the manifest validator.
 - SHA-256 checks payload integrity; Ed25519 authenticates the manifest and therefore the payload hashes and version transition.
-- The checked-in public key is intentionally blank until the maintainer creates and pins a real key. As a result, the current updater build fails closed and cannot apply production patches yet.
+- The Ed25519 public key is pinned in `updater/trusted_public_key.py`. Signed patches are accepted only when their manifest signature matches this key. Keep the matching private PEM offline and outside the repository.
 - Windows end-to-end testing is still required, including v1.0.0 bootstrap, sequential updates, process detection, and rollback.

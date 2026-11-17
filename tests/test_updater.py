@@ -76,7 +76,7 @@ class ApplyTests(unittest.TestCase):
             self.assertEqual((root / "VERSION.txt").read_text(encoding="utf-8"), "v1.0.1\n")
             self.assertEqual((root / "modules/sample.txt").read_text(), "new contents")
             self.assertEqual((root / "database/app.db").read_bytes(), b"valuable")
-            self.assertEqual((backup / "modules/sample.txt").read_text(), "old")
+            self.assertEqual((backup / "files/modules/sample.txt").read_text(), "old")
 
     def test_rejects_wrong_source_version_without_changes(self):
         with tempfile.TemporaryDirectory() as tmp:

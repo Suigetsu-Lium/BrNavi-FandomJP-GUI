@@ -168,7 +168,21 @@ Updaterは署名を検証できる逐次パッチだけを適用します。更�
 
 ### これからUpdaterを導入する場合
 
-Updater未導入の既存環境には、初回導入用のブートストラップ手順が必要です。GitHub Releasesに掲載する「Updater初回導入」リリースの説明に従ってください。初回導入後は、通常のアプリ更新でUpdaterを利用できます。
+Updater未導入の既存環境には、初回導入用のブートストラップ手順が必要です。GitHub Releasesに掲載する「Updater初回導入」リリースの説明に従ってください。
+
+初回導入用のBootstrapパッチ（v1.0.0 → v1.0.1）は、既存環境へ **Updater.exeを追加することだけ**を目的としています。BrNavi本体の実行ファイルや画面、機能は更新しないため、適用後もアプリのUIや表示内容は基本的に変わりません。`VERSION.txt` はUpdaterが次のパッチを適用する際に参照するバージョン情報であり、Bootstrap適用によって本体UIのバージョン表示や機能が変わることを意味しません。これは正常な動作です。
+
+Bootstrap適用後は、BrNavi本体のインストール先に `Updater.exe` が配置されます。次回からはその `Updater.exe` を起動して通常の逐次パッチを適用してください。
+
+#### 初回導入時のインストール先指定
+
+Bootstrap用のUpdater.exeを一時フォルダーから起動する場合、GUI上にインストール先の参照欄はありません。既定ではUpdater.exe自身のあるフォルダーが対象になるため、既存のBrNaviインストール先を `--install-dir` で明示して起動します。
+
+```powershell
+& "$env:USERPROFILE\Downloads\BrNavi-Updater.exe" --install-dir "C:\Path\To\BrNavi-GUI"
+```
+
+`C:\Path\To\BrNavi-GUI` は、`BrNavi-GUI.exe` と `VERSION.txt` が直接入っている実際のインストール先に置き換えてください。適用前にBrNavi本体を終了し、インストール先のバックアップを取ってください。初回導入後は、インストール先に配置された `Updater.exe` を通常どおり起動できます。
 
 ### Releaseに掲載するファイル
 

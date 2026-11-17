@@ -3,7 +3,11 @@ name: Updater tests
 on:
   push:
     branches:
-      - feature/standalone-updater
+      - main
+      - "feature/**"
+  pull_request:
+    branches:
+      - main
 
 jobs:
   test:

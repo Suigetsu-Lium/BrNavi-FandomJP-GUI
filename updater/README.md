@@ -1,94 +1,75 @@
-# BrNavi Fandom JP 更新プログラム
+# BrNavi Fandom JP Updater
 
-BrNavi本体とは別に起動する、Windows向けの独立した更新プログラムです。署名済みZIPパッチをバージョン順に適用します。更新を実行する前にBrNavi本体を終了してください。
+Standalone Windows updater for sequential ZIP patches. It is built separately from the GUI application and must run after BrNavi has been closed.
 
-## 更新プログラムのビルド
+## Build the updater
 
-リポジトリのルートで次を実行します。
+Run `scripts\\build_updater.bat` from the repository root. The output is `dist\\Updater\\Updater.exe`. PyInstaller and a Python installation with Tkinter are required.
 
-```bat
-scripts\build_updater.bat
-```
+## Build a sequential patch
 
-生成先は `dist\Updater\Updater.exe` です。ビルドにはPyInstallerとTkinterを利用できるPython環境が必要です。
+First build both complete application releases with `build_release.bat`. Pass the **inner deployed folders** (the folders containing `BrNavi-GUI.exe` and `VERSION.txt`), not the source tree or the outer staging folder.
 
-## 逐次パッチの作成
-
-まず `build_release.bat` で更新元・更新先それぞれの本体をビルドします。パッチ生成時に指定するのは、ソースコードのフォルダーや外側の作業フォルダーではなく、`BrNavi-GUI.exe` と `VERSION.txt` が直接入っている完成済み配布フォルダーです。
-
-通常の更新パッチの作成例：
+Example for a normal update:
 
 ```bat
 python -m updater.build_patch ^
-  --from-dir "releases\v1.0.1\BrNavi-GUI" ^
-  --to-dir "releases\v1.0.2\BrNavi-GUI" ^
-  --output "artifacts\BrNavi-v1.0.1-to-v1.0.2.patch.zip" ^
-  --signing-key "E:\SecureKeys\BrNavi-update-private.pem"
+  --from-dir "releases\\v1.1.0\\BrNavi-GUI" ^
+  --to-dir "releases\\v1.0.1\\BrNavi-GUI" ^
+  --output "artifacts\\BrNavi-v1.0.1-to-v1.1.0.patch.zip" ^
+  --signing-key "E:\\SecureKeys\\BrNavi-update-private.pem"
 ```
 
-Updaterをまだ持っていない既存インストールへ初めて導入する場合は、ブートストラップ用パッチにUpdater.exeを含めます。
+For the initial v1.0.0 bootstrap, include the separately built updater:
 
 ```bat
 python -m updater.build_patch ^
-  --from-dir "releases\v1.0.0\BrNavi-GUI" ^
-  --to-dir "releases\v1.0.1\BrNavi-GUI" ^
-  --bootstrap-updater "dist\Updater\Updater.exe" ^
-  --output "artifacts\BrNavi-v1.0.0-to-v1.0.1-bootstrap.patch.zip" ^
-  --signing-key "E:\SecureKeys\BrNavi-update-private.pem"
+  --from-dir "releases\\v1.0.0\\BrNavi-GUI" ^
+  --to-dir "releases\\v1.0.1\\BrNavi-GUI" ^
+  --bootstrap-updater "dist\\Updater\\Updater.exe" ^
+  --output "artifacts\\BrNavi-v1.0.0-to-v1.0.1-bootstrap.zip" ^
+  --signing-key "E:\\SecureKeys\\BrNavi-update-private.pem"
 ```
 
-生成処理は、完成済みのPyInstaller onedirフォルダー全体を比較し、追加・置換・削除の操作を作成します。ファイル順を固定し、再現可能なZIPを生成します。Ed25519秘密鍵を必須とし、マニフェスト本体に対する署名を付けます。
+The builder compares the full deployed PyInstaller onedir folders, including the executable and runtime DLLs. It creates add/replace/delete operations, sorts entries deterministically, and writes a reproducible ZIP. The CLI requires an Ed25519 private signing key and adds a detached signature over the exact manifest bytes. User data roots (SQLite database, downloaded Wiki HTML/images, indexes, settings, caches, logs and backups) and `VERSION.txt` are excluded. Database, SQLite sidecar, log, credential, secret, key, and PEM file types are also excluded regardless of their directory. `Updater.exe` is excluded from normal diffs; the bootstrap option can add it exactly once. Generated ZIPs and EXEs must be published as release assets, not committed to Git.
 
-SQLiteデータベース、ダウンロード済みWiki HTML・画像、索引、設定、キャッシュ、ログ、バックアップなどの利用者データ領域は、パッチの比較・適用対象から除外します。配置場所にかかわらず、データベース、SQLiteのWAL/SHM、ログ、認証情報、秘密鍵、PEM等のファイルも保護します。通常の差分では `Updater.exe` を対象外とし、初回導入時のブートストラップ指定でのみ追加できます。
+## Patch archive format (v1)
 
-生成したZIP・EXEはGitリポジトリへコミットせず、GitHub Releasesの配布ファイルとして公開します。
-
-## パッチZIPの形式（v1）
-
-署名付きパッチZIPには、`patch_manifest.json`、64バイトのEd25519署名 `patch_manifest.sig`、およびマニフェストが参照するファイルだけを格納します。署名対象は `patch_manifest.json` のUTF-8バイト列そのものです。
+A signed patch ZIP contains `patch_manifest.json`, the 64-byte raw Ed25519 signature `patch_manifest.sig`, and only the payload files referenced by the manifest. The signature covers the exact UTF-8 bytes of `patch_manifest.json`:
 
 ```json
 {
   "patch_format": 1,
   "application": "BrNavi Fandom JP",
-  "from_version": "1.0.1",
-  "to_version": "1.0.2",
+  "from_version": "1.0.0",
+  "to_version": "1.0.1",
   "files": [
-    {"path": "modules/example.py", "action": "replace", "sha256": "<64桁の小文字16進数>"},
-    {"path": "modules/new_module.py", "action": "add", "sha256": "<64桁の小文字16進数>"},
+    {"path": "modules/example.py", "action": "replace", "sha256": "<64 lowercase hex characters>"},
+    {"path": "modules/new_module.py", "action": "add", "sha256": "<64 lowercase hex characters>"},
     {"path": "old_module.py", "action": "delete"}
   ]
 }
 ```
 
-追加・置換ファイルの実体は `payload/<path>` に格納し、SHA-256で内容を検証します。削除操作にはペイロードもハッシュ値もありません。Updaterはマニフェストを解析・適用する前に署名を検証します。
+For add and replace, the archive must contain `payload/<path>`. SHA-256 covers the exact payload bytes. Delete operations have no payload or hash. The updater verifies the signature before parsing or applying the manifest.
 
-Updaterはアプリ識別子、バージョン、Windowsで安全な相対パス、パスの重複・衝突、保護対象データ領域、ZIP内エントリー、ペイロードの存在・サイズ・ハッシュを検証します。インストール先のシンボリックリンク／ジャンクション経由のすり替えや、リダイレクトされた `VERSION.txt`・バックアップ先も拒否します。インストール済み `VERSION.txt` がパッチの更新元バージョンと一致しない場合は適用しません。
+The updater validates the application ID, strict numeric version sequence, unique safe Windows paths, path-prefix collisions, protected data directories, ZIP entry names, payload presence, size limits, and hashes. It rejects symbolic-link/junction traversal in the installation path, including redirected `VERSION.txt` and backup locations. It requires installed `VERSION.txt` to match `from_version`. Backups are stored under `update_backups/`. Before changing any installed file, the updater writes a transaction marker and journal, then backs up every existing target (including `VERSION.txt`) and records each backup SHA-256. Only after all backups and the `applying` journal state have been written does it begin file operations; `VERSION.txt` is written last, followed by the durable `committed` journal state. If an operation fails, rollback is attempted immediately. If the updater or Windows is interrupted while the transaction is `applying` or `rolling_back`, the next Updater launch automatically resumes rollback before showing the update UI. A `preparing` transaction is safe to mark abandoned because no installed target has been modified yet. Missing, malformed, redirected, or hash-mismatched transaction metadata/backups block further updates rather than guessing. Committed and rolled-back backup folders are retained; they are not automatically deleted. File contents and journal files are flushed with `fsync` and replaced atomically; portable directory-entry durability across sudden power loss is subject to Windows/filesystem behavior.
 
-更新前に `update_backups/` へ既存ファイルを退避し、トランザクション情報とバックアップのSHA-256を記録します。必要なバックアップと適用中状態の記録が完了してからファイル操作を開始し、全ファイルの処理後に `VERSION.txt` を最後に更新します。途中で失敗した場合はロールバックを試みます。適用中またはロールバック中にUpdaterやWindowsが中断された場合、次回起動時にロールバックを再開します。準備中のトランザクションは、インストール先を変更していないことを確認できるため破棄できます。トランザクション情報やバックアップが欠落・破損・不一致の場合は、推測で処理を続けず更新を停止します。
+The bootstrap patch may add `Updater.exe` once; the running updater cannot update itself. To bootstrap an existing v1.0.0 installation, extract the bootstrap `Updater.exe` to a temporary folder and run it with `--install-dir` pointing to the existing `BrNavi-GUI.exe` folder. The patch then adds `Updater.exe` beside the main application.
 
-コミット済み・ロールバック済みのバックアップは自動削除しません。ファイルとジャーナルの書き込みには `fsync` と原子的な置換を利用しますが、突然の電源断時におけるディレクトリエントリーの永続性はWindowsやファイルシステムの挙動に依存します。
+## Update signing key setup
 
-初回ブートストラップパッチは `Updater.exe` を一度だけ追加できます。Updater自身は実行中に自分自身を更新できません。既存のv1.0.0環境へ導入する場合は、ブートストラップ配布物のUpdater.exeを一時フォルダーへ展開して起動し、`--install-dir` に既存の `BrNavi-GUI.exe` があるフォルダーを指定します。パッチ適用後、Updater.exeは本体と同じフォルダーに配置されます。
-
-BootstrapはUpdater.exeの追加だけを行い、BrNavi本体の実行ファイル・UI・機能は更新しません。そのため適用後も本体の画面や機能が変わらないのは正常です。更新対象の `VERSION.txt` はUpdaterが次の逐次パッチの適用元を判定するためのバージョン情報です。Bootstrap（v1.0.0 → v1.0.1）のWindows実機テストでは、テスト用環境および利用者の常用環境でUpdater.exeの配置とバージョン更新を確認しています。
-
-## 署名鍵の初期設定と管理
-
-信頼できるオフライン環境で一度だけ鍵ペアを生成します。
+Generate the key pair once on a trusted offline machine:
 
 ```bat
-python scripts\generate_update_signing_key.py --private-key "E:\SecureKeys\BrNavi-update-private.pem"
+python scripts\\generate_update_signing_key.py --private-key "E:\\SecureKeys\\BrNavi-update-private.pem"
 ```
 
-スクリプトが表示するBase64公開鍵を `updater/trusted_public_key.py` の `TRUSTED_PUBLIC_KEY_B64` に設定し、その公開鍵を組み込んだUpdater.exeをビルド・配布します。
+The script prints a Base64 public key. Copy it into `updater/trusted_public_key.py` as `TRUSTED_PUBLIC_KEY_B64`, then build and distribute a new trusted `Updater.exe`. Keep the private PEM outside the repository, restrict access, and maintain a secure backup. The builder requires `--signing-key`; the updater rejects unsigned or invalidly signed patches. A public-key change requires distributing a newly built updater through a trusted channel.
 
-**秘密鍵はリポジトリや配布ZIPへ絶対に含めないでください。** リポジトリ外の安全な場所に保管し、アクセスを制限したうえで安全なバックアップを維持してください。パッチ生成には `--signing-key` が必須です。署名がないパッチや署名が一致しないパッチはUpdaterが拒否します。公開鍵を変更した場合は、信頼できる配布経路で新しいUpdater.exeを配布する必要があります。
+## Security status and limitations
 
-## セキュリティ上の仕様と制約
-
-- データベース、Wiki HTML・画像、索引、設定、認証情報などの利用者データは、パッチ生成側と適用側の両方で保護します。
-- SHA-256でペイロードの完全性を確認し、Ed25519署名でマニフェスト（バージョン遷移と各ペイロードのハッシュを含む）を認証します。
-- Ed25519公開鍵は `updater/trusted_public_key.py` に固定します。Updaterが受け入れるのは、この公開鍵で検証できる署名付きパッチだけです。
-- 初回ブートストラップ（v1.0.0 → v1.0.1）はWindowsのテスト用インストール先で適用確認済みです。署名検証、Updater.exeの配置、バージョン更新、利用者データの保持を確認しています。
-- 通常の複数バージョン連続更新、プロセス検出、更新中断後のロールバック復旧は、今後のWindows実機テスト項目です。
+- User databases, Wiki HTML/images, indexes, settings, credentials, and other runtime data are excluded by both the builder and the manifest validator.
+- SHA-256 checks payload integrity; Ed25519 authenticates the manifest and therefore the payload hashes and version transition.
+- The Ed25519 public key is pinned in `updater/trusted_public_key.py`. Signed patches are accepted only when their manifest signature matches this key. Keep the matching private PEM offline and outside the repository.
+- Windows end-to-end testing is still required, including v1.0.0 bootstrap, sequential updates, process detection, and rollback.

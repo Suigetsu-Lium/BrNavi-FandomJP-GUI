@@ -1,6 +1,7 @@
 """Small, side-effect-free helpers for the GUI status bar and local media views."""
 
 from datetime import datetime, timedelta, timezone
+import hashlib
 from pathlib import Path
 import re
 import shutil
@@ -88,34 +89,90 @@ def _safe_size(path):
         return 0
 
 
-def list_local_images(image_dir):
-    """Return image metadata with Level names inferred from downloader filenames."""
+def normalize_media_identifier(value):
+    """Normalize page titles and downloader filenames to the same comparison key."""
+    text = str(value or "").strip()
+    text = re.sub(r"\s+-\s+image\d+$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\.[^.\\/]+$", "", text)
+    text = text.replace("\\", "/").replace("/", " ")
+    return " ".join(text.replace("_", " ").split()).casefold()
+
+
+def find_local_images(image_dir, level_id):
+    """Find images whose normalized filename belongs to the requested article."""
+    root = Path(image_dir)
+    target = normalize_media_identifier(level_id)
+    if not root.is_dir() or not target:
+        return []
+    matches = []
+    for path in root.iterdir():
+        if not path.is_file() or path.suffix.casefold() not in IMAGE_SUFFIXES:
+            continue
+        key = normalize_media_identifier(path.name)
+        if key == target or key.startswith(target + " "):
+            matches.append(path)
+    return sorted(matches, key=lambda path: path.name.casefold())
+
+
+def list_local_images(image_dir, known_titles=None, known_pages=None):
+    """Return local image metadata, mapping filenames back to canonical page titles."""
     root = Path(image_dir)
     if not root.exists():
         return []
+    title_keys = sorted(
+        ((normalize_media_identifier(title), str(title).strip()) for title in (known_titles or []) if str(title).strip()),
+        key=lambda item: len(item[0]),
+        reverse=True,
+    )
+    page_titles = {}
+    for page in known_pages or []:
+        if not isinstance(page, dict):
+            continue
+        page_url = str(page.get("url") or "").strip().rstrip("/")
+        page_title = str(page.get("title") or "").strip()
+        if page_url and page_title:
+            page_key = hashlib.sha256(page_url.encode("utf-8")).hexdigest()[:16]
+            page_titles[page_key] = page_title
     items = []
-    for path in sorted(root.iterdir(), key=lambda p: p.name.casefold()):
+    for path in sorted(root.iterdir(), key=lambda item: item.name.casefold()):
         if not path.is_file() or path.suffix.casefold() not in IMAGE_SUFFIXES:
             continue
-        stem = path.stem
-        match = re.match(r"(Level[_\s]+-?\d+(?:\.\d+)?(?:[_\s]+η)?(?:[_\s]+\([^)]*\))?)", stem, re.I)
-        level = re.sub(r"[_\s]+", " ", match.group(1)).replace("( ", "(").strip() if match else ""
-        level = re.sub(r"\s+η", " η", level)
+        url_key_match = re.fullmatch(r"page_([0-9a-f]{16})_image\d+", path.stem, re.IGNORECASE)
+        if url_key_match:
+            identifier = path.stem
+            key = ""
+            level = page_titles.get(url_key_match.group(1).lower(), "")
+        else:
+            identifier = re.sub(r"\s+-\s+image\d+$", "", path.stem, flags=re.IGNORECASE)
+            key = normalize_media_identifier(identifier)
+            level = ""
+        for title_key, title in title_keys:
+            if key == title_key or key.startswith(title_key + " "):
+                level = title
+                break
+        if not level:
+            numeric = re.search(r"Level[_ ]+(-?[0-9]+(?:[.][0-9]+)?)(?:[_ ]+" + chr(0x03B7) + r")?", identifier, re.IGNORECASE)
+            if numeric:
+                level = "Level " + numeric.group(1)
+                if chr(0x03B7) in identifier[numeric.end():] or re.search(r"[_ ]+" + chr(0x03B7) + r"(?:[_ ]|$)", identifier):
+                    level += " " + chr(0x03B7)
+            else:
+                level = " ".join(identifier.replace("_", " ").split())
         items.append({"name": path.name, "path": str(path), "level_id": level, "bytes": _safe_size(path)})
     return items
 
 
 def local_saved_level_list(candidates):
-    """Return one row per locally saved Level article from a candidate catalog."""
+    """Return one row per locally saved article from the complete catalog."""
     unique = []
     seen = set()
     for item in candidates or []:
         if not isinstance(item, dict) or not item.get("saved"):
             continue
         title = str(item.get("title") or "").strip()
-        if not re.match(r"^(?:Level|レベル)\s+-?\d", title, re.IGNORECASE):
+        if not title:
             continue
-        key = re.sub(r"[_\s]+", " ", title).casefold()
+        key = normalize_media_identifier(title)
         if key not in seen:
             unique.append(dict(item))
             seen.add(key)

@@ -8,8 +8,11 @@ Image Extractor / Downloader Module
 
 import os
 import re
+import hashlib
+import shutil
 import time
-from urllib.parse import unquote
+from pathlib import Path
+from urllib.parse import unquote, urljoin
 
 from bs4 import BeautifulSoup
 import requests
@@ -154,6 +157,168 @@ def parse_image_info(url):
 # =============================================================================
 # Level情報
 # =============================================================================
+
+def extract_saved_page_url(html_content):
+    """保存HTMLの管理メタデータから元ページURLを取得する。"""
+    match = re.search(r"BRNAVI_META_INFO[^>]*?URL=(https?://[^\s|*<>]+)", html_content, re.IGNORECASE)
+    return match.group(1).strip().rstrip(" -*>") if match else ""
+
+def page_image_filename(page_url, image_index, extension):
+    """Return a stable image filename scoped to the exact source article URL."""
+    normalized_url = str(page_url or "").strip().rstrip("/")
+    if not normalized_url:
+        raise ValueError("記事URLがありません。")
+    index = int(image_index)
+    if index < 1:
+        raise ValueError("画像番号は1以上である必要があります。")
+    suffix = str(extension or "jpg").lower().lstrip(".")
+    if not re.fullmatch(r"[a-z0-9]{1,8}", suffix):
+        suffix = "jpg"
+    page_key = hashlib.sha256(normalized_url.encode("utf-8")).hexdigest()[:16]
+    return f"page_{page_key}_image{index}.{suffix}"
+
+
+def plan_legacy_image_renames(html_dir=None, image_dir=None, meta_title_map=None):
+    """Plan only unambiguous legacy-image renames; never modify files."""
+    html_root = Path(html_dir or HTML_DIR)
+    image_root = Path(image_dir or OUTPUT_IMG_DIR)
+    if not html_root.is_dir() or not image_root.is_dir():
+        return {"items": [], "skipped": 0}
+
+    if meta_title_map is None:
+        meta_title_map = load_meta_titles(LIST_FILE_PATH) if Path(LIST_FILE_PATH).is_file() else {}
+
+    image_files = [
+        path for path in image_root.iterdir()
+        if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
+    ]
+    proposed = []
+    skipped = 0
+
+    for html_path in sorted(html_root.iterdir(), key=lambda item: item.name.casefold()):
+        if not html_path.is_file() or html_path.suffix.lower() not in {".html", ".htm"}:
+            continue
+        try:
+            html_content = html_path.read_text(encoding="utf-8-sig", errors="replace")
+        except OSError:
+            skipped += 1
+            continue
+
+        page_url = extract_saved_page_url(html_content)
+        if not page_url:
+            skipped += 1
+            continue
+        soup = BeautifulSoup(html_content, "html.parser")
+        content_area = soup.find(class_="mw-parser-output")
+        if content_area is None:
+            skipped += 1
+            continue
+
+        dict_key, level_str = extract_level_info(html_path.name)
+        meta_title = str(meta_title_map.get(dict_key, "") or "").strip() if dict_key else ""
+        safe_meta_title = re.sub(r'[\\/*?:"<>|]', "_", meta_title)
+        broad_prefix = f"{level_str} - "
+        exact_prefix = f"{broad_prefix}{safe_meta_title} - " if safe_meta_title else ""
+
+        seen_urls = set()
+        image_index = 0
+        for img in content_area.find_all("img"):
+            raw_url = img.get("data-src") or img.get("src")
+            download_url, img_filename = parse_image_info(raw_url)
+            if not download_url or not img_filename or download_url in seen_urls:
+                continue
+            seen_urls.add(download_url)
+            image_index += 1
+
+            suffix = Path(img_filename).suffix.lower()
+            if not suffix:
+                suffix = ".jpg"
+            pattern = re.compile(rf" - image{image_index}$", re.IGNORECASE)
+            candidates = [
+                path for path in image_files
+                if path.stem.casefold().startswith(broad_prefix.casefold())
+                and pattern.search(path.stem)
+            ]
+            exact_candidates = [
+                path for path in candidates
+                if exact_prefix and path.stem.casefold().startswith(exact_prefix.casefold())
+            ]
+            if len(exact_candidates) == 1:
+                candidates = exact_candidates
+            if not candidates:
+                # No legacy-named file exists for this image. It may already
+                # have been migrated to the URL-keyed format; this is not an
+                # ambiguous legacy mapping and should not inflate skipped.
+                continue
+            if len(candidates) != 1:
+                skipped += 1
+                continue
+
+            source = candidates[0]
+            # Keep the existing file's extension: it describes the bytes actually saved.
+            target = image_root / page_image_filename(page_url, image_index, source.suffix)
+            if source == target or target.exists():
+                skipped += 1
+                continue
+            proposed.append({"source": source, "target": target, "page_url": page_url})
+
+    # A legacy file can be claimed by multiple saved HTML pages (e.g. duplicate
+    # Level IDs). Such mappings are ambiguous and must remain untouched.
+    source_counts = {}
+    target_counts = {}
+    for item in proposed:
+        source_counts[item["source"]] = source_counts.get(item["source"], 0) + 1
+        target_counts[item["target"]] = target_counts.get(item["target"], 0) + 1
+    safe_items = []
+    for item in proposed:
+        if source_counts[item["source"]] != 1 or target_counts[item["target"]] != 1 or item["target"].exists():
+            skipped += 1
+            continue
+        safe_items.append({
+            "source": item["source"],
+            "target": item["target"],
+            "page_url": item["page_url"],
+        })
+    return {"items": safe_items, "skipped": skipped}
+
+
+def rename_legacy_images(html_dir=None, image_dir=None, meta_title_map=None, context=None):
+    """Apply the safe rename plan without overwriting any existing file."""
+    plan = plan_legacy_image_renames(html_dir, image_dir, meta_title_map)
+    renamed = 0
+    skipped = int(plan["skipped"])
+    failed = 0
+    results = []
+    total = len(plan["items"])
+    for index, item in enumerate(plan["items"], 1):
+        if context:
+            context.check_cancelled()
+            context.progress(index - 1, total, item["source"].name)
+        source = item["source"]
+        target = item["target"]
+        try:
+            if not source.is_file() or target.exists():
+                skipped += 1
+                continue
+            source.rename(target)
+            renamed += 1
+            results.append({"source": source.name, "target": target.name})
+            if context:
+                context.log(f"画像をリネームしました: {source.name} → {target.name}")
+        except OSError as error:
+            failed += 1
+            if context:
+                context.log(f"画像のリネームに失敗: {source.name} ({error})", "error")
+        if context:
+            context.progress(index, total, target.name)
+    return {
+        "renamed": renamed,
+        "skipped": skipped,
+        "failed": failed,
+        "items": results,
+    }
+
+
 
 def extract_level_info(filename):
     """
@@ -437,6 +602,7 @@ def download_images(
         content_area = soup.find(
             class_="mw-parser-output"
         )
+        source_page_url = extract_saved_page_url(html_content)
 
         if not content_area:
 
@@ -453,8 +619,11 @@ def download_images(
         # 画像タグ取得
         # ---------------------------------------------------------------------
 
-        img_tags = content_area.find_all(
-            "img"
+        # Fandom ? Infobox ? mw-parser-output ??????????
+        # ???????????????????????: pi-image-thumbnail?
+        # ????????????Infobox ????????????????
+        img_tags = soup.select(
+            ".portable-infobox img, .mw-parser-output img"
         )
 
         valid_images = []
@@ -570,24 +739,23 @@ def download_images(
             )
 
             # ---------------------------------------------------------------
-            # 保存ファイル名
+            # 保存ファイル名：ページURLを一意キーにする
             # ---------------------------------------------------------------
 
-            if safe_meta_title:
-
-                new_img_filename = (
-                    f"{level_str} - "
-                    f"{safe_meta_title} - "
-                    f"image{image_counter}."
-                    f"{extension}"
+            if source_page_url:
+                new_img_filename = page_image_filename(
+                    source_page_url,
+                    image_counter,
+                    extension,
                 )
-
-            else:
-
+            elif safe_meta_title:
                 new_img_filename = (
-                    f"{level_str} - "
-                    f"image{image_counter}."
-                    f"{extension}"
+                    f"{level_str} - {safe_meta_title} - "
+                    f"image{image_counter}.{extension}"
+                )
+            else:
+                new_img_filename = (
+                    f"{level_str} - image{image_counter}.{extension}"
                 )
 
             img_save_path = os.path.join(
@@ -615,8 +783,34 @@ def download_images(
                 if context:
                     context.check_cancelled()
 
+                # Offline HTML downloads store page images beside the HTML in a
+                # *_assets directory and rewrite img src to a relative path.
+                # Reuse that already-downloaded file instead of requesting the
+                # relative path as if it were an HTTP URL.
+                local_asset = None
+                parsed_raw_url = raw_url.split("?", 1)[0]
+                if not re.match(r"^https?://", parsed_raw_url, re.IGNORECASE):
+                    candidate = (Path(filepath).parent / unquote(parsed_raw_url)).resolve()
+                    html_root = Path(filepath).parent.resolve()
+                    try:
+                        candidate.relative_to(html_root)
+                    except ValueError:
+                        candidate = None
+                    if candidate is not None and candidate.is_file():
+                        local_asset = candidate
+
+                if local_asset is not None:
+                    shutil.copy2(local_asset, img_save_path)
+                    details["downloaded"] += 1
+                    image_counter += 1
+                    continue
+
+                request_url = img_url
+                if source_page_url and not re.match(r"^https?://", request_url, re.IGNORECASE):
+                    request_url = urljoin(source_page_url, request_url)
+
                 response = requests.get(
-                    img_url,
+                    request_url,
                     headers=HEADERS,
                     timeout=15
                 )
@@ -629,8 +823,13 @@ def download_images(
                     if context:
                         context.check_cancelled()
 
+                    fallback_url = (
+                        urljoin(source_page_url, raw_url)
+                        if source_page_url and not re.match(r"^https?://", raw_url, re.IGNORECASE)
+                        else raw_url
+                    )
                     response = requests.get(
-                        raw_url,
+                        fallback_url,
                         headers=HEADERS,
                         timeout=15
                     )

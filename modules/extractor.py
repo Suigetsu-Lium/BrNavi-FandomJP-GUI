@@ -8,7 +8,7 @@ import shutil
 import tempfile
 import unicodedata
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, urljoin, urldefrag, urlsplit
 
 from bs4 import BeautifulSoup
 from modules.operation_context import OperationCancelled
@@ -675,6 +675,12 @@ def extract_page_title_from_html(
         if title:
             return title
 
+    # Saved HTML fragments may omit the normal Fandom h1/title elements.
+    # In that case, use the canonical title recorded by the downloader.
+    metadata_title = extract_meta_info_from_html(html_text).get("title", "")
+    if metadata_title:
+        return clean_text(metadata_title)
+
     return ""
 
 
@@ -963,6 +969,22 @@ def build_fandom_url(
 # 記事本文準備
 # ============================================================
 
+def extract_article_attribution(html_text):
+    """Extract the Fandom author/date credit shown before the article body."""
+    if not html_text:
+        return ""
+    soup = BeautifulSoup(html_text, "html.parser")
+    content = soup.find(class_="mw-parser-output")
+    if content is None:
+        return ""
+    for paragraph in content.find_all("p"):
+        text = normalize_inline_text(paragraph.get_text(" ", strip=True))
+        if not text.startswith("この記事は") or "作成したものです" not in text:
+            continue
+        return text
+    return ""
+
+
 def prepare_content_element(
     soup
 ):
@@ -1009,13 +1031,29 @@ def prepare_content_element(
         "thumbcaption",
         "gallerybox",
         "printfooter",
+        "mw-customtoggle-voting",
+        "article-vote",
+        "article-voting",
     ]
 
     for element in content.find_all(
         class_=unwanted_classes
     ):
-
         element.decompose()
+
+    # Fandom vote widgets and mobile-app fallback instructions are UI, not article text.
+    for paragraph in content.find_all(["p", "small", "div"]):
+        text = normalize_inline_text(paragraph.get_text(" ", strip=True))
+        if (
+            "(+/-) vote" in text
+            or "読み込み中" in text and "PC版で表示" in text
+            or "PC版で表示" in text and "デスクトップ表示" in text
+            or "デスクトップ表示へ切り替えて" in text
+        ):
+            paragraph.decompose()
+            continue
+        if text.startswith("この記事は") and "作成したものです" in text:
+            paragraph.decompose()
 
     # --------------------------------------------------------
     # 不要タグ
@@ -1115,6 +1153,25 @@ def extract_article_text(
             heading.append(
                 f"[{text}]"
             )
+
+    # --------------------------------------------------------
+    # Preserve Fandom internal article links for local navigation.
+    # --------------------------------------------------------
+
+    for link in content.find_all("a", href=True):
+        href = str(link.get("href") or "").strip()
+        absolute_url = urljoin("https://backrooms.fandom.com", href)
+        parsed_link = urlsplit(absolute_url)
+        label = normalize_inline_text(link.get_text(" ", strip=True))
+        if (
+            parsed_link.scheme in {"http", "https"}
+            and parsed_link.hostname == "backrooms.fandom.com"
+            and parsed_link.path.startswith("/ja/wiki/")
+            and label
+        ):
+            link.replace_with(f"[[{absolute_url}|{label}]]")
+        else:
+            link.replace_with(label)
 
     # --------------------------------------------------------
     # br
@@ -2205,6 +2262,32 @@ def process_html_file(
     # --------------------------------------------------------
     # 階層タイトル
     # --------------------------------------------------------
+
+    # Translation pages have no Level code. Keep their complete body
+    # instead of rejecting them in the Level-only title classifier.
+    html_meta = extract_meta_info_from_html(html_text)
+    page_url = html_meta.get("url") or extract_url_from_html(html_text)
+    page_path = unquote(urlsplit(page_url).path).casefold() if page_url else ""
+    is_translation_article = (
+        str(html_meta.get("source_type") or "").casefold() == "translation"
+        or page_path.startswith("/ja/wiki/??/")
+        or page_title.casefold().startswith("??/")
+    )
+    if is_translation_article:
+        article_title = str(html_meta.get("title") or page_title).strip()
+        if not article_title:
+            log("  -> Translation page has no title; skipped")
+            return None
+        if context:
+            context.check_cancelled()
+        txt_path = save_individual_txt(article_text, output_dir, article_title)
+        if txt_path is None:
+            return None
+        row = make_summary_row(html_text, article_text, html_path.name, index)
+        row["?????"] = article_title
+        row["??????"] = ""
+        row["???"] = "translation"
+        return row
 
     (
         level_title,

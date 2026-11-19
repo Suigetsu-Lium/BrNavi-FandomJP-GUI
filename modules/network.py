@@ -20,6 +20,7 @@ import unicodedata
 
 from modules.operation_context import OperationCancelled
 from modules.runtime_paths import get_application_dir
+from modules.route_analysis import classify_route_certainty, classify_route_node, extract_route_mentions, extract_explicit_transitions
 from modules.extractor import (
     SUMMARY_CSV,
     determine_level_information,
@@ -358,6 +359,7 @@ def process_backrooms_data(context=None):
                     continue
                 current_level = clean_level_name(level_code)
                 current_section_type = None
+                current_section_certainty = "Unspecified"
                 page_node = nodes_info.setdefault(current_level, {
                     "Id": current_level,
                     "Label": level_title,
@@ -406,6 +408,7 @@ def process_backrooms_data(context=None):
                     )
 
                     current_section_type = None
+                    current_section_certainty = "Unspecified"
 
                     if current_level not in nodes_info:
 
@@ -467,19 +470,21 @@ def process_backrooms_data(context=None):
 
                     sec_name = sec_match.group(1)
 
-                    if "入口" in sec_name:
-
+                    entrance_word = chr(0x5165) + chr(0x53e3)
+                    exit_word = chr(0x51fa) + chr(0x53e3)
+                    if entrance_word in sec_name:
                         current_section_type = "Entrance"
-
-                    elif "出口" in sec_name:
-
+                        current_section_certainty = classify_route_certainty(sec_name)
+                    elif exit_word in sec_name:
                         current_section_type = "Exit"
-
+                        current_section_certainty = classify_route_certainty(sec_name)
                     else:
-
                         current_section_type = None
+                        current_section_certainty = "Unspecified"
 
-                    continue
+                    line = line[sec_match.end():].strip()
+                    if not line:
+                        continue
 
                 # -----------------------------------------------------------------
                 # 4. 入口・出口から接続を抽出
@@ -497,92 +502,57 @@ def process_backrooms_data(context=None):
                     ):
                         continue
 
-                    raw_matches = (
-                        TARGET_PATTERN.findall(
-                            line
-                        )
-                    )
-
+                    route_mentions = extract_route_mentions(line)
                     found_levels = {
-                        clean_level_name(level)
-                        for level in raw_matches
-                        if is_valid_target(level)
+                        target for target, _start, _end, _kind in route_mentions
                     }
-
-                    # 「全ての階層」など
-                    if (
-                        not found_levels
-                        and any(
-                            kw in line
-                            for kw in ALL_LEVEL_KEYWORDS
-                        )
+                    legacy_targets = {
+                        clean_level_name(target)
+                        for target in TARGET_PATTERN.findall(line)
+                        if is_valid_target(target)
+                    }
+                    legacy_targets.discard("The Frontrooms")
+                    found_levels.update(legacy_targets)
+                    if not found_levels and any(
+                        keyword in line for keyword in ALL_LEVEL_KEYWORDS
                     ):
+                        found_levels.add("All Levels (" + "".join(chr(code) for code in (0x5168, 0x3066, 0x306e, 0x968e, 0x5c64)) + ")")
 
-                        found_levels.add(
-                            "All Levels (全ての階層)"
-                        )
+                    explicit_transitions = extract_explicit_transitions(line)
+                    if explicit_transitions:
+                        edge_pairs = explicit_transitions
+                    elif current_section_type == "Entrance":
+                        edge_pairs = [(target, current_level) for target in found_levels]
+                    else:
+                        edge_pairs = [(current_level, target) for target in found_levels]
 
-                    current_level_lower = (
-                        current_level.lower()
-                    )
-
-                    for target in found_levels:
-
-                        if target not in nodes_info:
-
-                            nodes_info[target] = {
-                                "Id": target,
-                                "Label": target,
+                    for src, tgt in edge_pairs:
+                        src = clean_level_name(src)
+                        tgt = clean_level_name(tgt)
+                        if not src or not tgt or src.casefold() == tgt.casefold():
+                            continue
+                        for node_id in (src, tgt):
+                            nodes_info.setdefault(node_id, {
+                                "Id": node_id,
+                                "Label": node_id,
                                 "Comprehension": "",
                                 "Danger": "",
-                            }
-
-                        # 自己接続を除外
-                        if (
-                            target.lower()
-                            == current_level_lower
-                        ):
-                            continue
-
-                        # ---------------------------------------------------------
-                        # Entrance
-                        # ---------------------------------------------------------
-
-                        if (
-                            current_section_type
-                            == "Entrance"
-                        ):
-
-                            src = target
-                            tgt = current_level
-
-                        # ---------------------------------------------------------
-                        # Exit
-                        # ---------------------------------------------------------
-
-                        else:
-
-                            src = current_level
-                            tgt = target
-
+                            })
                         identifier = (
-                            src,
-                            tgt,
-                            line
+                            src, tgt, current_section_type,
+                            current_section_certainty, line,
                         )
-
-                        if (
-                            identifier
-                            not in unique_edges
-                        ):
-
+                        if identifier not in unique_edges:
                             unique_edges[identifier] = {
                                 "Source": src,
                                 "Target": tgt,
                                 "Type": "Directed",
-                                "Category":
-                                    current_section_type,
-                                "Condition": line
+                                "Category": current_section_type,
+                                "Condition": line,
+                                "Certainty": current_section_certainty,
+                                "SourceKind": classify_route_node(src),
+                                "TargetKind": classify_route_node(tgt),
+                                "Evidence": "ExplicitTransition" if explicit_transitions else "SectionInference",
                             }
 
     except OperationCancelled:
@@ -623,7 +593,11 @@ def process_backrooms_data(context=None):
         "Target",
         "Type",
         "Category",
-        "Condition"
+        "Condition",
+        "Certainty",
+        "SourceKind",
+        "TargetKind",
+        "Evidence",
     ]
 
     nodes_fieldnames = [

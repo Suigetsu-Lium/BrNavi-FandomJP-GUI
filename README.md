@@ -161,6 +161,48 @@ BrNaviを終了してからインストール先の `Updater.exe` を起動し�
 
 GUI版はpywebviewをWindows Edge Chromiumバックエンドで起動します。WebView2 Runtimeはexeに含まれないため、配布先Windowsにも必要です。APIキーは同梱せず、利用者の `GROQ_API_KEY` 環境変数から読み込みます。
 
+## アプリの更新方法
+
+### Updaterを導入済みの場合
+
+1. BrNavi本体を終了します。
+2. インストール先にある `Updater.exe` を起動します。
+3. 画面の案内に従って更新を確認・適用します。
+4. 更新完了後、BrNaviを起動します。
+
+Updaterは署名を検証できる逐次パッチだけを適用します。更新元と更新先のバージョンが一致しないパッチは適用できません。複数バージョンを飛び越して更新する場合も、各バージョンのパッチを順番に適用してください。
+
+### これからUpdaterを導入する場合
+
+Updater未導入の既存環境には、初回導入用のブートストラップ手順が必要です。GitHub Releasesに掲載する「Updater初回導入」リリースの説明に従ってください。
+
+初回導入用のBootstrapパッチ（v1.0.0 → v1.0.1）は、既存環境へ **Updater.exeを追加することだけ**を目的としています。BrNavi本体の実行ファイルや画面、機能は更新しないため、適用後もアプリのUIや表示内容は基本的に変わりません。`VERSION.txt` はUpdaterが次のパッチを適用する際に参照するバージョン情報であり、Bootstrap適用によって本体UIのバージョン表示や機能が変わることを意味しません。これは正常な動作です。
+
+Bootstrap適用後は、BrNavi本体のインストール先に `Updater.exe` が配置されます。次回からはその `Updater.exe` を起動して通常の逐次パッチを適用してください。
+
+#### 初回導入時のインストール先指定
+
+Bootstrap用のUpdater.exeを一時フォルダーから起動する場合、GUI上にインストール先の参照欄はありません。既定ではUpdater.exe自身のあるフォルダーが対象になるため、既存のBrNaviインストール先を `--install-dir` で明示して起動します。
+
+```powershell
+& "$env:USERPROFILE\Downloads\BrNavi-Updater.exe" --install-dir "C:\Path\To\BrNavi-GUI"
+```
+
+`C:\Path\To\BrNavi-GUI` は、`BrNavi-GUI.exe` と `VERSION.txt` が直接入っている実際のインストール先に置き換えてください。適用前にBrNavi本体を終了し、インストール先のバックアップを取ってください。初回導入後は、インストール先に配置された `Updater.exe` を通常どおり起動できます。
+
+### Releaseに掲載するファイル
+
+通常のバージョンReleaseには、次の2種類を別々のファイルとして掲載します。
+
+| ファイル | 用途 |
+| --- | --- |
+| `BrNavi-vX.Y.Z.zip` | 新規インストール・手動復旧用の本体一式 |
+| `BrNavi-vA.B.C-to-vX.Y.Z.patch.zip` | 直前バージョンから更新するUpdater用パッチ |
+
+パッチは直前バージョンからの逐次適用です。たとえばv1.0.1からv1.0.3へ更新する場合は、v1.0.2用、v1.0.3用の順に適用します。本体ZIPは新規導入や手動復旧に利用できます。パッチにはデータベースや保存済みWiki記事などの利用者データを含めません。
+
+Updaterの内部仕様・ビルド方法・署名鍵の管理方法は[`updater/README.md`](updater/README.md)を参照してください。秘密鍵は配布物やGitリポジトリに含めません。
+
 ## 技術資料
 
 内部構成、Wiki・AI・SQLiteのデータフロー、主要モジュール、開発・テスト方針は[アーキテクチャと開発ガイド](docs/architecture.md)を参照してください。

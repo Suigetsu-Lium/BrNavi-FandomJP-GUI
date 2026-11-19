@@ -106,10 +106,126 @@ class OnlineWikiGuiTests(unittest.TestCase):
         self.assertIn('id="explorer-category-tiles"', gui_app.HTML_TEMPLATE)
         self.assertIn('id="explorer-index-sections"', gui_app.HTML_TEMPLATE)
         self.assertIn('id="explorer-index-toc"', gui_app.HTML_TEMPLATE)
+        self.assertIn("const savedSeen = new Set()", gui_app.HTML_TEMPLATE)
+        self.assertIn("Reloading: search and index...", gui_app.HTML_TEMPLATE)
+        self.assertIn("getExplorerCatalog()", gui_app.HTML_TEMPLATE)
+        self.assertIn(r"(?:[A-Z]{1,3}-|[A-Z]{1,3}\s+)?", gui_app.HTML_TEMPLATE)
+        self.assertIn('match[1].split(".").map(Number)', gui_app.HTML_TEMPLATE)
+        self.assertIn("Promise.all([onSearchInput(), loadExplorerIndexPages()])", gui_app.HTML_TEMPLATE)
         self.assertIn('function openExplorerCategory(categoryId)', gui_app.HTML_TEMPLATE)
         self.assertIn('function renderExplorerCategorySections(categoryId)', gui_app.HTML_TEMPLATE)
         self.assertIn('function showExplorerIndexHome()', gui_app.HTML_TEMPLATE)
         self.assertIn('class="sticky top-3 hidden w-64 shrink-0 rounded border', gui_app.HTML_TEMPLATE)
+
+    @patch("gui_app.local_saved_level_list")
+    def test_get_local_saved_levels_reuses_supplied_catalog(self, local_saved):
+        candidates = [{"title": "Level 0", "saved": True}]
+        local_saved.return_value = candidates
+
+        result = self.api.get_local_saved_levels(candidates)
+
+        self.assertIs(result, candidates)
+        local_saved.assert_called_once_with(candidates)
+
+    def test_search_candidates_serializes_concurrent_catalog_builds(self):
+        import tempfile
+        import time
+        from concurrent.futures import ThreadPoolExecutor
+        from pathlib import Path
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            text_dir = root / "text"
+            html_dir = root / "html"
+            text_dir.mkdir()
+            html_dir.mkdir()
+            calls = []
+
+            def load_catalog():
+                calls.append(1)
+                time.sleep(0.05)
+                return {
+                    "url": {
+                        "title": "Level 0",
+                        "url": "https://backrooms.fandom.com/ja/wiki/Level_0",
+                        "category": "normal",
+                        "language": "JP",
+                    }
+                }
+
+            self.api._candidate_catalog = None
+            with (
+                patch("gui_app.load_master_database", side_effect=load_catalog),
+                patch("gui_app.TEXT_DIR", text_dir),
+                patch("gui_app.HTML_DIR", html_dir),
+            ):
+                with ThreadPoolExecutor(max_workers=8) as pool:
+                    results = list(pool.map(self.api.search_candidates, [""] * 8))
+
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(all(len(result) == 1 for result in results))
+        self.assertTrue(all(result[0]["title"] == "Level 0" for result in results))
+
+    @patch("gui_app.load_master_database")
+    def test_search_candidates_matches_orphan_html_by_canonical_url(self, load_master):
+        import tempfile
+        from pathlib import Path
+
+        url = "https://backrooms.fandom.com/ja/wiki/Level_0"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            html_dir = root / "html"
+            text_dir = root / "text"
+            html_dir.mkdir()
+            text_dir.mkdir()
+            (html_dir / "downloaded_article.html").write_text(
+                f"<!-- BRNAVI_META_INFO: TITLE=Level 0 | URL={url} -->",
+                encoding="utf-8",
+            )
+            load_master.return_value = {
+                url: {
+                    "title": "Level 0",
+                    "url": url,
+                    "category": "normal",
+                    "language": "JP",
+                }
+            }
+            self.api._candidate_catalog = None
+            with patch("gui_app.HTML_DIR", html_dir), patch("gui_app.TEXT_DIR", text_dir):
+                result = self.api.search_candidates("")
+
+        self.assertEqual(len(result), 1)
+        self.assertTrue(result[0]["saved"])
+
+    @patch("gui_app.load_master_database")
+    def test_search_candidates_resolves_duplicate_title_files_by_canonical_url(self, load_master):
+        import tempfile
+        from pathlib import Path
+
+        url_a = "https://backrooms.fandom.com/ja/wiki/Level_%21_(1)"
+        url_b = "https://backrooms.fandom.com/ja/wiki/Level_%21_(2)"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            html_dir = root / "html"
+            text_dir = root / "text"
+            html_dir.mkdir()
+            text_dir.mkdir()
+            (html_dir / "Level_!.html").write_text(
+                f"<!-- BRNAVI_META_INFO: TITLE=Level ! | URL={url_a} -->",
+                encoding="utf-8",
+            )
+            load_master.return_value = {
+                url_a: {"title": "Level !", "url": url_a, "category": "anomalous", "language": "JP"},
+                url_b: {"title": "Level !", "url": url_b, "category": "anomalous_eta", "language": "UA"},
+            }
+            self.api._candidate_catalog = None
+            with patch("gui_app.HTML_DIR", html_dir), patch("gui_app.TEXT_DIR", text_dir):
+                result = self.api.search_candidates("")
+
+        saved_by_url = {page["url"]: page["saved"] for page in result}
+        self.assertTrue(saved_by_url[url_a])
+        self.assertFalse(saved_by_url[url_b])
 
     @patch("gui_app.load_master_database")
     @patch("gui_app.TEXT_DIR")

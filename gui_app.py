@@ -81,6 +81,8 @@ CATEGORY_PRIORITY = {
 
 class BackroomsAPI:
     """PythonとWebViewを繋ぐAPIブリッジ"""
+
+    _candidate_catalog_fallback_lock = threading.RLock()
     def __init__(self):
         self.current_info = None
         self.ai = None
@@ -93,6 +95,7 @@ class BackroomsAPI:
         self._maintenance_done_event.set()
         self._current_online_wiki_url = ""
         self._candidate_catalog = None
+        self._candidate_catalog_lock = threading.RLock()
         self._auto_update_lock = threading.Lock()
         self._auto_update_scheduler_started = False
         if AI_AVAILABLE:
@@ -113,7 +116,11 @@ class BackroomsAPI:
             )
 
     def refresh_application_data(self):
-        self._candidate_catalog = None
+        lock = getattr(self, "_candidate_catalog_lock", None)
+        if lock is None:
+            lock = self._candidate_catalog_fallback_lock
+        with lock:
+            self._candidate_catalog = None
         return {"status": "reloaded"}
 
     def get_environment_settings(self):
@@ -157,8 +164,10 @@ class BackroomsAPI:
     def run_legacy_image_rename(self):
         return self.run_maintenance_task("rename_legacy_images")
 
-    def get_local_saved_levels(self):
-        return local_saved_level_list(self.search_candidates(""))
+    def get_local_saved_levels(self, candidates=None):
+        if candidates is None:
+            candidates = self.search_candidates("")
+        return local_saved_level_list(candidates)
 
     def get_local_image_data(self, filename):
         name = Path(str(filename or "")).name
@@ -572,6 +581,13 @@ class BackroomsAPI:
         return match.group(1) if match else None
 
     def search_candidates(self, query):
+        lock = getattr(self, "_candidate_catalog_lock", None)
+        if lock is None:
+            lock = self._candidate_catalog_fallback_lock
+        with lock:
+            return self._search_candidates_locked(query)
+
+    def _search_candidates_locked(self, query):
         """Master Database全体を検索し、ローカル保存状態を添えて返す。"""
         query = re.sub(r"\s+", " ", str(query or "")).strip().casefold()
         number_query = self._normalize_level_number_query(query) if query else None
@@ -585,36 +601,79 @@ class BackroomsAPI:
             if directory.exists():
                 local_files.extend(directory.glob(f"*{suffix}"))
 
+        def normalized_identity(value):
+            text = unicodedata.normalize("NFKC", str(value or "")).strip()
+            text = text.replace("\\", "/").replace("/", " ")
+            text = text.replace("_", " ")
+            return " ".join(text.split()).casefold()
+
+        local_files_by_key = {}
+        for path in local_files:
+            filename_title = self._extract_level_id_from_filename(path)
+            key = normalized_identity(filename_title or path.stem)
+            if key:
+                local_files_by_key.setdefault(key, []).append(path)
+
         pages = load_master_database() or {}
+        # Most saved HTML files already have a title-matching filename. Only
+        # inspect metadata headers for orphan filenames; reading every HTML
+        # file on each initial catalog build is especially slow on OneDrive.
+        page_identity_counts = {}
+        for page in pages.values():
+            title_key = normalized_identity(page.get("title"))
+            if title_key:
+                page_identity_counts[title_key] = page_identity_counts.get(title_key, 0) + 1
+        page_identity_keys = set(page_identity_counts)
+        duplicate_page_identity_keys = {
+            key for key, count in page_identity_counts.items() if count > 1
+        }
+        html_by_url = {}
+        if HTML_DIR.exists() and page_identity_keys:
+            for candidate_html in HTML_DIR.glob("*.html"):
+                candidate_key = normalized_identity(
+                    self._extract_level_id_from_filename(candidate_html) or candidate_html.stem
+                )
+                # A unique title can be matched without reading its HTML header.
+                # Duplicate titles must be resolved by canonical URL to avoid
+                # attaching one article's local file to every same-title page.
+                if candidate_key in page_identity_keys and candidate_key not in duplicate_page_identity_keys:
+                    continue
+                try:
+                    with candidate_html.open("r", encoding="utf-8-sig", errors="replace") as stream:
+                        header = stream.read(8192)
+                except OSError:
+                    continue
+                url_match = re.search(r"BRNAVI_META_INFO:.*?\bURL=([^|\s>]+)", header)
+                if url_match:
+                    canonical_url = url_match.group(1).strip()
+                    if canonical_url:
+                        html_by_url.setdefault(canonical_url, candidate_html)
+
         matched_local_files = set()
+        saved_files_by_url = {}
         for page in pages.values():
             title = str(page.get("title", "") or "").strip()
             if not title:
                 continue
-            matched_files = [
-                path for path in local_files if self._filename_matches_level_id(path, title)
-            ]
+            title_key = normalized_identity(title)
+            matched_files = (
+                []
+                if title_key in duplicate_page_identity_keys
+                else list(local_files_by_key.get(title_key, ()))
+            )
 
             # Prefer the canonical article URL when associating local HTML/TXT.
             # Japanese titles can be mojibaked or sanitized differently in the
             # exported filenames, so title-only matching can create a second,
             # orphaned local article beside the actual catalog entry.
             page_url = str(page.get("url") or "").strip()
-            if page_url and HTML_DIR.exists():
-                expected_url_marker = "URL=" + page_url
-                for candidate_html in HTML_DIR.glob("*.html"):
-                    try:
-                        with candidate_html.open("r", encoding="utf-8-sig", errors="replace") as stream:
-                            header = stream.read(8192)
-                    except OSError:
-                        continue
-                    if expected_url_marker not in header:
-                        continue
+            if page_url:
+                candidate_html = html_by_url.get(page_url)
+                if candidate_html is not None:
                     matched_files.append(candidate_html)
                     sibling_text = TEXT_DIR / f"{candidate_html.stem}.txt"
                     if sibling_text.is_file():
                         matched_files.append(sibling_text)
-                    break
 
             # Do not associate TXT files by Latin-token similarity. This
             # loses meaningful signs (Level -20 vs Level 20) and can attach
@@ -623,7 +682,10 @@ class BackroomsAPI:
 
             matched_files = list(dict.fromkeys(matched_files))
             if matched_files:
-                saved_titles[title.casefold()] = matched_files[0]
+                if page_url:
+                    saved_files_by_url[page_url.casefold()] = matched_files[0]
+                else:
+                    saved_titles[title.casefold()] = matched_files[0]
                 matched_local_files.update(matched_files)
 
         for local_file in local_files:
@@ -655,7 +717,11 @@ class BackroomsAPI:
             aliases = [str(value).strip() for value in aliases if str(value).strip()]
             category = str(page.get("category", metadata.get("カテゴリ", "")) or "")
             subtitle = str(page.get("subtitle", page.get("meta_title", metadata.get("メタタイトル", ""))) or "")
-            saved_file = saved_titles.get(title.casefold())
+            page_url = str(page.get("url") or "").strip()
+            saved_file = (
+                saved_files_by_url.get(page_url.casefold())
+                if page_url else saved_titles.get(title.casefold())
+            )
             # Do not infer a saved article from a filename that merely starts
             # with this title. Local presence is assigned only by exact identity.
             result_key = str(page.get("url") or title).casefold()
@@ -2330,16 +2396,24 @@ HTML_TEMPLATE = r"""
       const button = document.getElementById('reload-application-data');
       if (button.disabled) return;
       button.disabled = true;
-      button.textContent = 'Reloading...';
+      button.textContent = 'Reloading: cache...';
       try {
         const refreshed = await pywebview.api.refresh_application_data();
         if (refreshed.error) throw new Error(refreshed.error);
-        await onSearchInput();
-        await loadExplorerIndexPages();
+        explorerCatalogPromise = null;
+        button.textContent = 'Reloading: search and index...';
+        await Promise.all([onSearchInput(), loadExplorerIndexPages()]);
+        button.textContent = 'Reloading: images...';
         localImages = [];
-        await loadLocalImageGallery();
+        const galleryView = document.getElementById('explorer-gallery-view');
+        if (galleryView && !galleryView.classList.contains('hidden')) {
+          await loadLocalImageGallery();
+        }
         levelListLanguagesLoaded = false;
-        if (!document.getElementById('view-data-tools').classList.contains('hidden')) await loadLevelListLanguages();
+        if (!document.getElementById('view-data-tools').classList.contains('hidden')) {
+          button.textContent = 'Reloading: language lists...';
+          await loadLevelListLanguages();
+        }
         button.textContent = 'Reloaded';
       } catch (error) {
         button.textContent = 'Reload failed';
@@ -2715,9 +2789,27 @@ HTML_TEMPLATE = r"""
     let explorerIndexPages = [];
     let explorerIndexCategory = null;
 
+    let explorerCatalogPromise = null;
+
+    async function getExplorerCatalog() {
+      if (!explorerCatalogPromise) {
+        explorerCatalogPromise = pywebview.api.search_candidates('').then(result => {
+          if (result && result.error) throw new Error(result.error);
+          return Array.isArray(result) ? result : [];
+        }).catch(error => {
+          explorerCatalogPromise = null;
+          throw error;
+        });
+      }
+      return explorerCatalogPromise;
+    }
+
     async function onSearchInput() {
       const requestId = ++levelSearchRequestId;
-      const candidates = await pywebview.api.search_candidates(document.getElementById('search-input').value);
+      const query = document.getElementById('search-input').value;
+      const candidates = query.trim()
+        ? await pywebview.api.search_candidates(query)
+        : await getExplorerCatalog();
       if (requestId !== levelSearchRequestId) return;
       levelSearchResults = candidates || [];
       if (!explorerIndexPages.length) explorerIndexPages = levelSearchResults.map(candidate => ({...candidate}));
@@ -2778,16 +2870,21 @@ HTML_TEMPLATE = r"""
 
     async function loadExplorerIndexPages() {
       try {
-        const result = await pywebview.api.search_candidates('');
-        if (result.error) throw new Error(result.error);
-        explorerIndexPages = result || [];
+        explorerIndexPages = await getExplorerCatalog();
       } catch (_) {
         explorerIndexPages = levelSearchResults.map(candidate => ({...candidate}));
       }
-      // Include newly saved local articles even when the packaged level-list source
-      // has not been regenerated yet.
-      try {
-        localSavedLevels = await pywebview.api.get_local_saved_levels();
+      // Derive saved articles locally; avoid sending the full catalog back through
+      // the WebView bridge only to filter it.
+      const savedSeen = new Set();
+      localSavedLevels = explorerIndexPages.filter(page => {
+        if (!page.saved) return false;
+        const key = explorerTitleKey(page.title);
+        if (!key || savedSeen.has(key)) return false;
+        savedSeen.add(key);
+        return true;
+      });
+      {
         const localCandidates = localSavedLevels;
         const known = new Set(explorerIndexPages.map(page => explorerTitleKey(page.title)));
         (localCandidates || []).filter(page => page.saved).forEach(page => {
@@ -2801,7 +2898,7 @@ HTML_TEMPLATE = r"""
           explorerIndexPages.push({...page, category, category_label: page.category_label || (category === 'normal_eta' ? '通常階層 η' : '通常階層')});
           known.add(key);
         });
-      } catch (_) {}
+      }
       renderExplorerCategoryTiles();
       if (!document.getElementById('explorer-index-local-saved').classList.contains('hidden')) renderLocalSavedLevels();
       if (explorerIndexCategory !== null) renderExplorerCategorySections(explorerIndexCategory);
@@ -3942,13 +4039,18 @@ HTML_TEMPLATE = r"""
     }
 
     function getIntegerLevelNumber(page) {
-      const match = String(page.title || "").match(/^Level\s+(-?\d+)\s*η?$/i);
+      // Accept translated IDs and nested sublevels while grouping by the main integer.
+      const match = String(page.title || "").match(
+        /^Level\s+(?:[A-Z]{1,3}-|[A-Z]{1,3}\s+)?\(?(-?\d+)(?:\.\d+)*\)?(?:\s*\u03B7)?(?:[-\s].*)?$/i
+      );
       return match ? Number(match[1]) : null;
     }
 
     function getLevelSortNumber(page) {
-      const match = String(page.title || "").match(/^Level\s+(-?\d+(?:\.\d+)?)\s*η?$/i);
-      return match ? Number(match[1]) : null;
+      const match = String(page.title || "").match(
+        /^Level\s+(?:[A-Z]{1,3}-|[A-Z]{1,3}\s+)?\(?(-?\d+(?:\.\d+)*)\)?(?:\s*\u03B7)?(?:[-\s].*)?$/i
+      );
+      return match ? match[1].split(".").map(Number) : null;
     }
 
     function getLevelNumberRange(number, categoryId = currentLevelListCategory) {
@@ -3965,13 +4067,20 @@ HTML_TEMPLATE = r"""
     }
 
     function compareLevelListPages(left, right) {
-      const leftNumber = getLevelSortNumber(left);
-      const rightNumber = getLevelSortNumber(right);
-      if (leftNumber !== null && rightNumber !== null && leftNumber !== rightNumber) {
-        return leftNumber - rightNumber;
+      const leftParts = getLevelSortNumber(left);
+      const rightParts = getLevelSortNumber(right);
+      if (leftParts && rightParts) {
+        const length = Math.max(leftParts.length, rightParts.length);
+        for (let index = 0; index < length; index += 1) {
+          const leftValue = leftParts[index] ?? -1;
+          const rightValue = rightParts[index] ?? -1;
+          if (leftValue !== rightValue) return leftValue - rightValue;
+        }
+      } else if (leftParts) {
+        return -1;
+      } else if (rightParts) {
+        return 1;
       }
-      if (leftNumber !== null && rightNumber === null) return -1;
-      if (leftNumber === null && rightNumber !== null) return 1;
       return String(left.title).localeCompare(String(right.title), "ja", {numeric: true});
     }
 
@@ -4546,8 +4655,9 @@ HTML_TEMPLATE = r"""
           (result.images_failed ? ` (失敗 ${result.images_failed}件)` : "") +
           ` / ${pipelineStatus}`;
         try {
-          await onSearchInput();
-          await loadExplorerIndexPages();
+          // The backend catalog was invalidated after a successful save.
+          explorerCatalogPromise = null;
+          await Promise.all([onSearchInput(), loadExplorerIndexPages()]);
         } catch (error) { console.error('図鑑一覧の更新に失敗:', error); }
       } else {
         document.getElementById('online-wiki-save-status').textContent =

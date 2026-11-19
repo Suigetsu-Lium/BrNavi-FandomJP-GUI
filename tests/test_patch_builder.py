@@ -85,6 +85,35 @@ class PatchBuilderTests(unittest.TestCase):
                     for name in names
                 ))
 
+    def test_excludes_nested_python_bytecode_caches_from_patch_operations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            old = self._release(base / "old", "1.1.0", {
+                "BrNavi-GUI.exe": b"same executable",
+                "bleach/__pycache__/__init__.cpython-313.pyc": b"stale cache",
+                "package/nested/__pycache__/module.cpython-313.pyc": b"stale nested cache",
+                "package/module.pyc": b"loose bytecode",
+                "package/module.pyo": b"optimized bytecode",
+                "package/keep.py": b"keep",
+            })
+            new = self._release(base / "new", "1.1.1", {
+                "BrNavi-GUI.exe": b"same executable",
+                "package/keep.py": b"updated",
+            })
+            patch = base / "cache-safe.zip"
+            key = self._signing_key(base)
+            build_patch(old, new, patch, signing_key=key)
+            with zipfile.ZipFile(patch) as archive:
+                manifest = load_manifest(
+                    archive, require_signature=True, public_key_bytes=self._public_key(key)
+                )
+                paths = [item.path for item in manifest.files]
+                self.assertFalse(any(
+                    "__pycache__" in path.casefold()
+                    or path.casefold().endswith((".pyc", ".pyo"))
+                    for path in paths
+                ))
+
     def test_bootstrap_adds_updater_only_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

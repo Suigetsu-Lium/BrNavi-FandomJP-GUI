@@ -57,6 +57,11 @@ def _iter_release_files(root: Path) -> dict[str, Path]:
         for dirname in dirs:
             candidate = current_path / dirname
             rel = candidate.relative_to(root).as_posix()
+            # Python bytecode caches are runtime-generated and are not part of
+            # the deployed application contract. Never emit delete operations
+            # for caches that may not exist in a user's installation.
+            if dirname.casefold() == "__pycache__":
+                continue
             if rel.split("/")[0].casefold() in {name.casefold() for name in EXCLUDED_ROOTS}:
                 continue
             if candidate.is_symlink() or _is_reparse_point(candidate):
@@ -67,6 +72,10 @@ def _iter_release_files(root: Path) -> dict[str, Path]:
             path = current_path / filename
             relative = path.relative_to(root).as_posix()
             pure = PurePosixPath(relative)
+            if any(part.casefold() == "__pycache__" for part in pure.parts):
+                continue
+            if pure.suffix.casefold() in {".pyc", ".pyo"}:
+                continue
             if pure.parts[0].casefold() in {name.casefold() for name in EXCLUDED_ROOTS}:
                 continue
             if (relative.casefold() in {name.casefold() for name in EXCLUDED_FILES}

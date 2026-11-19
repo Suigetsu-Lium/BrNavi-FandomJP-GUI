@@ -490,36 +490,12 @@ def load_summary():
 # =============================================================================
 
 def get_html_filename_prefix(level_id):
-    """
-    Level IDをHTML保存時のファイル名形式へ変換する。
-
-    例:
-        Level 1250 η
-        → Level_1250_η
-
-        Level -753 η
-        → Level_-753_η
-
-        Level 420.1 η
-        → Level_420.1_η
-    """
-
-    match = re.fullmatch(
-        r"Level\s+(-?\d+(?:\.\d+)?)\s+η",
-        level_id
-    )
-
-    if match:
-
-        number = match.group(
-            1
-        )
-
-        return (
-            f"Level_{number}_η"
-        )
-
-    return level_id
+    """Return the normalized HTML filename prefix for any Level identifier."""
+    value = clean_value(level_id)
+    if not value:
+        return ""
+    value = sanitize_filename(value.replace("/", "_"))
+    return "_".join(value.split())
 
 
 # =============================================================================
@@ -649,6 +625,11 @@ def find_text_database(level_id):
             candidates.append(
                 path
             )
+            continue
+
+        safe_prefix = sanitize_filename(str(level_id).replace("/", "_"))
+        if safe_prefix and filename.startswith(safe_prefix):
+            candidates.append(path)
 
     if not candidates:
         return None

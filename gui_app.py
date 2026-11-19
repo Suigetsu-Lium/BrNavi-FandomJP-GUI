@@ -4,10 +4,12 @@ import ipaddress
 import os
 import json
 import base64
+import hashlib
 import csv
 import re
 import sys
 import threading
+import unicodedata
 import warnings
 import webbrowser
 from pathlib import Path
@@ -19,10 +21,12 @@ import webview
 
 # modules ディレクトリから既存ロジックを読み込み
 from modules.database import (
+    get_html_filename_prefix,
     load_master_database,
-    open_local_html
+    open_local_html,
+    sanitize_filename,
 )
-from modules.extractor import extract_danger, extract_understanding
+from modules.extractor import extract_article_attribution, extract_danger, extract_understanding
 
 # 保守・更新サービス
 from modules.operation_context import OperationCancelled, OperationContext
@@ -39,7 +43,7 @@ from modules.online_wiki import save_page as save_online_wiki_page
 from modules.online_wiki import search_pages as search_online_wiki_pages
 from modules.route_service import search_routes as search_local_routes
 from modules.runtime_paths import get_application_dir
-from modules.system_dashboard import format_clock, get_network_kind, get_power_status, list_local_images, local_saved_level_list, storage_summary
+from modules.system_dashboard import format_clock, find_local_images, get_network_kind, get_power_status, list_local_images, normalize_media_identifier, local_saved_level_list, storage_summary
 from modules.version import VERSION
 from modules.webview_fallback import set_browser_window
 
@@ -108,6 +112,10 @@ class BackroomsAPI:
                 else "AIモジュールを読み込めません。"
             )
 
+    def refresh_application_data(self):
+        self._candidate_catalog = None
+        return {"status": "reloaded"}
+
     def get_environment_settings(self):
         settings = APP_SETTINGS.get()
         due, next_due = APP_SETTINGS.is_due()
@@ -123,10 +131,31 @@ class BackroomsAPI:
 
     def get_local_image_gallery(self):
         result = []
-        for item in list_local_images(IMAGE_DIR):
+        known_pages = [dict(page) for page in load_master_database().values()]
+        known_titles = [page.get("title", "") for page in known_pages]
+        for item in list_local_images(
+            IMAGE_DIR,
+            known_titles=known_titles,
+            known_pages=known_pages,
+        ):
             item.pop("path", None)
             result.append(item)
         return result
+
+    def get_legacy_image_rename_preview(self):
+        from modules.image_downloader import plan_legacy_image_renames
+        plan = plan_legacy_image_renames()
+        return {
+            "count": len(plan["items"]),
+            "skipped": int(plan["skipped"]),
+            "items": [
+                {"source": item["source"].name, "target": item["target"].name}
+                for item in plan["items"]
+            ],
+        }
+
+    def run_legacy_image_rename(self):
+        return self.run_maintenance_task("rename_legacy_images")
 
     def get_local_saved_levels(self):
         return local_saved_level_list(self.search_candidates(""))
@@ -502,21 +531,38 @@ class BackroomsAPI:
 
         return (priority, num, title.casefold())
 
-    def _extract_level_id_from_filename(self, path):
-        """TXTファイル名の先頭からLevel IDを抽出する。
+    @staticmethod
+    def _extract_level_id_from_filename(path):
+        """Extract a Level identifier from a locally saved filename."""
+        stem = Path(path).stem
+        # TXT exports may append a subtitle after a double-underscore marker.
+        if "__" in stem:
+            stem = stem.split("__", 1)[0]
+        elif "_ _" in stem:
+            stem = stem.split("_ _", 1)[0]
+        image_marker = stem.casefold().find(" - image")
+        if image_marker >= 0:
+            stem = stem[:image_marker]
+        name = " ".join(stem.replace("_", " ").split())
+        return name or None
+    @staticmethod
+    def _filename_matches_level_id(path, level_id):
+        """Match saved HTML/TXT files using normalized title and filename keys."""
+        path = Path(path)
+        if path.suffix.casefold() not in {".html", ".htm", ".txt"}:
+            return False
+        # A title prefix is not an identity: "Level 0" must never claim
+        # files belonging to "Level 0.1", "Level 0 η", etc.
+        filename_title = BackroomsAPI._extract_level_id_from_filename(path)
+        def exact_key(value):
+            text = unicodedata.normalize("NFKC", str(value or "")).strip()
+            text = text.replace("\\", "/").replace("/", " ")
+            text = text.replace("_", " ")
+            return " ".join(text.split()).casefold()
+        stem_key = exact_key(filename_title or path.stem)
+        title_key = exact_key(level_id)
+        return bool(title_key and stem_key == title_key)
 
-        例:
-          Level 20 η__民道駅ホーム_.txt -> Level 20 η
-          Level -14.txt                 -> Level -14
-          Level 13.1 η__自然体_.txt     -> Level 13.1 η
-        """
-        name = Path(path).stem.replace("_", " ").strip()
-        match = re.match(
-            r"^(Level\s+-?\d+(?:\.\d+)?(?:\s*η)?)",
-            name,
-            re.IGNORECASE
-        )
-        return re.sub(r"\s+", " ", match.group(1)).strip() if match else None
 
     def _normalize_level_number_query(self, query):
         """'20', 'Level 20', 'Level 20 η'を数値検索として解釈する。"""
@@ -534,14 +580,58 @@ class BackroomsAPI:
             return self._filter_candidate_catalog(catalog, query, number_query)
 
         saved_titles = {}
+        local_files = []
         for directory, suffix in ((TEXT_DIR, ".txt"), (HTML_DIR, ".html")):
             if directory.exists():
-                for local_file in directory.glob(f"*{suffix}"):
-                    level_id = self._extract_level_id_from_filename(local_file)
-                    if level_id:
-                        saved_titles[level_id.casefold()] = local_file
+                local_files.extend(directory.glob(f"*{suffix}"))
 
         pages = load_master_database() or {}
+        matched_local_files = set()
+        for page in pages.values():
+            title = str(page.get("title", "") or "").strip()
+            if not title:
+                continue
+            matched_files = [
+                path for path in local_files if self._filename_matches_level_id(path, title)
+            ]
+
+            # Prefer the canonical article URL when associating local HTML/TXT.
+            # Japanese titles can be mojibaked or sanitized differently in the
+            # exported filenames, so title-only matching can create a second,
+            # orphaned local article beside the actual catalog entry.
+            page_url = str(page.get("url") or "").strip()
+            if page_url and HTML_DIR.exists():
+                expected_url_marker = "URL=" + page_url
+                for candidate_html in HTML_DIR.glob("*.html"):
+                    try:
+                        with candidate_html.open("r", encoding="utf-8-sig", errors="replace") as stream:
+                            header = stream.read(8192)
+                    except OSError:
+                        continue
+                    if expected_url_marker not in header:
+                        continue
+                    matched_files.append(candidate_html)
+                    sibling_text = TEXT_DIR / f"{candidate_html.stem}.txt"
+                    if sibling_text.is_file():
+                        matched_files.append(sibling_text)
+                    break
+
+            # Do not associate TXT files by Latin-token similarity. This
+            # loses meaningful signs (Level -20 vs Level 20) and can attach
+            # an unrelated article. Only exact filename or canonical HTML
+            # sibling associations above are accepted.
+
+            matched_files = list(dict.fromkeys(matched_files))
+            if matched_files:
+                saved_titles[title.casefold()] = matched_files[0]
+                matched_local_files.update(matched_files)
+
+        for local_file in local_files:
+            if local_file in matched_local_files:
+                continue
+            level_id = self._extract_level_id_from_filename(local_file)
+            if level_id:
+                saved_titles.setdefault(level_id.casefold(), local_file)
         metadata_by_title = {}
         summary_path = BASE_DIR / "extracted_fandom_levels_summary.csv"
         if summary_path.exists():
@@ -556,7 +646,7 @@ class BackroomsAPI:
         unique_results = {}
         for page in pages.values():
             title = str(page.get("title", "") or "").strip()
-            if not title or not re.match(r"^(?:Level|レベル)\b", title, re.I):
+            if not title:
                 continue
             metadata = metadata_by_title.get(title.casefold(), {})
             aliases = page.get("aliases", metadata.get("別名", metadata.get("aliases", []))) or []
@@ -566,13 +656,10 @@ class BackroomsAPI:
             category = str(page.get("category", metadata.get("カテゴリ", "")) or "")
             subtitle = str(page.get("subtitle", page.get("meta_title", metadata.get("メタタイトル", ""))) or "")
             saved_file = saved_titles.get(title.casefold())
-            if not saved_file:
-                saved_file = next(
-                    (path for key, path in saved_titles.items()
-                     if re.match(re.escape(title.casefold()) + r"(?:\s|$)", key)),
-                    None,
-                )
-            unique_results[title.casefold()] = {
+            # Do not infer a saved article from a filename that merely starts
+            # with this title. Local presence is assigned only by exact identity.
+            result_key = str(page.get("url") or title).casefold()
+            unique_results[result_key] = {
                 "title": title,
                 "subtitle": subtitle,
                 "aliases": aliases,
@@ -587,11 +674,11 @@ class BackroomsAPI:
 
         # Master Database未生成の環境でも保存済み記事を一覧できる。
         for title_key, path in saved_titles.items():
-            if title_key in unique_results:
+            if any(str(item.get("title", "")).casefold() == title_key for item in unique_results.values()):
                 continue
             title = self._extract_level_id_from_filename(path)
             if title:
-                unique_results[title_key] = {
+                unique_results["local:" + title_key] = {
                     "title": title, "subtitle": "", "aliases": [],
                     "category": "", "category_label": "", "source_type": "",
                     "url": "", "indexes": "", "language": "JP", "saved": True,
@@ -610,7 +697,7 @@ class BackroomsAPI:
         wants_eta = bool(re.search(r"η|イータ", query, re.I))
         for item in catalog:
             if number_query is not None:
-                match = re.match(r"^(?:Level|レベル)\s*(-?\d+(?:\.\d+)?)", item["title"], re.I)
+                match = re.search(r"Level\s*(-?\d+(?:\.\d+)?)", item["title"], re.I)
                 is_eta = bool(re.search(r"η|イータ", item["title"], re.I))
                 if match and match.group(1) == number_query and (not wants_eta or is_eta):
                     results.append(item)
@@ -625,48 +712,64 @@ class BackroomsAPI:
         return results
 
     def _find_images_flexible(self, level_id):
-        """スペースやアンダースコアの差異を吸収して画像を確実に取得"""
-        if not IMAGE_DIR.exists():
-            return []
+        """Find local article images using the same normalized key as the gallery."""
+        return find_local_images(IMAGE_DIR, level_id)
 
-        # Level 4 η -> r"^Level[_\s]*4[_\s]*η"
-        num_match = re.search(r"Level\s+(-?\d+(?:\.\d+)?)\s*(η)?", level_id, re.IGNORECASE)
-        if num_match:
-            num = num_match.group(1)
-            eta = num_match.group(2)
-            if eta:
-                pattern = rf"^Level[_\s]+{re.escape(num)}[_\s]+η"
-            else:
-                pattern = rf"^Level[_\s]+{re.escape(num)}(?:[_\s]|$)"
-        else:
-            pattern = rf"^{re.escape(level_id)}"
-
-        matched_images = []
-        for p in IMAGE_DIR.iterdir():
-            if not p.is_file() or p.suffix.lower() not in [".jpg", ".jpeg", ".png", ".webp", ".gif"]:
-                continue
-            if re.search(pattern, p.name, re.IGNORECASE):
-                matched_images.append(p)
-
-        matched_images.sort(key=lambda x: x.name)
-        return matched_images
-
-    def get_level_detail(self, level_id):
+    def get_level_detail(self, level_id, page_url=None):
         """本文TXTからメタタイトル・危険度・理解度を直接パースし、画像を確実に連結"""
+        master = load_master_database()
+        page_info = master.get(str(page_url or "").strip()) if page_url else None
+        if page_info is None and not page_url:
+            page_info = next(
+                (page for page in master.values()
+                 if str(page.get("title", "")).strip().casefold() == str(level_id).strip().casefold()),
+                None,
+            )
+        html_file = None
+        if page_info and page_info.get("url") and HTML_DIR.exists():
+            expected_url_marker = "URL=" + page_info["url"]
+            for candidate_html in HTML_DIR.glob("*.html"):
+                try:
+                    with candidate_html.open("r", encoding="utf-8", errors="ignore") as stream:
+                        header = stream.read(8192)
+                except OSError:
+                    continue
+                if expected_url_marker in header:
+                    html_file = candidate_html
+                    break
+        if html_file is None and not page_url and HTML_DIR.exists():
+            html_file = next(
+                (path for path in HTML_DIR.glob("*.html")
+                 if self._filename_matches_level_id(path, level_id)),
+                None,
+            )
+        if html_file is None:
+            html_file = HTML_DIR / f"{get_html_filename_prefix(level_id)}.html"
         # 本文TXTファイルの探索：ファイル名先頭のLevel IDを完全一致で照合
         text_file = None
-        if TEXT_DIR.exists():
+        if html_file and html_file.is_file() and TEXT_DIR.exists():
+            corresponding_text = TEXT_DIR / f"{html_file.stem}.txt"
+            if corresponding_text.is_file():
+                text_file = corresponding_text
+        if TEXT_DIR.exists() and (not page_url or page_info):
             requested_id = re.sub(r"\s+", " ", level_id.strip()).casefold()
-            for p in TEXT_DIR.glob("*.txt"):
-                file_level_id = self._extract_level_id_from_filename(p)
-                if file_level_id and file_level_id.casefold() == requested_id:
-                    text_file = p
+            for candidate_text in TEXT_DIR.glob("*.txt"):
+                file_level_id = self._extract_level_id_from_filename(candidate_text)
+                if (
+                    (file_level_id and file_level_id.casefold() == requested_id)
+                    or self._filename_matches_level_id(candidate_text, level_id)
+                ):
+                    text_file = candidate_text
                     break
+
+        # Never fall back to a different article's TXT based on partial
+        # Latin tokens. Signs and punctuation are meaningful in Level IDs
+        # (e.g. Level -20 η is not Level 20 η).
 
         raw_text = ""
         if text_file and text_file.exists():
             try:
-                with open(text_file, "r", encoding="utf-8", errors="ignore") as f:
+                with open(text_file, "r", encoding="utf-8-sig", errors="ignore") as f:
                     raw_text = f.read()
             except Exception:
                 pass
@@ -725,8 +828,24 @@ class BackroomsAPI:
         cleaned_text = re.sub(r'\[危険度\]\s*\n\s*[^\n\[]+\n?', '', cleaned_text)
         cleaned_text = cleaned_text.strip()
 
-        # 画像の取得（柔軟マッチング）
-        image_paths = self._find_images_flexible(level_id)
+        article_attribution = ""
+        if html_file and html_file.is_file():
+            try:
+                source_html = html_file.read_text(encoding="utf-8", errors="ignore")
+                article_attribution = extract_article_attribution(source_html)
+            except OSError:
+                article_attribution = ""
+
+        # URLを持つ記事は、そのURLから生成したキーの画像だけを表示する。
+        # タイトル・階層IDによる画像検索は別記事混入の原因になるため行わない。
+        page_url_value = str(page_info.get("url", "") if page_info else "").strip()
+        if page_url_value:
+            page_key = hashlib.sha256(
+                page_url_value.rstrip("/").encode("utf-8")
+            ).hexdigest()[:16]
+            image_paths = sorted(IMAGE_DIR.glob(f"page_{page_key}_image*")) if IMAGE_DIR.exists() else []
+        else:
+            image_paths = self._find_images_flexible(level_id)
         images_base64 = []
         for img_path in image_paths:
             try:
@@ -742,29 +861,30 @@ class BackroomsAPI:
                 pass
 
         # Master DB からカテゴリ・URL情報を取得
-        master = load_master_database()
-        page_info = None
-        for p in master.values():
-            if p["title"].casefold() == level_id.casefold():
-                page_info = p
-                break
-
         self.current_info = {
             "url": page_info.get("url", "") if page_info else "",
-            "html_file": BASE_DIR / "downloaded_fandom_html" / f"{level_id.replace(' ', '_')}.html"
+            "html_file": html_file,
         }
 
-        category = page_info.get("category", "") if page_info else "階層"
-        language = page_info.get("language", "") if page_info else "JP"
+        category = page_info.get("category", "normal") if page_info else "normal"
+        language = page_info.get("language", "JP") if page_info else "JP"
+        source_type = page_info.get("source_type", "original") if page_info else "original"
+        translation_section = page_info.get("translation_section", "") if page_info else ""
+        section_number = page_info.get("section_number", "") if page_info else ""
 
         return {
             "level_id": level_id,
             "title": meta_title or (page_info.get("title", "") if page_info else ""),
             "url": self.current_info["url"],
+            "html_path": str(html_file) if html_file and html_file.is_file() else "",
             "category": category,
             "language": language,
+            "source_type": source_type,
+            "translation_section": translation_section,
+            "section_number": section_number,
             "danger": danger,
             "comprehension": comprehension,
+            "attribution": article_attribution,
             "text": cleaned_text or "※ 本文データがありません。",
             "images": images_base64
         }
@@ -774,9 +894,18 @@ class BackroomsAPI:
             return {"url": self.current_info["url"]}
         return {"error": "FandomページのURLがありません。"}
 
-    def search_routes(self, start, goal):
+    def search_routes(self, start, goal, options=None):
         try:
-            return search_local_routes(start, goal)
+            allowed = {
+                "include_uncertain", "include_unknown", "include_rumor",
+                "include_closed", "include_needs_review",
+            }
+            filters = {
+                key: bool(value)
+                for key, value in (options or {}).items()
+                if key in allowed
+            }
+            return search_local_routes(start, goal, **filters)
         except Exception as error:
             return {"error": f"経路検索に失敗しました: {error}", "routes": [], "start_candidates": [], "goal_candidates": []}
 
@@ -1120,6 +1249,7 @@ class BackroomsAPI:
             "update_master": "Level一覧データ更新",
             "extract_info": "情報データベース更新",
             "update_network": "ネットワーク更新",
+            "refresh_saved_wiki_page": "Refresh saved HTML and extract",
         }
         task_label = task_labels.get(task_name)
         if task_label is None:
@@ -1309,6 +1439,13 @@ HTML_TEMPLATE = r"""
       display: flex;
       align-items: center;
       justify-content: space-between;
+    }
+    .article-kind-item .wiki-heading {
+      color: #8a4b12;
+      border-bottom: 2px solid #d7b36a;
+    }
+    .article-kind-item p {
+      line-height: 1.85;
     }
     .ai-table-scroll {
       max-width: 100%;
@@ -1633,6 +1770,7 @@ HTML_TEMPLATE = r"""
       <button onclick="switchTab('routes')" id="tab-btn-routes" class="px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition">🧭 経路・フロー</button>
       <button onclick="switchTab('settings')" id="tab-btn-settings" class="px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition">⚙️ 環境設定</button>
       <button onclick="switchTab('ai')" id="tab-btn-ai" class="px-4 py-1.5 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 transition">🤖 AI Assistant</button>
+      <button onclick="reloadApplicationData()" id="reload-application-data" class="px-3 py-1.5 rounded text-xs bg-[#66502f] text-white">Reload data</button>
       <button onclick="showAbout()" id="about-button" class="px-3 py-1.5 rounded text-xs font-semibold bg-gray-700 text-gray-200 hover:bg-gray-600 transition">アプリ情報</button>
     </div>
     <div class="flex shrink-0 items-center gap-2 text-[10px] text-gray-300">
@@ -1710,6 +1848,21 @@ HTML_TEMPLATE = r"""
           <button id="explorer-subtab-article" onclick="switchExplorerSubtab('article')" class="rounded px-3 py-1.5 text-sm font-semibold bg-[#b45309] text-white">記事・図鑑ビュー</button>
           <button id="explorer-subtab-gallery" onclick="switchExplorerSubtab('gallery')" class="rounded px-3 py-1.5 text-sm font-semibold bg-[#eee3bc]">画像ギャラリー</button>
         </div>
+        <div id="explorer-article-tabs" class="mx-auto mb-3 max-w-6xl overflow-hidden rounded-t-xl border border-[#d4c39b] bg-[#e9ddb9] shadow-sm" aria-label="Article browser">
+          <div class="flex min-w-0 items-end gap-1 px-2 pt-2">
+            <div id="explorer-tab-strip" class="flex min-w-0 flex-1 items-end gap-1 overflow-x-auto" role="tablist" aria-label="Article tabs"></div>
+            <button type="button" onclick="createExplorerTab()" title="New tab" aria-label="New tab" class="mb-0.5 h-8 w-8 shrink-0 rounded-lg text-lg text-[#48515d] hover:bg-white">+</button>
+          </div>
+          <div class="flex items-center gap-1 border-t border-[#d4c39b] bg-[#f4ebd3] px-3 py-2">
+            <button type="button" id="explorer-history-back" onclick="goExplorerTabBack()" disabled title="Back" aria-label="Back" class="h-8 w-8 shrink-0 rounded-full text-lg text-[#765b31] hover:bg-[#eadbb7] disabled:opacity-30">&#8592;</button>
+            <button type="button" id="explorer-history-forward" onclick="goExplorerTabForward()" disabled title="Forward" aria-label="Forward" class="h-8 w-8 shrink-0 rounded-full text-lg text-[#765b31] hover:bg-[#eadbb7] disabled:opacity-30">&#8594;</button>
+            <button type="button" onclick="reloadExplorerTab()" title="Reload" aria-label="Reload" class="h-8 w-8 shrink-0 rounded-full text-[#765b31] hover:bg-[#eadbb7]">&#8635;</button>
+            <div class="ml-2 flex min-w-0 flex-1 items-center gap-2 rounded-full border border-[#ddcfaa] bg-[#fbf5e5] px-3 py-1.5 text-xs text-[#765f3c]">
+              <span class="shrink-0 text-[#54845b]">&#9679;</span>
+              <span id="explorer-address" class="min-w-0 flex-1 truncate">Backrooms Wiki</span>
+            </div>
+          </div>
+        </div>
         <div id="explorer-article-view">
         <div id="explorer-index-home" class="mx-auto max-w-5xl">
           <div class="mb-5 text-center">
@@ -1717,7 +1870,7 @@ HTML_TEMPLATE = r"""
             <h2 class="mt-1 text-3xl font-semibold text-[#3f3828]">階層の一覧</h2>
             <p class="mt-2 text-sm text-gray-600">カテゴリを選ぶと、番号帯ごとの一覧を開きます。</p>
           </div>
-          <div id="explorer-category-tiles" class="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3" aria-label="階層カテゴリ一覧"></div>
+          <div id="explorer-category-tiles" class="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-4" aria-label="階層カテゴリ一覧"></div>
         </div>
 
         <div id="explorer-index-local-saved" class="hidden mx-auto max-w-6xl">
@@ -1760,6 +1913,7 @@ HTML_TEMPLATE = r"""
               <div id="view-meta-title" class="text-base font-semibold text-[#b45309] mt-0.5"></div>
             </div>
             <div class="print-exclude flex space-x-2 select-none">
+              <button onclick="refreshCurrentSavedHtml()" class="px-2.5 py-1 text-xs bg-[#f4e7b8] hover:bg-[#e8d89f] text-[#784f00] rounded font-medium border border-[#d9c78d]">HTML再確認・抽出</button>
               <button onclick="openCurrentFandomInApp()" class="px-2.5 py-1 text-xs bg-[#f4e7b8] hover:bg-[#e8d89f] text-[#784f00] rounded font-medium border border-[#d9c78d]">🌐 内蔵ブラウザーでFandomを開く</button>
               <button onclick="pywebview.api.open_local_browser_html()" class="px-2.5 py-1 text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 rounded font-medium border border-gray-300">📄 ローカルHTML</button>
               <button type="button" onclick="togglePrintOptions()" class="px-2.5 py-1 text-xs bg-[#e8e0c8] hover:bg-[#d9cfb0] text-gray-800 rounded font-medium border border-[#cfc3a0]">🖨 印刷</button>
@@ -1809,15 +1963,18 @@ HTML_TEMPLATE = r"""
 
               <!-- パラメータ表 -->
               <table>
-                <tr><th>危険度</th><td id="infobox-danger" class="font-bold text-[#b45309]">-</td></tr>
-                <tr><th>理解度</th><td id="infobox-comprehension">-</td></tr>
+                <tr id="infobox-danger-row"><th>危険度</th><td id="infobox-danger" class="font-bold text-[#b45309]">-</td></tr>
+                <tr id="infobox-comprehension-row"><th>理解度</th><td id="infobox-comprehension">-</td></tr>
                 <tr><th>カテゴリ</th><td id="infobox-category">-</td></tr>
                 <tr><th>言語</th><td id="infobox-lang">-</td></tr>
               </table>
+              <div id="infobox-special-fields" class="hidden border-t border-[#e5dcbe]"></div>
             </aside>
 
             <!-- 本文エリア (左) -->
             <div class="flex-1 order-1 text-sm leading-relaxed text-gray-800">
+              <div id="translation-article-banner" class="hidden mb-4 rounded border border-[#d9c58c] bg-[#fff8df] p-3 text-sm text-[#654b20]"></div>
+              <div id="article-attribution" class="hidden mb-4 border-b border-[#ded5bd] pb-3 text-xs leading-relaxed text-gray-500"></div>
               <div id="view-article-content" class="space-y-3">
                 読み込み中...
               </div>
@@ -1845,8 +2002,12 @@ HTML_TEMPLATE = r"""
         <section id="explorer-gallery-view" class="hidden mx-auto max-w-6xl">
           <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
             <div><h2 class="text-2xl font-semibold">画像ギャラリー</h2><p class="text-xs text-gray-600">保存済み画像からLevelを逆引きできます。</p></div>
-            <input id="local-gallery-filter" oninput="filterLocalImageGallery()" type="search" class="w-72 rounded border px-3 py-2 text-sm" placeholder="Level名・画像名で検索">
+            <div class="flex flex-wrap items-center gap-2">
+              <input id="local-gallery-filter" oninput="filterLocalImageGallery()" type="search" class="w-56 rounded border px-3 py-2 text-sm" placeholder="Level名・画像名で検索">
+              <button id="legacy-image-rename-button" onclick="previewLegacyImageRename()" class="rounded border border-[#b98b36] bg-[#fff8df] px-3 py-2 text-xs font-semibold text-[#74440b]">旧画像名を移行</button>
+            </div>
           </div>
+          <div id="legacy-image-rename-status" class="mb-3 text-xs text-gray-600"></div>
           <div id="local-gallery-count" class="mb-3 text-xs text-gray-500"></div>
           <div id="local-gallery-grid" class="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4"></div>
         </section>
@@ -1885,6 +2046,9 @@ HTML_TEMPLATE = r"""
           <div id="html-download-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-1.5 max-h-28 overflow-y-auto pr-1"></div>
         </div>
         <div class="flex items-center gap-2">
+          <button type="button" onclick="navigateOnlineWikiHistory(-1)" title="Back" class="rounded border px-2 py-1">←</button>
+          <button type="button" onclick="navigateOnlineWikiHistory(1)" title="Forward" class="rounded border px-2 py-1">→</button>
+          <button type="button" onclick="reloadOnlineWikiFrame()" title="Reload" class="rounded border px-2 py-1">↻</button>
           <input id="online-wiki-url" type="url"
             onkeydown="if(event.key==='Enter') openDirectWikiUrl()"
             class="min-w-0 flex-1 border border-[#d6c79a] rounded px-3 py-1.5 text-xs"
@@ -1896,6 +2060,7 @@ HTML_TEMPLATE = r"""
           </button>
           <button onclick="resetOnlineWikiHome()"
             class="shrink-0 px-3 py-1.5 text-xs font-semibold border border-[#d6c79a] bg-[#f7f0d4] rounded">ホーム</button>
+          <button id="online-wiki-redownload-current" onclick="redownloadCurrentOnlineWikiPage()" disabled class="shrink-0 px-3 py-1.5 text-xs font-semibold border border-[#d6c79a] bg-[#fff8df] rounded disabled:opacity-50">上書き再取得</button>
           <button id="online-wiki-save-current" onclick="saveCurrentOnlineWikiPage()" disabled
             class="shrink-0 px-3 py-1.5 text-xs font-semibold bg-[#b45309] text-white rounded disabled:opacity-50">
             表示中を保存
@@ -1990,6 +2155,14 @@ HTML_TEMPLATE = r"""
         <div class="flex flex-wrap items-end gap-3"><label class="text-xs font-semibold">出発Level<input id="route-start" class="block mt-1 border border-[#d6c79a] rounded px-3 py-2 text-sm" placeholder="Level 20"></label>
           <span class="pb-2 text-gray-400">→</span><label class="text-xs font-semibold">目的Level<input id="route-goal" class="block mt-1 border border-[#d6c79a] rounded px-3 py-2 text-sm" placeholder="Level 4"></label>
           <button onclick="searchRoutes()" class="px-4 py-2 rounded bg-[#b45309] text-white text-xs font-semibold">経路を検索</button><span id="route-status" class="text-xs text-gray-600" role="status"></span></div>
+        <div class="flex flex-wrap gap-x-4 gap-y-2 rounded border border-[#e2d8b5] bg-[#fffdf5] p-3 text-xs text-gray-700">
+          <label class="flex items-center gap-2"><input id="route-include-uncertain" type="checkbox">不確実な接続を含める</label>
+          <label class="flex items-center gap-2"><input id="route-include-unknown" type="checkbox">状態不明を含める</label>
+          <label class="flex items-center gap-2"><input id="route-include-rumor" type="checkbox">噂を含める</label>
+          <label class="flex items-center gap-2"><input id="route-include-closed" type="checkbox">閉鎖・消失済みを含める</label>
+          <label class="flex items-center gap-2"><input id="route-include-review" type="checkbox">要確認データを含める</label>
+        </div>
+        <p class="text-[11px] text-gray-500">標準では「確定・利用可能・確認済み」の接続のみを検索します。未確認データを含める場合は、該当項目を有効にしてください。</p>
         <div id="route-results-list" class="space-y-3"><div id="route-results" class="space-y-4"></div></div>
         <div id="route-detail-view" class="hidden space-y-3">
           <button type="button" onclick="showRouteResults()" class="rounded border border-[#d6c79a] px-3 py-2 text-sm font-semibold hover:bg-amber-50">← 検索結果一覧へ戻る</button>
@@ -2153,6 +2326,29 @@ HTML_TEMPLATE = r"""
         result.error || '';
     }
 
+    async function reloadApplicationData() {
+      const button = document.getElementById('reload-application-data');
+      if (button.disabled) return;
+      button.disabled = true;
+      button.textContent = 'Reloading...';
+      try {
+        const refreshed = await pywebview.api.refresh_application_data();
+        if (refreshed.error) throw new Error(refreshed.error);
+        await onSearchInput();
+        await loadExplorerIndexPages();
+        localImages = [];
+        await loadLocalImageGallery();
+        levelListLanguagesLoaded = false;
+        if (!document.getElementById('view-data-tools').classList.contains('hidden')) await loadLevelListLanguages();
+        button.textContent = 'Reloaded';
+      } catch (error) {
+        button.textContent = 'Reload failed';
+        console.error(error);
+      } finally {
+        setTimeout(() => { button.textContent = 'Reload data'; button.disabled = false; }, 1500);
+      }
+    }
+
     function switchTab(tab) {
       ['explorer', 'wiki', 'data-tools', 'routes', 'settings', 'ai'].forEach(t => {
         document.getElementById('view-' + t).classList.add('hidden');
@@ -2279,6 +2475,27 @@ HTML_TEMPLATE = r"""
       } catch (_) { img.alt = '画像を読み込めません'; }
     }
     function filterLocalImageGallery() { renderLocalImageGallery(); }
+    async function previewLegacyImageRename() {
+      const button = document.getElementById('legacy-image-rename-button');
+      const status = document.getElementById('legacy-image-rename-status');
+      button.disabled = true;
+      try {
+        const preview = await pywebview.api.get_legacy_image_rename_preview();
+        if (!preview.count) {
+          status.textContent = `移行可能な画像はありません。判定保留 ${preview.skipped} 件`;
+          return;
+        }
+        const examples = preview.items.slice(0, 8).map(item => `${item.source} → ${item.target}`).join('\n');
+        const extra = preview.count > 8 ? `\nほか ${preview.count - 8} 件` : '';
+        if (!confirm(`旧命名方式の画像 ${preview.count} 件を新方式へリネームします。\n判定保留: ${preview.skipped} 件（変更しません）\n\n${examples}${extra}\n\n既存ファイルは上書きしません。実行しますか？`)) return;
+        status.textContent = '画像名を移行しています...';
+        await runTask('rename_legacy_images');
+      } catch (error) {
+        status.textContent = `移行確認に失敗しました: ${error}`;
+      } finally {
+        button.disabled = false;
+      }
+    }
     async function openGalleryLevel(level) {
       if (!level) return;
       await switchExplorerSubtab('article');
@@ -2561,9 +2778,9 @@ HTML_TEMPLATE = r"""
 
     async function loadExplorerIndexPages() {
       try {
-        const result = await pywebview.api.get_level_list_pages('JP');
+        const result = await pywebview.api.search_candidates('');
         if (result.error) throw new Error(result.error);
-        explorerIndexPages = result.pages || [];
+        explorerIndexPages = result || [];
       } catch (_) {
         explorerIndexPages = levelSearchResults.map(candidate => ({...candidate}));
       }
@@ -2597,13 +2814,13 @@ HTML_TEMPLATE = r"""
       const categories = getLevelListCategories(explorerIndexPages.length ? explorerIndexPages : levelSearchResults);
       categories.forEach((category, index) => {
         const card = document.createElement('div');
-        card.className = 'overflow-hidden border border-[#dfd09f] bg-[#fff1b2] shadow-sm transition hover:-translate-y-0.5 hover:shadow-md';
+        card.className = 'overflow-hidden rounded-md border border-[#dfd09f] bg-[#fffdf5] shadow-sm transition hover:-translate-y-0.5 hover:border-[#b98a43] hover:shadow-md';
         const button = document.createElement('button');
         button.type = 'button';
-        button.className = 'block w-full text-left focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#b45309]';
+        button.className = 'block w-full text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#b45309]';
         button.onclick = () => openExplorerCategory(category.id);
         const art = document.createElement('div');
-        art.className = 'relative mx-auto mt-3 h-44 w-44 overflow-hidden bg-[#e4d9a8]';
+        art.className = 'relative h-24 w-full overflow-hidden bg-[#e4d9a8]';
         const palette = [['#77754b','#cec899'],['#45463e','#b7b5a5'],['#39745f','#b7d8aa'],['#6d3f24','#d39b53'],['#6c7557','#d7c982'],['#61797e','#bed0c8'],['#657b80','#c7d5cd'],['#83785c','#d9cea9']][index % 8];
         art.style.background = `linear-gradient(145deg,${palette[0]},${palette[1]})`;
         if (category.imageUrl) {
@@ -2611,47 +2828,53 @@ HTML_TEMPLATE = r"""
           image.src = category.imageUrl;
           image.alt = `${category.title}の参考画像`;
           image.loading = 'lazy';
-          image.className = 'absolute inset-0 h-full w-full object-cover';
+          image.className = 'absolute inset-0 h-full w-full object-cover transition duration-200 group-hover:scale-[1.03]';
           image.onerror = () => image.remove();
           art.appendChild(image);
         }
         const title = document.createElement('div');
-        title.className = 'px-2 py-2 text-center text-sm font-bold text-[#3f3828]';
+        title.className = 'min-w-0 flex-1 px-2 py-2 text-left text-xs font-bold leading-snug text-[#3f3828]';
         title.textContent = category.title;
         const count = document.createElement('div');
-        count.className = 'pb-2 text-center text-[10px] text-gray-600';
-        count.textContent = `${category.pages.length}件`;
-        button.append(art, title, count);
+        count.className = 'shrink-0 rounded-full bg-[#f3ead2] px-2 py-1 text-[10px] font-semibold tabular-nums text-[#72552d]';
+        count.textContent = category.pages.length.toLocaleString('ja-JP') + '件';
+        const info = document.createElement('div');
+        info.className = 'flex min-h-[48px] items-center justify-between gap-1 px-2 py-1';
+        info.append(title, count);
+        button.append(art, info);
         card.appendChild(button);
         if (category.imagePageUrl) {
           const credit = document.createElement('a');
           credit.href = category.imagePageUrl;
           credit.target = '_blank';
           credit.rel = 'noopener noreferrer';
-          credit.className = 'block border-t border-[#e6d99f] px-2 py-1 text-right text-[9px] text-[#765b32] hover:underline';
+          credit.className = 'block border-t border-[#eee5ce] px-2 py-1 text-right text-[9px] text-[#806a43] hover:bg-[#faf5e7] hover:underline';
           credit.textContent = '画像出典';
           card.appendChild(credit);
         }
         host.appendChild(card);
       });
       const localCard = document.createElement('div');
-      localCard.className = 'overflow-hidden border border-[#dfd09f] bg-[#fff1b2] shadow-sm transition hover:-translate-y-0.5 hover:shadow-md';
+      localCard.className = 'overflow-hidden rounded-md border border-[#dfd09f] bg-[#fffdf5] shadow-sm transition hover:-translate-y-0.5 hover:border-[#b98a43] hover:shadow-md';
       if (categories.length === 8) localCard.classList.add('lg:col-start-1', 'lg:row-start-3');
       const localButton = document.createElement('button');
       localButton.type = 'button';
       localButton.className = 'block w-full text-left focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#b45309]';
       localButton.onclick = openLocalSavedLevels;
       const localArt = document.createElement('div');
-      localArt.className = 'relative mx-auto mt-3 flex h-44 w-44 items-center justify-center overflow-hidden bg-[#e4d9a8] text-6xl';
+      localArt.className = 'relative flex h-24 w-full items-center justify-center overflow-hidden bg-[#e4d9a8] text-4xl';
       localArt.style.background = 'linear-gradient(145deg,#806b42,#ddc99a)';
       localArt.textContent = '📚';
       const localTitle = document.createElement('div');
-      localTitle.className = 'px-2 py-2 text-center text-sm font-bold text-[#3f3828]';
+      localTitle.className = 'min-w-0 flex-1 px-2 py-2 text-left text-xs font-bold leading-snug text-[#3f3828]';
       localTitle.textContent = 'ローカル保存済み階層の一覧';
       const localCount = document.createElement('div');
-      localCount.className = 'pb-2 text-center text-[10px] text-gray-600';
+      localCount.className = 'shrink-0 rounded-full bg-[#f3ead2] px-2 py-1 text-[10px] font-semibold tabular-nums text-[#72552d]';
       localCount.textContent = `${localSavedLevels.length}件`;
-      localButton.append(localArt, localTitle, localCount);
+      const localInfo = document.createElement('div');
+      localInfo.className = 'flex min-h-[48px] items-center justify-between gap-1 px-2 py-1';
+      localInfo.append(localTitle, localCount);
+      localButton.append(localArt, localInfo);
       localCard.appendChild(localButton);
       host.appendChild(localCard);
     }
@@ -2683,6 +2906,7 @@ HTML_TEMPLATE = r"""
         button.type = 'button';
         button.className = 'rounded border border-[#e2d8b5] bg-[#fffdf5] p-3 text-left shadow-sm transition hover:bg-[#f7f0d4]';
         button.onclick = () => openExplorerCandidate(page);
+        button.onauxclick = event => { if (event.button === 1) { event.preventDefault(); createExplorerTab(page); } };
         const title = document.createElement('span');
         title.className = 'block font-semibold text-[#a3420b]';
         title.textContent = `📖 ${page.title}`;
@@ -2763,6 +2987,7 @@ HTML_TEMPLATE = r"""
         link.className = 'text-[#a3420b] hover:underline';
         link.textContent = page.title || '無題';
         link.onclick = event => { event.preventDefault(); openExplorerCandidate(page); };
+        link.onauxclick = event => { if (event.button === 1) { event.preventDefault(); createExplorerTab(page); } };
         row.appendChild(link);
         if (page.subtitle) {
           const subtitle = document.createElement('span');
@@ -2800,14 +3025,208 @@ HTML_TEMPLATE = r"""
       });
     }
 
+    let explorerTabs = [{id: 1, title: 'New tab', page: null, history: [], historyIndex: -1}];
+    let activeExplorerTabId = 1;
+    let nextExplorerTabId = 2;
+    let currentExplorerPage = null;
+    let explorerNavigationToken = 0;
+
+    function activeExplorerTab() {
+      return explorerTabs.find(tab => tab.id === activeExplorerTabId) || explorerTabs[0];
+    }
+
+    function renderExplorerTabs() {
+      const host = document.getElementById('explorer-tab-strip');
+      if (!host) return;
+      host.replaceChildren();
+      explorerTabs.forEach(tab => {
+        const active = tab.id === activeExplorerTabId;
+        const shell = document.createElement('div');
+        shell.className = 'group flex h-9 max-w-56 min-w-0 shrink-0 items-center gap-1 rounded-t-lg border px-2 ' +
+          (active ? 'border-[#c9b98d] border-b-[#f7f0dc] bg-[#f7f0dc] text-[#49371f] shadow-sm' : 'border-transparent bg-[#e8d9b2] text-[#6c5735] hover:bg-[#f0e4c5]');
+        shell.setAttribute('role', 'presentation');
+
+        const select = document.createElement('button');
+        select.type = 'button';
+        select.className = 'min-w-0 flex-1 truncate text-left text-xs font-medium';
+        select.setAttribute('role', 'tab');
+        select.setAttribute('aria-selected', String(active));
+        select.textContent = tab.title || 'New tab';
+        select.title = tab.page ? tab.page.title : (tab.title || 'New tab');
+        select.onclick = () => activateExplorerTab(tab.id);
+        select.onauxclick = event => {
+          if (event.button === 1) { event.preventDefault(); closeExplorerTab(tab.id); }
+        };
+
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.className = 'flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-sm text-[#806b49] hover:bg-[#ead8b0] hover:text-[#8b2f20]';
+        close.textContent = '\u00d7';
+        close.title = 'Close tab';
+        close.setAttribute('aria-label', 'Close ' + (tab.title || 'tab'));
+        close.onclick = event => { event.stopPropagation(); closeExplorerTab(tab.id); };
+
+        shell.append(select, close);
+        host.appendChild(shell);
+      });
+      const active = activeExplorerTab();
+      const back = document.getElementById('explorer-history-back');
+      if (back) back.disabled = active.historyIndex <= 0;
+      const forward = document.getElementById('explorer-history-forward');
+      if (forward) forward.disabled = active.historyIndex >= active.history.length - 1;
+      const address = document.getElementById('explorer-address');
+      if (address) address.textContent = active.page && active.page.title ? active.page.title : 'Backrooms Wiki';
+    }
+
+    function createExplorerTab(item = null) {
+      const tab = {id: nextExplorerTabId++, title: item ? item.title : 'New tab', page: null, history: [], historyIndex: -1};
+      explorerTabs.push(tab);
+      activeExplorerTabId = tab.id;
+      renderExplorerTabs();
+      if (item) openExplorerCandidate(item);
+      else showExplorerIndexHome();
+    }
+
+    function closeExplorerTab(id) {
+      if (explorerTabs.length === 1) {
+        explorerTabs[0] = {id: 1, title: 'New tab', page: null, history: [], historyIndex: -1};
+        activeExplorerTabId = 1;
+        currentExplorerPage = null;
+        showExplorerIndexHome();
+        renderExplorerTabs();
+        return;
+      }
+      const index = explorerTabs.findIndex(tab => tab.id === id);
+      if (index < 0) return;
+      explorerTabs.splice(index, 1);
+      if (activeExplorerTabId === id) {
+        activeExplorerTabId = explorerTabs[Math.max(0, index - 1)].id;
+        activateExplorerTab(activeExplorerTabId);
+      } else renderExplorerTabs();
+    }
+
+    async function activateExplorerTab(id) {
+      activeExplorerTabId = id;
+      const tab = activeExplorerTab();
+      renderExplorerTabs();
+      if (tab.page) await displayExplorerPage(tab.page);
+      else { currentExplorerPage = null; showExplorerIndexHome(); }
+    }
+
+    async function goExplorerTabBack() {
+      const tab = activeExplorerTab();
+      if (!tab || tab.historyIndex <= 0) return;
+      tab.historyIndex--;
+      tab.page = tab.history[tab.historyIndex];
+      await displayExplorerPage(tab.page);
+      renderExplorerTabs();
+    }
+
+    async function goExplorerTabForward() {
+      const tab = activeExplorerTab();
+      if (!tab || tab.historyIndex >= tab.history.length - 1) return;
+      tab.historyIndex++;
+      tab.page = tab.history[tab.historyIndex];
+      await displayExplorerPage(tab.page);
+      renderExplorerTabs();
+    }
+
+    async function reloadExplorerTab() {
+      const tab = activeExplorerTab();
+      if (!tab || !tab.page) return;
+      await displayExplorerPage(tab.page);
+      renderExplorerTabs();
+    }
+
     async function openExplorerCandidate(item) {
+      const tab = activeExplorerTab();
+      const page = {
+        title: item.title,
+        url: item.url || '',
+        html_path: item.html_path || '',
+        remote_html: item.remote_html || '',
+        saved: Boolean(item.saved)
+      };
+      tab.history = tab.history.slice(0, tab.historyIndex + 1);
+      tab.history.push(page);
+      tab.historyIndex = tab.history.length - 1;
+      tab.page = page;
+      tab.title = item.title || 'Untitled';
+      renderExplorerTabs();
+      await displayExplorerPage(page);
+    }
+
+    async function displayExplorerPage(page) {
+      const token = ++explorerNavigationToken;
+      currentExplorerPage = page;
+      activeExplorerTab().page = page;
       document.getElementById('explorer-index-home').classList.add('hidden');
       document.getElementById('explorer-index-category').classList.add('hidden');
       document.getElementById('explorer-index-local-saved').classList.add('hidden');
       document.getElementById('wiki-page-container').classList.remove('hidden');
-      await loadLevelDetail(item.title);
+      if (!page.saved) {
+        const article = document.getElementById('view-article-content');
+        document.getElementById('view-level-id').textContent = page.title || 'Wiki記事';
+        document.getElementById('view-meta-title').textContent = '';
+        const attribution = document.getElementById('article-attribution');
+        attribution.textContent = '';
+        attribution.classList.add('hidden');
+        document.getElementById('translation-article-banner').classList.add('hidden');
+        article.dataset.articleKind = 'unsaved';
+        article.classList.remove('article-kind-item');
+        article.textContent = 'ローカルデータなし：この記事はまだ保存されていません。Wiki本文を閲覧するには、HTML取得・データ抽出から保存してください。';
+
+        // Clear every article-specific field before showing an unsaved page.
+        // This also prevents the previous page's image/license metadata lingering.
+        explorerImages = [];
+        document.getElementById('print-source-title').textContent = page.title || '';
+        const printSourceLink = document.getElementById('print-source-link');
+        printSourceLink.removeAttribute('href');
+        printSourceLink.textContent = '';
+        printSourceLink.classList.add('hidden');
+        document.getElementById('view-category').textContent = '未保存';
+        document.getElementById('view-danger-tag').textContent = '情報なし';
+        document.getElementById('infobox-title').textContent = page.title || '';
+        document.getElementById('infobox-danger').textContent = '情報なし';
+        document.getElementById('infobox-comprehension').textContent = '情報なし';
+        document.getElementById('infobox-category').textContent = '未保存';
+        document.getElementById('infobox-lang').textContent = '-';
+        document.getElementById('infobox-special-fields').replaceChildren();
+        document.getElementById('infobox-special-fields').classList.add('hidden');
+        document.getElementById('infobox-danger-row').classList.remove('hidden');
+        document.getElementById('infobox-comprehension-row').classList.remove('hidden');
+        const mainImg = document.getElementById('infobox-main-img');
+        mainImg.removeAttribute('src');
+        mainImg.classList.add('hidden');
+        document.getElementById('infobox-no-img').classList.remove('hidden');
+        document.getElementById('infobox-caption').textContent = '';
+        document.getElementById('view-image-gallery').replaceChildren();
+        document.getElementById('gallery-container').classList.add('hidden');
+        renderExplorerGallery();
+        const infobox = document.querySelector('#wiki-page-container aside');
+        if (infobox) infobox.classList.add('hidden');
+      } else if (page.remote_html) {
+        const article = document.getElementById('view-article-content');
+        document.getElementById('view-level-id').textContent = page.title || 'Wiki記事';
+        document.getElementById('view-meta-title').textContent = '';
+        document.getElementById('article-attribution').classList.add('hidden');
+        document.getElementById('translation-article-banner').classList.add('hidden');
+        article.dataset.articleKind = 'remote';
+        article.classList.remove('article-kind-item');
+        article.innerHTML = page.remote_html;
+        bindExplorerArticleLinks(article);
+        const infobox = document.querySelector('#wiki-page-container aside');
+        if (infobox) infobox.classList.add('hidden');
+        document.getElementById('gallery-container').classList.add('hidden');
+      } else {
+        const infobox = document.querySelector('#wiki-page-container aside');
+        if (infobox) infobox.classList.remove('hidden');
+        await loadLevelDetail(page.title, page.url || "", token);
+      }
+      if (token !== explorerNavigationToken) return;
       const articleMissing = (document.getElementById('view-article-content').textContent || '').includes('本文データがありません');
       document.getElementById('explorer-unsaved-actions').classList.toggle('hidden', !articleMissing);
+      renderExplorerTabs();
     }
 
     function showLevelSearchSuggestions() {
@@ -2915,7 +3334,9 @@ HTML_TEMPLATE = r"""
         const transitions = edgeInfo[`${source.id}\n${target.id}`] || [];
         const details = transitions.length ? transitions.map(info => `<div class="rounded border border-[#e4d6b2] bg-[#fbf6de] p-3">
           <div class="text-xs font-bold text-[#78440f]">${[info.category, info.type].filter(Boolean).map(escapeHTML).join(' · ') || '移動条件'}</div>
-          <div class="mt-1 whitespace-pre-wrap break-words text-base font-semibold leading-relaxed">${escapeHTML(info.condition || '条件の記載なし')}</div></div>`).join('') : '<div class="text-sm text-gray-600">移動条件の記載はありません。</div>';
+          <div class="mt-1 flex flex-wrap gap-1 text-[11px]">確実性: ${escapeHTML(info.certainty || 'Unknown')} · 利用可否: ${escapeHTML(info.availability || 'Unknown')} · 証拠: ${escapeHTML(info.evidence_type || 'Unknown')} · 頻度: ${escapeHTML(info.probability || 'Unknown')} · 審査: ${escapeHTML(info.review_status || '—')}</div>
+          <div class="mt-1 whitespace-pre-wrap break-words text-base font-semibold leading-relaxed">${escapeHTML(info.condition || '条件の記載なし')}</div>
+          ${(info.evidence || []).map(ev => `<div class="mt-2 rounded border border-[#e4d6b2] bg-white p-2 text-xs"><div class="font-semibold">記事証拠: ${escapeHTML(ev.article_id || '不明')} · ${escapeHTML(ev.relation_type || '区分不明')}</div><div class="mt-1 whitespace-pre-wrap">${escapeHTML(ev.condition || '')}</div><div class="mt-1 text-gray-500">抽出: ${escapeHTML(ev.extract_method || '不明')} · 信頼度: ${escapeHTML(ev.confidence || '未設定')}</div></div>`).join('')}</div>`).join('') : '<div class="text-sm text-gray-600">移動条件の記載はありません。</div>';
         timeline += `<div class="ml-6 border-l-2 border-[#c68a2b] py-3 pl-5"><div class="mb-2 text-xs font-bold text-[#91520f]">↓ ${escapeHTML(source.id)} から ${escapeHTML(target.id)} へ</div><div class="space-y-2">${details}</div></div>${levelBlock(target)}`;
       }
       const content = document.getElementById('route-detail-content');
@@ -2958,7 +3379,13 @@ HTML_TEMPLATE = r"""
       if (!start || !goal) { status.textContent = '出発地と目的地を入力してください。'; return; }
       status.textContent = '経路を検索しています…';
       try {
-        const result = await pywebview.api.search_routes(start, goal);
+        const result = await pywebview.api.search_routes(start, goal, {
+          include_uncertain: document.getElementById('route-include-uncertain').checked,
+          include_unknown: document.getElementById('route-include-unknown').checked,
+          include_rumor: document.getElementById('route-include-rumor').checked,
+          include_closed: document.getElementById('route-include-closed').checked,
+          include_needs_review: document.getElementById('route-include-review').checked
+        });
         if (result.error) {
           const groups = [['出発地の候補', result.start_candidates], ['目的地の候補', result.goal_candidates]];
           const candidates = groups.filter(([, values]) => values && values.length).map(([label, values]) => `<div class="mt-2"><b>${label}</b><div class="flex flex-wrap gap-2 mt-1">${values.map(n => `<button type="button" data-route-field="${label.startsWith('出発') ? 'route-start' : 'route-goal'}" data-route-id="${escapeHTML(n.id)}" class="px-2 py-1 border rounded text-xs hover:bg-amber-50">${escapeHTML(n.id)}${n.title ? ` — ${escapeHTML(n.title)}` : ''}</button>`).join('')}</div></div>`).join('');
@@ -2980,41 +3407,80 @@ HTML_TEMPLATE = r"""
       } catch (error) { status.textContent = `検索に失敗しました: ${error}`; }
     }
 
+    function explorerWikiTargetHref(target) {
+      const value = String(target || '').trim();
+      if (/^https?:\/\//i.test(value)) return value;
+      if (value.startsWith('/ja/wiki/')) return 'https://backrooms.fandom.com' + value;
+      const title = value.replace(/_/g, ' ').trim();
+      const slug = title.split('/').map(part => encodeURIComponent(part.replace(/ /g, '_'))).join('/');
+      return 'https://backrooms.fandom.com/ja/wiki/' + slug;
+    }
+
+    function bindExplorerArticleLinks(root) {
+      if (!root) return;
+      root.querySelectorAll('a[href]').forEach(link => {
+        if (!link.dataset.wikiTarget) {
+          try {
+            const parsed = new URL(link.href, window.location.href);
+            if (parsed.hostname === 'backrooms.fandom.com' && parsed.pathname.startsWith('/ja/wiki/')) {
+              link.dataset.wikiTarget = parsed.href;
+            }
+          } catch (_) {}
+        }
+        if (!link.dataset.wikiTarget) return;
+        link.addEventListener('click', event => {
+          if (event.button !== 0) return;
+          event.preventDefault();
+          openExplorerWikiTarget(link.dataset.wikiTarget, event.ctrlKey || event.metaKey || event.shiftKey);
+        });
+        link.addEventListener('auxclick', event => {
+          if (event.button !== 1) return;
+          event.preventDefault();
+          openExplorerWikiTarget(link.dataset.wikiTarget, true);
+        });
+      });
+    }
+
     function formatWikiContent(text) {
       if (!text) return "";
-
       const lines = text.split('\n');
       let html = '';
       let paragraph = [];
-
-      function flushParagraph() {
-        if (paragraph.length > 0) {
-          html += `<p class="my-2.5 text-gray-800 leading-relaxed">${paragraph.map(escapeHTML).join('<br>')}</p>`;
-          paragraph = [];
-        }
+      function makeWikiAnchor(target, label) {
+        const value = String(target || '').trim();
+        return '<a href="' + escapeHTML(explorerWikiTargetHref(value)) +
+          '" data-wiki-target="' + escapeHTML(value) +
+          '" class="text-[#a3420b] underline hover:text-[#78350f]">' +
+          escapeHTML(label || value) + '</a>';
       }
-
-      for (let line of lines) {
-        let trimmed = line.trim();
-        if (!trimmed) {
+      function flushParagraph() {
+        if (!paragraph.length) return;
+        const linked = paragraph.map(line => {
+          let safe = escapeHTML(line);
+          safe = safe.replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_, target, label) =>
+            makeWikiAnchor(target, (label || target).trim()));
+          safe = safe.replace(/\[([^\]]+)\]\((https?:\/\/backrooms\.fandom\.com\/ja\/wiki\/[^\s)]+)\)/g,
+            (_, label, url) => makeWikiAnchor(url, label));
+          safe = safe.replace(/(<a\b[^>]*>[\s\S]*?<\/a>)|([^<]+)/g, (chunk, anchor, plain) => {
+            if (anchor) return anchor;
+            return (plain || '').replace(/(?<![\w])Level\s+(-?\d+(?:\.\d+)?)(?:\s*(\u03b7))?/gi, (label, number, eta) => {
+              const target = 'Level ' + number + (eta ? ' η' : '');
+              return makeWikiAnchor(target, label);
+            });
+          });
+          return safe;
+        }).join('<br>');
+        html += '<p class="my-2.5 text-gray-800 leading-relaxed">' + linked + '</p>';
+        paragraph = [];
+      }
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) { flushParagraph(); continue; }
+        const heading = trimmed.match(/^\[([^\]]+)\]$/);
+        if (heading) {
           flushParagraph();
-          continue;
-        }
-
-        // [概要] や [出入口] などの見出しタグを検出して公式Wiki風見出しに変換
-        const headingMatch = trimmed.match(/^\[([^\]]+)\]$/);
-        if (headingMatch) {
-          flushParagraph();
-          const title = headingMatch[1];
-          html += `
-            <div class="wiki-heading">
-              <span>${escapeHTML(title)}</span>
-              <span class="text-xs text-gray-400 font-normal">✎</span>
-            </div>
-          `;
-        } else {
-          paragraph.push(trimmed);
-        }
+          html += '<div class="wiki-heading"><span>' + escapeHTML(heading[1]) + '</span></div>';
+        } else paragraph.push(trimmed);
       }
       flushParagraph();
       return html;
@@ -3045,8 +3511,46 @@ HTML_TEMPLATE = r"""
       window.print();
     }
 
-    async function loadLevelDetail(levelId) {
-      const d = await pywebview.api.get_level_detail(levelId);
+    async function openExplorerWikiTarget(target, openInNewTab = false) {
+      const value = String(target || '').trim();
+      if (!value) return;
+      const targetUrl = explorerWikiTargetHref(value);
+      const parsedTarget = new URL(targetUrl);
+      const fragment = parsedTarget.hash;
+      let title = decodeURIComponent(parsedTarget.pathname.split('/ja/wiki/').pop() || '').replace(/_/g, ' ');
+      const lookupUrl = parsedTarget.origin + parsedTarget.pathname;
+      const normalizeArticleUrl = url => String(url || '').replace(/\/$/, '').toLocaleLowerCase();
+      const existing = [...explorerIndexPages, ...levelSearchResults, ...localSavedLevels]
+        .find(page => page.url && normalizeArticleUrl(page.url) === normalizeArticleUrl(lookupUrl));
+      let candidate = existing;
+      // Article links in the local encyclopedia are strictly local.
+      // Resolve only by canonical URL or exact title; never use a partial
+      // search result and never fetch an unsaved page implicitly.
+      if (!candidate || !candidate.saved) {
+        const result = await pywebview.api.search_candidates('');
+        const pages = result || [];
+        candidate = pages.find(page =>
+          page.url && normalizeArticleUrl(page.url) === normalizeArticleUrl(lookupUrl)
+        ) || null;
+      }
+      const resolvedPage = candidate || {title, url: lookupUrl, saved: false};
+      if (openInNewTab) createExplorerTab(resolvedPage);
+      else await openExplorerCandidate(resolvedPage);
+      if (fragment) {
+        const anchorId = decodeURIComponent(fragment.slice(1));
+        const anchor = document.getElementById(anchorId) ||
+          document.querySelector('[name="' + CSS.escape(anchorId) + '"]');
+        if (anchor) anchor.scrollIntoView({block: 'start'});
+      }
+    }
+
+    async function loadLevelDetail(levelId, pageUrl = "", navigationToken = explorerNavigationToken) {
+      const requestedPage = currentExplorerPage;
+      const d = await pywebview.api.get_level_detail(levelId, pageUrl);
+      // A slower response from the previous article must never overwrite the
+      // currently selected tab/page's article, infobox, images or attribution.
+      if (navigationToken !== explorerNavigationToken || currentExplorerPage !== requestedPage) return;
+      if (currentExplorerPage) currentExplorerPage.html_path = d.html_path || '';
       explorerImages = d.images || [];
 
       document.getElementById('view-level-id').innerText = d.level_id;
@@ -3066,19 +3570,58 @@ HTML_TEMPLATE = r"""
       } catch (_) {
         // 元記事URLがない場合は出典リンクを表示しない。
       }
-      document.getElementById('view-category').innerText = d.category;
-      document.getElementById('view-danger-tag').innerText = d.danger;
-      document.getElementById('view-danger-tag').className = dangerBadgeClass(d.danger);
+      const categoryNames = {
+        normal: '階層', normal_eta: '番外階層', sublevel: 'サブ階層',
+        sublevel_eta: '番外サブ階層', anomalous: '異常階層',
+        anomalous_eta: '番外異常階層', item: 'アイテム', entity: 'エンティティ',
+        phenomenon: '現象', person: '人物', dimension: '次元',
+        foreign: '外国語記事', canon: 'カノン', joke_level: 'ジョーク階層',
+        joke_article: 'ジョーク記事', foreign_joke: '外国語ジョーク'
+      };
+      const isItemArticle = d.category === 'item';
+      const isTranslation = d.source_type === 'translation';
+      const articleContent = document.getElementById('view-article-content');
+      articleContent.dataset.articleKind = isItemArticle ? 'item' : (isTranslation ? 'translation' : 'level');
+      articleContent.classList.toggle('article-kind-item', isItemArticle);
+      document.getElementById('view-category').innerText = categoryNames[d.category] || d.category || '未分類';
+      document.getElementById('infobox-danger-row').classList.toggle('hidden', isItemArticle);
+      document.getElementById('infobox-comprehension-row').classList.toggle('hidden', isItemArticle);
+      const translationBanner = document.getElementById('translation-article-banner');
+      translationBanner.classList.toggle('hidden', !isTranslation);
+      translationBanner.textContent = isTranslation
+        ? '翻訳記事 · 原文言語: ' + (d.language || '不明') + (d.translation_section ? ' · 翻訳元分類: ' + d.translation_section : '') + (d.section_number ? ' · 一覧番号: ' + d.section_number : '')
+        : '';
+      const specialFields = document.getElementById('infobox-special-fields');
+      const rows = [];
+      if (isItemArticle) rows.push(['記事種別', 'アイテム']);
+      if (isTranslation) {
+        rows.push(['記事種別', '翻訳記事']);
+        if (d.translation_section) rows.push(['翻訳元分類', d.translation_section]);
+        if (d.section_number) rows.push(['一覧番号', d.section_number]);
+        if (d.language) rows.push(['原文言語', d.language]);
+      }
+      specialFields.innerHTML = rows.map(([label, value]) =>
+        '<div class="grid grid-cols-[38%_1fr] border-b border-[#e5dcbe] text-xs last:border-b-0"><div class="bg-[#f0e7cf] px-2.5 py-1.5 font-semibold">' + escapeHTML(label) + '</div><div class="px-2.5 py-1.5">' + escapeHTML(value) + '</div></div>'
+      ).join('');
+      specialFields.classList.toggle('hidden', rows.length === 0);
+      document.getElementById('view-danger-tag').innerText = isItemArticle ? 'アイテム' : d.danger;
+      document.getElementById('view-danger-tag').className = isItemArticle
+        ? 'rounded-full bg-[#f3ead2] px-2 py-0.5 text-xs font-semibold text-[#72552d]'
+        : dangerBadgeClass(d.danger);
 
       // 本文の整形描画
-      document.getElementById('view-article-content').innerHTML = formatWikiContent(d.text);
+      const attribution = document.getElementById('article-attribution');
+      attribution.textContent = d.attribution || '';
+      attribution.classList.toggle('hidden', !d.attribution);
+      articleContent.innerHTML = formatWikiContent(d.text);
+      bindExplorerArticleLinks(articleContent);
 
       // Infobox
-      document.getElementById('infobox-title').innerText = d.level_id;
+      document.getElementById('infobox-title').innerText = isItemArticle ? 'アイテム · ' + d.level_id : d.level_id;
       document.getElementById('infobox-danger').innerText = d.danger;
       document.getElementById('infobox-danger').className = dangerBadgeClass(d.danger);
       document.getElementById('infobox-comprehension').innerText = d.comprehension;
-      document.getElementById('infobox-category').innerText = d.category;
+      document.getElementById('infobox-category').innerText = categoryNames[d.category] || d.category || '未分類';
       document.getElementById('infobox-lang').innerText = d.language;
 
       // メイン画像
@@ -3088,6 +3631,8 @@ HTML_TEMPLATE = r"""
 
       if (d.images && d.images.length > 0) {
         mainImg.src = d.images[0].src;
+        mainImg.classList.toggle('object-contain', isItemArticle);
+        mainImg.classList.toggle('object-cover', !isItemArticle);
         mainImg.classList.remove('hidden');
         mainImg.classList.add('cursor-zoom-in');
         mainImg.onclick = () => openImageLightbox(explorerImages, 0, d.level_id);
@@ -3137,6 +3682,10 @@ HTML_TEMPLATE = r"""
         if (result.error) throw new Error(result.error);
         const select = document.getElementById('level-list-language');
         select.replaceChildren();
+        const allOption = document.createElement('option');
+        allOption.value = "ALL";
+        allOption.textContent = "ALL";
+        select.appendChild(allOption);
         (result.languages || []).forEach(language => {
           const option = document.createElement('option');
           option.value = language;
@@ -3148,7 +3697,7 @@ HTML_TEMPLATE = r"""
           return;
         }
         levelListLanguagesLoaded = true;
-        select.value = result.languages.includes("JP") ? "JP" : result.languages[0];
+        select.value = "ALL";
         await loadLevelListPages();
       } catch (error) {
         status.textContent = "レベルリストを読み込めません: " + error;
@@ -3163,13 +3712,17 @@ HTML_TEMPLATE = r"""
       levelListAnchorUrl = null;
       currentLevelListCategory = null;
       updateLevelListSelectionControls();
-      status.textContent = `${language}.txtを読み込み中...`;
+      status.textContent = language === "ALL"
+        ? "全言語のレベルリストを読み込み中..."
+        : `${language}.txtを読み込み中...`;
       try {
         const result = await pywebview.api.get_level_list_pages(language);
         if (result.error) throw new Error(result.error);
         levelListPages = result.pages || [];
         filterLevelListTiles();
-        status.textContent = `${language}.txtから${levelListPages.length}件を読み込みました。`;
+        status.textContent = language === "ALL"
+          ? `全言語から${levelListPages.length}件を読み込みました。`
+          : `${language}.txtから${levelListPages.length}件を読み込みました。`;
       } catch (error) {
         levelListPages = [];
         filterLevelListTiles();
@@ -3245,11 +3798,10 @@ HTML_TEMPLATE = r"""
         const title = String(page.title || "");
         if (categoryId === "all") return true;
         if (categoryId === "normal") {
-          return category.startsWith("normal") && category !== "normal_eta" &&
-            source !== "translation" && /^Level\s+-?\d+$/i.test(title);
+          return category === "normal" && source !== "translation";
         }
         if (categoryId === "normal_eta") {
-          return category === "normal_eta" && source !== "translation" && /^Level\s+-?\d+\s*η$/i.test(title);
+          return category === "normal_eta" && source !== "translation";
         }
         if (categoryId === "anomalous") {
           return source !== "translation" && category.startsWith("anomalous");
@@ -3872,6 +4424,22 @@ HTML_TEMPLATE = r"""
       }
     }
 
+    function navigateOnlineWikiHistory(direction) {
+      const frame = document.getElementById('online-wiki-frame');
+      try {
+        if (direction < 0) frame.contentWindow.history.back();
+        else frame.contentWindow.history.forward();
+      } catch (error) {
+        document.getElementById('html-download-status').textContent = String(error);
+      }
+    }
+
+    function reloadOnlineWikiFrame() {
+      const frame = document.getElementById('online-wiki-frame');
+      try { frame.contentWindow.location.reload(); }
+      catch (_) { if (onlineWikiCurrentUrl) frame.src = onlineWikiCurrentUrl; }
+    }
+
     async function resetOnlineWikiHome() {
       document.getElementById('online-wiki-url').value = onlineWikiHomeUrl;
       await openDirectWikiUrl();
@@ -3887,6 +4455,8 @@ HTML_TEMPLATE = r"""
         onlineWikiCurrentUrl || "Fandomページはまだ開かれていません。";
       document.getElementById('online-wiki-current-url').title = onlineWikiCurrentUrl;
       document.getElementById('online-wiki-save-current').disabled =
+        !result.is_wiki_page || onlineWikiBrowserBusy;
+      document.getElementById('online-wiki-redownload-current').disabled =
         !result.is_wiki_page || onlineWikiBrowserBusy;
     }
 
@@ -3907,6 +4477,36 @@ HTML_TEMPLATE = r"""
       } catch (error) {
         document.getElementById('online-wiki-current-url').textContent =
           "ブラウザーの状態を取得できません: " + error;
+      }
+    }
+
+    async function refreshCurrentSavedHtml() {
+      const path = currentExplorerPage && currentExplorerPage.html_path;
+      if (!path) {
+        alert('保存済みHTMLが見つかりません。先にHTMLを保存してください。');
+        return;
+      }
+      try {
+        const result = await pywebview.api.run_maintenance_task(
+          'refresh_saved_wiki_page', null, {html_path: path}
+        );
+        if (result.status !== 'started') throw new Error(result.message || '開始できません');
+        document.getElementById('online-wiki-save-status').textContent = '保存済みHTMLを再抽出中です。';
+      } catch (error) { alert('HTML再確認エラー: ' + error); }
+    }
+
+    async function redownloadCurrentOnlineWikiPage() {
+      if (!onlineWikiCurrentIsWiki || onlineWikiBrowserBusy) return;
+      if (!confirm('現在のページを上書き再ダウンロードし、本文・画像・抽出データを更新しますか？')) return;
+      onlineWikiBrowserBusy = true;
+      try {
+        const page = {title: onlineWikiCurrentUrl.split('/').pop().replace(/_/g, ' '), url: onlineWikiCurrentUrl};
+        const result = await pywebview.api.start_level_list_offline_save([page], true);
+        if (result.status !== 'started') throw new Error(result.message || '開始できません');
+        document.getElementById('online-wiki-save-status').textContent = '上書き再取得を開始しました。';
+      } catch (error) {
+        onlineWikiBrowserBusy = false;
+        document.getElementById('online-wiki-save-status').textContent = '再取得エラー: ' + error;
       }
     }
 
@@ -4056,9 +4656,21 @@ HTML_TEMPLATE = r"""
       document.getElementById('level-list-progress').classList.add('hidden');
       setMaintenanceBusy(false);
       setLevelListTaskBusy(false);
+      onlineWikiBrowserBusy = false;
+      updateOnlineWikiCurrentUrl();
+      if (result.ok && currentExplorerPage) {
+        displayExplorerPage(currentExplorerPage);
+      }
       pywebview.api.get_environment_settings().then(renderEnvironmentSettings).catch(() => {});
       onSearchInput();
+      renderExplorerTabs();
       loadExplorerIndexPages();
+      if (result.details && result.details.renamed !== undefined) {
+        document.getElementById('legacy-image-rename-status').textContent =
+          `画像名の移行完了: ${result.details.renamed} 件 / 判定保留 ${result.details.skipped} 件 / 失敗 ${result.details.failed} 件`;
+        localImages = [];
+        loadLocalImageGallery();
+      }
     }
 
     // --- BrNavi AI Assistant ---

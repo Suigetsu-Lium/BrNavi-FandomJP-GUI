@@ -142,6 +142,110 @@ class OnlineWikiGuiTests(unittest.TestCase):
         self.assertEqual([item["title"] for item in subtitle_match], ["Level 1 η"])
         self.assertEqual([item["title"] for item in alias_match], ["Level 1 η"])
 
+    @patch("gui_app.load_master_database")
+    @patch("gui_app.TEXT_DIR")
+    @patch("gui_app.HTML_DIR")
+    def test_search_candidates_preserves_duplicate_titles_and_translation_pages(
+        self, html_dir, text_dir, load_master
+    ):
+        from pathlib import Path
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            html_dir.exists.return_value = False
+            text_dir.exists.return_value = False
+            load_master.return_value = {
+                "url-a": {"title": "Level !", "url": "https://backrooms.fandom.com/ja/wiki/Level_%21_(1)", "category": "anomalous", "language": "JP", "source_type": "original"},
+                "url-b": {"title": "Level !", "url": "https://backrooms.fandom.com/ja/wiki/Level_%21_(2)", "category": "anomalous", "language": "JP", "source_type": "original"},
+                "url-c": {"title": "\u7ffb\u8a33/Level 37", "url": "https://backrooms.fandom.com/ja/wiki/%E7%BF%BB%E8%A8%B3/Level_37", "category": "normal", "language": "EN", "source_type": "translation"},
+            }
+            self.api._candidate_catalog = None
+            all_pages = self.api.search_candidates("")
+            translated = self.api.search_candidates("Level 37")
+
+        self.assertEqual(len(all_pages), 3)
+        self.assertEqual(len([page for page in all_pages if page["title"] == "Level !"]), 2)
+        self.assertEqual([page["title"] for page in translated], ["\u7ffb\u8a33/Level 37"])
+
+    @patch("gui_app.load_master_database")
+    def test_article_detail_resolves_duplicate_titles_by_canonical_url(self, load_master):
+        import tempfile
+        from pathlib import Path
+
+        url_a = "https://backrooms.fandom.com/ja/wiki/Level_%21_(1)"
+        url_b = "https://backrooms.fandom.com/ja/wiki/Level_%21_(2)"
+        load_master.return_value = {
+            url_a: {"title": "Level !", "url": url_a, "category": "anomalous", "language": "JP"},
+            url_b: {"title": "Level !", "url": url_b, "category": "anomalous_eta", "language": "UA"},
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            html_dir = root / "html"
+            text_dir = root / "text"
+            image_dir = root / "images"
+            html_dir.mkdir(); text_dir.mkdir(); image_dir.mkdir()
+            (html_dir / "Level_! .html").write_text(
+                f"<!-- BRNAVI_META_INFO: TITLE=Level ! | URL={url_a} -->", encoding="utf-8"
+            )
+            target_html = html_dir / "Level_!_1.html"
+            target_html.write_text(
+                f"<!-- BRNAVI_META_INFO: TITLE=Level ! | URL={url_b} -->", encoding="utf-8"
+            )
+            (text_dir / "Level_!_1.txt").write_text("Article for second URL", encoding="utf-8")
+            with (
+                patch("gui_app.HTML_DIR", html_dir),
+                patch("gui_app.TEXT_DIR", text_dir),
+                patch("gui_app.IMAGE_DIR", image_dir),
+            ):
+                result = self.api.get_level_detail("Level !", url_b)
+
+        self.assertEqual(result["url"], url_b)
+        self.assertEqual(result["category"], "anomalous_eta")
+        self.assertEqual(result["language"], "UA")
+        self.assertEqual(self.api.current_info["html_file"], target_html)
+
+    @patch("gui_app.load_master_database")
+    def test_article_detail_returns_translation_and_item_layout_metadata(self, load_master):
+        import tempfile
+        from pathlib import Path
+
+        url = "https://backrooms.fandom.com/ja/wiki/翻訳/Almond_Water"
+        load_master.return_value = {
+            url: {
+                "title": "翻訳/Almond Water",
+                "url": url,
+                "category": "item",
+                "language": "EN",
+                "source_type": "translation",
+                "translation_section": "物品",
+                "section_number": "0030",
+            }
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            html_dir = root / "html"
+            text_dir = root / "text"
+            image_dir = root / "images"
+            html_dir.mkdir()
+            text_dir.mkdir()
+            image_dir.mkdir()
+            with (
+                patch("gui_app.HTML_DIR", html_dir),
+                patch("gui_app.TEXT_DIR", text_dir),
+                patch("gui_app.IMAGE_DIR", image_dir),
+            ):
+                self.api._find_images_flexible = lambda _level_id: []
+                result = self.api.get_level_detail("翻訳/Almond Water", url)
+
+        self.assertEqual(result["category"], "item")
+        self.assertEqual(result["source_type"], "translation")
+        self.assertEqual(result["translation_section"], "物品")
+        self.assertEqual(result["section_number"], "0030")
+        self.assertEqual(result["language"], "EN")
+        self.assertIn('id="translation-article-banner"', gui_app.HTML_TEMPLATE)
+        self.assertIn("article-kind-item", gui_app.HTML_TEMPLATE)
+
     def test_embedded_frame_ignores_html_subresource_urls(self):
         self.api._current_online_wiki_url = "https://backrooms.fandom.com/ja/wiki/Level_334_%CE%B7"
         response = unittest.mock.Mock()
@@ -185,6 +289,7 @@ class OnlineWikiGuiTests(unittest.TestCase):
         self.assertIn('title: "通常階層 η の一覧"', gui_app.HTML_TEMPLATE)
         self.assertIn('function getLevelListSections(pages, categoryId = currentLevelListCategory)', gui_app.HTML_TEMPLATE)
         self.assertIn('category === "normal_eta" && source !== "translation"', gui_app.HTML_TEMPLATE)
+        self.assertIn('return category === "normal" && source !== "translation";', gui_app.HTML_TEMPLATE)
         self.assertIn('async function openFandomLevelList(wikiTitle)', gui_app.HTML_TEMPLATE)
         self.assertIn('function showLevelListCategories()', gui_app.HTML_TEMPLATE)
         self.assertIn('async function openLevelListPage(page)', gui_app.HTML_TEMPLATE)

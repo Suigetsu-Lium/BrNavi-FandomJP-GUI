@@ -1,5 +1,6 @@
 """Non-interactive application operations shared by the GUI and CLI."""
 
+import csv
 import re
 from pathlib import Path
 from urllib.parse import urlparse
@@ -8,7 +9,7 @@ from dataclasses import dataclass
 
 from modules.downloader import download_page, find_existing_html
 from modules.extractor import extract_levels
-from modules.image_downloader import download_images
+from modules.image_downloader import download_images, rename_legacy_images
 from modules.network import process_backrooms_data
 from modules.operation_context import OperationContext
 from modules.runtime_paths import get_application_dir
@@ -16,6 +17,7 @@ from modules.update_database import execute_update
 
 
 LEVEL_LIST_DIR = get_application_dir() / "level_lists"
+MASTER_CATALOG_FILE = get_application_dir() / "parsed_index" / "pages_master.csv"
 LEVEL_LIST_CATEGORY = re.compile(r"^\[(.*?)\]\s+\((.*?)\)\s*$")
 LEVEL_LIST_TITLE = re.compile(r"^\[\d+\]\s+(.+?)\s*$")
 FANDOM_WIKI_HOST = "backrooms.fandom.com"
@@ -28,27 +30,69 @@ class OperationResult:
     details: object = None
 
 
+def _load_master_catalog():
+    """Read the canonical catalog generated from the downloaded index HTML."""
+    master_path = MASTER_CATALOG_FILE
+    if not master_path.is_file():
+        return []
+    try:
+        with master_path.open("r", encoding="utf-8-sig", newline="") as stream:
+            return [dict(row) for row in csv.DictReader(stream) if row.get("url")]
+    except (OSError, csv.Error, UnicodeError):
+        return []
+
+
 def get_level_list_languages():
+    rows = _load_master_catalog()
+    languages = {
+        str(row.get("language") or "").strip()
+        for row in rows
+        if str(row.get("language") or "").strip()
+        and str(row.get("language") or "").strip().casefold() != "unknown"
+    }
+    if languages:
+        return sorted(languages, key=str.casefold)
     if not LEVEL_LIST_DIR.is_dir():
         return []
     return sorted(
-        (
-            path.stem
-            for path in LEVEL_LIST_DIR.glob("*.txt")
-            if not path.stem.startswith("_")
-        ),
+        (path.stem for path in LEVEL_LIST_DIR.glob("*.txt") if not path.stem.startswith("_")),
         key=str.casefold,
     )
 
 
 def load_level_list_pages(language):
     language = str(language or "").strip()
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", language):
-        raise ValueError("言語コードが不正です。")
+    all_languages = language.casefold() == "all"
+    if not all_languages and not re.fullmatch(r"[A-Za-z0-9_-]+", language):
+        raise ValueError("\u8a00\u8a9e\u30b3\u30fc\u30c9\u304c\u4e0d\u6b63\u3067\u3059\u3002")
+    rows = _load_master_catalog()
+    if rows:
+        pages = []
+        for row in rows:
+            row_language = str(row.get("language") or "").strip()
+            if not all_languages and row_language.casefold() != language.casefold():
+                continue
+            page = {
+                "title": str(row.get("title") or "").strip(),
+                "url": str(row.get("url") or "").strip(),
+                "category": str(row.get("category") or "").strip(),
+                "category_label": str(row.get("category") or "").strip(),
+                "language": row_language,
+                "source_type": str(row.get("source_type") or "").strip(),
+                "indexes": str(row.get("indexes") or "").strip(),
+                "translation_section": str(row.get("translation_section") or "").strip(),
+            }
+            if page["title"] and is_supported_level_list_url(page["url"]):
+                pages.append(page)
+        return pages
+
+    # Compatibility fallback for installations predating pages_master.csv.
+    if all_languages:
+        languages = get_level_list_languages()
+        return [page for code in languages for page in load_level_list_pages(code)]
     list_path = LEVEL_LIST_DIR / f"{language}.txt"
     if not list_path.is_file():
-        raise FileNotFoundError(f"レベルリストがありません: {list_path.name}")
-
+        raise FileNotFoundError(f"\u30ec\u30d9\u30eb\u30ea\u30b9\u30c8\u304c\u3042\u308a\u307e\u305b\u3093: {list_path.name}")
     pages = []
     category_label = ""
     category_code = ""
@@ -59,23 +103,17 @@ def load_level_list_pages(language):
             if category_match:
                 category_label, category_code = category_match.groups()
                 continue
-
             title_match = LEVEL_LIST_TITLE.match(line.strip())
             if title_match:
                 if current_page and current_page.get("url"):
                     pages.append(current_page)
                 current_page = {
-                    "title": title_match.group(1).strip(),
-                    "url": "",
+                    "title": title_match.group(1).strip(), "url": "",
                     "category": category_code or category_label,
-                    "category_label": category_label,
-                    "language": language,
-                    "source_type": "",
-                    "indexes": "",
-                    "translation_section": "",
+                    "category_label": category_label, "language": language,
+                    "source_type": "", "indexes": "", "translation_section": "",
                 }
                 continue
-
             if current_page is None:
                 continue
             stripped = line.strip()
@@ -86,17 +124,10 @@ def load_level_list_pages(language):
             elif stripped.startswith("INDEX:"):
                 current_page["indexes"] = stripped[6:].strip()
             elif stripped.startswith("TRANSLATION_SECTION:"):
-                current_page["translation_section"] = stripped[
-                    len("TRANSLATION_SECTION:"):
-                ].strip()
-
+                current_page["translation_section"] = stripped[len("TRANSLATION_SECTION:"):].strip()
     if current_page and current_page.get("url"):
         pages.append(current_page)
-
-    return [
-        page for page in pages
-        if is_supported_level_list_url(page["url"])
-    ]
+    return [page for page in pages if is_supported_level_list_url(page["url"])]
 
 
 def is_supported_level_list_url(url):
@@ -133,6 +164,18 @@ def run_maintenance_operation(task_name, options=None, context=None):
             message="情報データベースを更新しました。"
             if success else "情報データベースを更新できませんでした。",
             details={"extracted": len(rows)} if success else None,
+        )
+
+    if task_name == "rename_legacy_images":
+        context.log("保存済みHTMLと照合し、旧命名方式の画像を安全にリネームします。")
+        result = rename_legacy_images(context=context)
+        return OperationResult(
+            success=result["failed"] == 0,
+            message=(
+                f"画像名の移行完了: {result['renamed']}件、"
+                f"判定保留 {result['skipped']}件、失敗 {result['failed']}件"
+            ),
+            details=result,
         )
 
     if task_name == "update_network":

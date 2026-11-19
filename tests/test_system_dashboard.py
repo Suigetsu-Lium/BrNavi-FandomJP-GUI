@@ -68,7 +68,7 @@ class SystemDashboardTests(unittest.TestCase):
             {"title": "The Hub", "saved": True},
         ]
         result = local_saved_level_list(candidates)
-        self.assertEqual([item["title"] for item in result], ["Level 2", "Level 10 η"])
+        self.assertEqual([item["title"] for item in result], ["Level 2", "Level 10 \u03b7", "The Hub"])
 
     def test_local_image_filter_matches_level_or_filename_case_insensitively(self):
         images = [

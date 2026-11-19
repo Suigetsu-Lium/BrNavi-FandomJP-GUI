@@ -633,6 +633,32 @@ def make_filename(
 # 既存HTML検索
 # =============================================================================
 
+def _normalized_page_url(value):
+    """Compare page URLs without fragments or trailing-slash differences."""
+    value = clean_value(value)
+    if not value:
+        return ""
+    parsed = urlparse(value)
+    scheme = (parsed.scheme or "https").lower()
+    host = (parsed.netloc or "").lower()
+    path = unquote(parsed.path or "/").rstrip("/") or "/"
+    return f"{scheme}://{host}{path}"
+
+
+def _html_canonical_url(html_text):
+    """Return the canonical page URL embedded in downloaded HTML."""
+    soup = BeautifulSoup(html_text or "", "html.parser")
+    canonical = soup.find("link", rel=lambda value: value and "canonical" in (
+        value if isinstance(value, list) else str(value).split()
+    ))
+    if canonical and canonical.get("href"):
+        return clean_value(canonical.get("href"))
+    og_url = soup.find("meta", property="og:url")
+    if og_url and og_url.get("content"):
+        return clean_value(og_url.get("content"))
+    return ""
+
+
 def find_existing_html(page):
     """
     Master DBページに対応する既存HTMLを探す。
@@ -683,62 +709,39 @@ def find_existing_html(page):
                         4096
                     )
 
+                if f"URL={url}" not in header:
+                    continue
+                html_text = path.read_text(encoding="utf-8", errors="ignore")
+                canonical_url = _html_canonical_url(html_text)
                 if (
-                    f"URL={url}"
-                    in header
+                    canonical_url
+                    and _normalized_page_url(canonical_url)
+                    == _normalized_page_url(url)
                 ):
-
                     return path
 
             except OSError:
 
                 continue
 
-    # -------------------------------------------------------------------------
-    # 2. タイトル
-    # -------------------------------------------------------------------------
+    # URLを持つMaster DBレコードはURL完全一致だけで照合する。
+    # タイトル一致へのフォールバックは禁止（翻訳記事・同名記事の誤結合を防ぐ）。
+    if url:
+        return None
 
+    # URLを持たない旧形式の直接記事だけ、従来のタイトル検索を許可する。
     if not title:
-
         return None
 
-    safe_title = sanitize_filename(
-        title.replace(
-            "/",
-            "_"
-        )
-    )
-
+    safe_title = sanitize_filename(title.replace("/", "_"))
     candidates = []
-
-    for path in OUTPUT_DIR.glob(
-        "*.html"
-    ):
-
+    for path in OUTPUT_DIR.glob("*.html"):
         stem = path.stem
-
-        if (
-            stem == safe_title
-            or stem.startswith(
-                safe_title + "_"
-            )
-        ):
-
-            candidates.append(
-                path
-            )
-
+        if stem == safe_title or stem.startswith(safe_title + "_"):
+            candidates.append(path)
     if not candidates:
-
         return None
-
-    candidates.sort(
-        key=lambda path: (
-            len(path.name),
-            path.name.casefold()
-        )
-    )
-
+    candidates.sort(key=lambda path: (len(path.name), path.name.casefold()))
     return candidates[0]
 
 
@@ -1028,9 +1031,21 @@ def download_url(
 
         if response.status_code == 200:
 
-            html_content = (
-                response.text
-            )
+            html_content = response.text
+            requested_url = _normalized_page_url(url)
+            response_url = _normalized_page_url(getattr(response, "url", "") or url)
+            canonical_url = _html_canonical_url(html_content)
+            actual_url = _normalized_page_url(canonical_url) if canonical_url else response_url
+
+            if response_url != requested_url or actual_url != requested_url:
+                log(
+                    "URLと取得ページのcanonical URLが一致しないため保存を中止しました。",
+                    "error",
+                )
+                log(f"要求URL: {url}", "error")
+                log(f"応答URL: {getattr(response, 'url', '')}", "error")
+                log(f"canonical URL: {canonical_url or '(なし)'}", "error")
+                return None
 
             modified_html = modify_html(
                 html_content,

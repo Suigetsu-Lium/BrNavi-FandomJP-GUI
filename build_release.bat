@@ -10,7 +10,7 @@ set "PYTHON=python"
 if exist "%ROOT%\.venv\Scripts\python.exe" set "PYTHON=%ROOT%\.venv\Scripts\python.exe"
 
 echo [1/4] Checking the build environment...
-"%PYTHON%" -c "import PyInstaller, webview, groq, curl_cffi, bleach, markdown, pygments, requests, bs4, tzdata"
+"%PYTHON%" -c "import PyInstaller, webview, groq, curl_cffi, bleach, markdown, pygments, requests, bs4, tzdata, cryptography"
 if errorlevel 1 goto missing_dependencies
 
 set "VERSION_FILE=%TEMP%\BrNavi_VERSION_%RANDOM%.txt"
@@ -36,12 +36,17 @@ echo [2/4] Building gui_app.py...
 if errorlevel 1 goto build_failed
 
 echo.
-echo [3/4] Preparing GUI data directories...
+echo [3/5] Building standalone Updater.exe...
+call "scripts\build_updater.bat"
+if errorlevel 1 goto updater_failed
+
+echo.
+echo [4/5] Preparing GUI data directories and route CSVs...
 call :stage_data "dist\BrNavi-GUI\BrNavi-GUI"
 if errorlevel 1 goto staging_failed
 
 echo.
-echo [4/4] Copying documentation and license files...
+echo [5/5] Copying documentation, updater and license files...
 set "TARGET=dist\BrNavi-GUI\BrNavi-GUI"
 
 copy /y "README.md" "%TARGET%\README.md" > nul
@@ -50,9 +55,13 @@ copy /y "LICENSE" "%TARGET%\LICENSE" > nul
 if errorlevel 1 goto staging_failed
 copy /y "THIRD_PARTY_NOTICES.md" "%TARGET%\THIRD_PARTY_NOTICES.md" > nul
 if errorlevel 1 goto staging_failed
+copy /y "dist\Updater\Updater.exe" "%TARGET%\Updater.exe" > nul
+if errorlevel 1 goto staging_failed
 if not exist "%TARGET%\docs" mkdir "%TARGET%\docs"
 if errorlevel 1 goto staging_failed
 copy /y "docs\architecture.md" "%TARGET%\docs\architecture.md" > nul
+if errorlevel 1 goto staging_failed
+copy /y "docs\route-data-v2-design.md" "%TARGET%\docs\route-data-v2-design.md" > nul
 if errorlevel 1 goto staging_failed
 
 echo.
@@ -76,6 +85,16 @@ for %%D in (parsed_index level_lists index_html downloaded_fandom_html extracted
 
 if not exist "%TARGET%\database\ai" mkdir "%TARGET%\database\ai"
 if errorlevel 1 exit /b 1
+
+for %%F in (backrooms_nodes_v2.csv backrooms_edges_v2.csv backrooms_evidence_v2.csv) do (
+    if not exist "%%F" (
+        echo Required route data file is missing: %%F
+        exit /b 1
+    )
+    copy /y "%%F" "%TARGET%\%%F" > nul
+    if errorlevel 1 exit /b 1
+)
+
 > "%TARGET%\VERSION.txt" echo v%APP_VERSION%
 if errorlevel 1 exit /b 1
 exit /b 0
@@ -98,6 +117,12 @@ exit /b 1
 :build_failed
 echo.
 echo PyInstaller build failed. Review the error messages above.
+popd
+exit /b 1
+
+:updater_failed
+echo.
+echo Standalone Updater build failed. Review the error messages above.
 popd
 exit /b 1
 

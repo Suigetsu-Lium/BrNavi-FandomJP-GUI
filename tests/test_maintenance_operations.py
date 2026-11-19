@@ -54,52 +54,45 @@ class MaintenanceOperationTests(unittest.TestCase):
             self.assertEqual(result.details, {"extraction_completed": True, "network_updated": True})
             self.assertEqual(calls, ["extract", "network"])
 
-    def test_level_list_pages_parse_metadata_and_exclude_unsupported_urls(self):
+    def test_level_list_pages_are_loaded_from_canonical_master_catalog(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            list_path = Path(temp_dir) / "JP.txt"
-            list_path.write_text(
-                "[通常階層] (normal)\n"
-                "[0001] Level 0\n"
-                "URL: https://backrooms.fandom.com/wiki/Level_0\n"
-                "SOURCE: official\n"
-                "INDEX: 0\n"
-                "TRANSLATION_SECTION: level_0\n"
-                "[0002] Unsafe page\n"
-                "URL: https://example.com/wiki/Unsafe\n"
-                "[0003] Insecure page\n"
-                "URL: http://backrooms.fandom.com/wiki/Insecure\n",
-                encoding="utf-8",
+            master = Path(temp_dir) / "pages_master.csv"
+            master.write_text(
+                "title,url,category,language,source_type,indexes,translation_section\n"
+                "Level 0,https://backrooms.fandom.com/wiki/Level_0,normal,JP,original,hierarchy,\n"
+                "\u7ffb\u8a33/Level 0,https://backrooms.fandom.com/ja/wiki/%E7%BF%BB%E8%A8%B3_Level_0,normal,EN,translation,translation,0-8\n"
+                "Unsafe,https://example.com/wiki/Unsafe,normal,JP,original,hierarchy,\n",
+                encoding="utf-8-sig",
             )
-
-            with patch("modules.operations.LEVEL_LIST_DIR", Path(temp_dir)):
+            with patch("modules.operations.MASTER_CATALOG_FILE", master):
                 pages = load_level_list_pages("JP")
+                translated = load_level_list_pages("EN")
+                all_pages = load_level_list_pages("ALL")
 
         self.assertEqual(len(pages), 1)
-        self.assertEqual(
-            pages[0],
-            {
-                "title": "Level 0",
-                "url": "https://backrooms.fandom.com/wiki/Level_0",
-                "category": "normal",
-                "category_label": "通常階層",
-                "language": "JP",
-                "source_type": "official",
-                "indexes": "0",
-                "translation_section": "level_0",
-            },
-        )
+        self.assertEqual(pages[0]["title"], "Level 0")
+        self.assertEqual(pages[0]["source_type"], "original")
+        self.assertEqual(len(translated), 1)
+        self.assertEqual(translated[0]["title"], "\u7ffb\u8a33/Level 0")
+        self.assertEqual(translated[0]["source_type"], "translation")
+        self.assertEqual(translated[0]["translation_section"], "0-8")
+        self.assertEqual(len(all_pages), 2)
+        self.assertEqual({page["language"] for page in all_pages}, {"JP", "EN"})
 
-    def test_level_list_language_discovery_ignores_summary_file(self):
+    def test_level_list_language_discovery_uses_master_catalog(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            (root / "JP.txt").touch()
-            (root / "en.txt").touch()
-            (root / "_summary.txt").touch()
-
-            with patch("modules.operations.LEVEL_LIST_DIR", root):
+            master = Path(temp_dir) / "pages_master.csv"
+            master.write_text(
+                "title,url,category,language\n"
+                "Level 0,https://backrooms.fandom.com/wiki/Level_0,normal,JP\n"
+                "\u7ffb\u8a33/Level 0,https://backrooms.fandom.com/wiki/%E7%BF%BB%E8%A8%B3_Level_0,normal,EN\n"
+                "Unknown,https://backrooms.fandom.com/wiki/Unknown,unknown,unknown\n",
+                encoding="utf-8-sig",
+            )
+            with patch("modules.operations.MASTER_CATALOG_FILE", master):
                 languages = get_level_list_languages()
 
-        self.assertEqual(languages, ["en", "JP"])
+        self.assertEqual(languages, ["EN", "JP"])
 
     def test_level_list_loader_rejects_invalid_language_path(self):
         with self.assertRaises(ValueError):

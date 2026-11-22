@@ -97,6 +97,10 @@ def load_level_list_pages(language):
             }
             page = {
                 "title": str(row.get("title") or "").strip(),
+                "meta_title": str(row.get("meta_title") or "").strip(),
+                "meta_title_ja": str(row.get("meta_title_ja") or "").strip(),
+                "has_strikethrough": str(row.get("has_strikethrough") or "").strip().lower() in {"1", "true", "yes"},
+                "strikethrough_spans": str(row.get("strikethrough_spans") or "[]"),
                 "url": str(row.get("url") or "").strip(),
                 "category": category,
                 "category_label": category_labels.get(category, category),
@@ -136,6 +140,8 @@ def load_level_list_pages(language):
                     pages.append(current_page)
                 current_page = {
                     "title": title_match.group(1).strip(), "url": "",
+                    "meta_title": "", "meta_title_ja": "",
+                    "has_strikethrough": False, "strikethrough_spans": "[]",
                     "category": category_code or category_label,
                     "category_label": category_label, "language": language,
                     "source_type": "", "indexes": "", "translation_section": "",

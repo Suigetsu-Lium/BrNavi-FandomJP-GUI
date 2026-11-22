@@ -167,6 +167,11 @@ def load_master_database():
                         )
                     ),
 
+                    "meta_title": clean_value(row.get("meta_title", "")),
+                    "meta_title_ja": clean_value(row.get("meta_title_ja", "")),
+                    "has_strikethrough": clean_value(row.get("has_strikethrough", "")).lower() in {"1", "true", "yes"},
+                    "strikethrough_spans": clean_value(row.get("strikethrough_spans", "[]")) or "[]",
+
                     "url": url,
 
                     "category": clean_value(

@@ -62,6 +62,7 @@ import sys
 from urllib.parse import (
     urljoin,
     urldefrag,
+    unquote,
     urlparse,
 )
 
@@ -194,13 +195,18 @@ EXCLUDED_EXACT_TITLES = {
     "The Backrooms",
     "階層",
 
+    # Wikiの専用一覧ページ。記事名の一般規則ではなく、
+    # 一覧ページとして定義されているタイトルだけを除外する。
+    "階層の一覧",
     "翻訳の一覧",
     "通常階層 η の一覧",
     "番外階層の一覧",
     "亜階層の一覧",
-
     "無印通常階層の一覧",
     "無印番外階層の一覧",
+    "別名の一覧",
+    "用語の一覧",
+    "コンテストの一覧",
 }
 
 
@@ -208,9 +214,7 @@ EXCLUDED_EXACT_TITLES = {
 # タイトルによる一覧ページ除外
 # =============================================================================
 
-EXCLUDED_TITLE_KEYWORDS = (
-    "の一覧",
-)
+EXCLUDED_TITLE_KEYWORDS = ()
 
 
 # =============================================================================
@@ -374,7 +378,7 @@ def parse_listing_text(
         r"^(.+?)"
         r"\s*(?:\(\d+\))?"
         r"\s*:\s*"
-        r"\"([^\"]+)\""
+        r"[\"“«]([^\"”»]+)[\"”»]"
         r"(?:\s*\(([^()]*)\))?"
         r"\s*$",
         text
@@ -411,7 +415,7 @@ def parse_listing_text(
         r"^(.+?)"
         r"\s*(?:\(\d+\))?"
         r"\s*:\s*"
-        r"\"([^\"]+)\""
+        r"[\"“«]([^\"”»]+)[\"”»]"
         r"\s*$",
         text
     )
@@ -464,7 +468,7 @@ def parse_listing_text(
     # =========================================================================
 
     match = re.match(
-        r"^(.+?)\s*:\s*\"([^\"]+)\""
+        r"^(.+?)\s*:\s*[\"“«]([^\"”»]+)[\"”»]"
         r"(?:\s*\(([^()]*)\))?"
         r"\s*$",
         text
@@ -556,15 +560,17 @@ def get_listing_context(
 
     if list_item:
 
-        text = clean_text(
-            list_item.get_text(
-                " ",
-                strip=True
-            )
-        )
+        # ネストした子リストは親項目のメタタイトルへ混入させない。
+        item_copy = BeautifulSoup(str(list_item), "html.parser")
+        copied_item = item_copy.find("li")
+        if copied_item:
+            for nested_list in copied_item.find_all(["ul", "ol"]):
+                nested_list.decompose()
+            text = clean_text(copied_item.get_text(" ", strip=True))
+        else:
+            text = clean_text(list_item.get_text(" ", strip=True))
 
         if text:
-
             return text
 
     # =========================================================================
@@ -810,6 +816,53 @@ def is_excluded_title(
 
 
 # =============================================================================
+# 一覧ナビゲーション・取り消し線メタデータ
+# =============================================================================
+
+def is_dedicated_index_link(anchor, url):
+    """専用一覧ページへのリンクを記事候補から分離する。"""
+    if not url:
+        return False
+    linked_title = unquote(urlparse(url).path.rsplit("/", 1)[-1]).replace("_", " ").strip()
+    anchor_title = clean_text(anchor.get_text(" ", strip=True))
+    return (
+        linked_title in EXCLUDED_EXACT_TITLES
+        or anchor_title in EXCLUDED_EXACT_TITLES
+    )
+
+
+def get_strikethrough_spans(anchor, meta_title="", meta_title_ja=""):
+    """一覧項目のdel/s/strikeを表示属性として抽出する。"""
+    container = anchor.find_parent(["li", "tr"])
+    if container is None:
+        container = anchor.parent
+    if container is None:
+        return []
+
+    item_copy = BeautifulSoup(str(container), "html.parser")
+    copied = item_copy.find(["li", "tr"]) or item_copy
+    for nested_list in copied.find_all(["ul", "ol"]):
+        nested_list.decompose()
+    spans = []
+    for element in copied.find_all(["del", "s", "strike"]):
+        value = clean_text(element.get_text(" ", strip=True))
+        if not value:
+            continue
+        if element.find("a") or value == clean_text(anchor.get_text(" ", strip=True)):
+            field = "title"
+        elif meta_title and value in meta_title:
+            field = "meta_title"
+        elif meta_title_ja and value in meta_title_ja:
+            field = "meta_title_ja"
+        else:
+            field = "meta_title"
+        item = {"field": field, "text": value}
+        if item not in spans:
+            spans.append(item)
+    return spans
+
+
+# =============================================================================
 # リンク抽出
 # =============================================================================
 
@@ -825,7 +878,7 @@ def extract_links_from_html(
     roots = find_content_roots(soup)
     root = roots[0] if roots else soup
     results = []
-    seen_urls = set()
+    seen_memberships = set()
     heading_stack = []
     section_order = 0
     page_order = 0
@@ -851,7 +904,16 @@ def extract_links_from_html(
             continue
 
         anchor_title = extract_page_title_from_anchor(element)
-        if not anchor_title or url in seen_urls:
+        if not anchor_title:
+            continue
+
+        section_path = [dict(item) for item in heading_stack]
+        membership_key = (url, json.dumps(section_path, ensure_ascii=False, sort_keys=True))
+        if membership_key in seen_memberships:
+            continue
+
+        # hierarchy.html内の専用一覧ページへの誘導は記事ではない。
+        if is_dedicated_index_link(element, url):
             continue
 
         context = get_listing_context(element)
@@ -862,9 +924,11 @@ def extract_links_from_html(
         if is_excluded_title(parsed_title):
             continue
 
-        seen_urls.add(url)
+        strikethrough_spans = get_strikethrough_spans(
+            element, meta_title, meta_title_ja
+        )
+        seen_memberships.add(membership_key)
         page_order += 1
-        section_path = [dict(item) for item in heading_stack]
         membership = {
             "index_name": index_name,
             "section_path": section_path,
@@ -875,6 +939,8 @@ def extract_links_from_html(
             "title": parsed_title,
             "meta_title": meta_title,
             "meta_title_ja": meta_title_ja,
+            "has_strikethrough": bool(strikethrough_spans),
+            "strikethrough_spans": json.dumps(strikethrough_spans, ensure_ascii=False),
             "url": url,
             "index_name": index_name,
             "section_path": json.dumps(section_path, ensure_ascii=False),
@@ -1125,6 +1191,8 @@ def merge_link_rows(all_rows):
                 "title": title,
                 "meta_title": clean_meta_text(row.get("meta_title", "")),
                 "meta_title_ja": clean_meta_text(row.get("meta_title_ja", "")),
+                "has_strikethrough": False,
+                "strikethrough_spans": [],
                 "url": url,
                 "indexes": [],
                 "memberships": [],
@@ -1137,6 +1205,17 @@ def merge_link_rows(all_rows):
             item["meta_title"] = clean_meta_text(row.get("meta_title", ""))
         if not item["meta_title_ja"]:
             item["meta_title_ja"] = clean_meta_text(row.get("meta_title_ja", ""))
+        item["has_strikethrough"] = (
+            item["has_strikethrough"] or str(row.get("has_strikethrough", "")).strip().lower() in {"1", "true", "yes"}
+        )
+        try:
+            incoming_spans = json.loads(row.get("strikethrough_spans") or "[]")
+        except (TypeError, ValueError):
+            incoming_spans = []
+        if isinstance(incoming_spans, list):
+            for span in incoming_spans:
+                if isinstance(span, dict) and span not in item["strikethrough_spans"]:
+                    item["strikethrough_spans"].append(span)
         if index_name and index_name not in item["indexes"]:
             item["indexes"].append(index_name)
 
@@ -1161,6 +1240,8 @@ def merge_link_rows(all_rows):
             "title": item["title"],
             "meta_title": item["meta_title"],
             "meta_title_ja": item["meta_title_ja"],
+            "has_strikethrough": item["has_strikethrough"],
+            "strikethrough_spans": json.dumps(item["strikethrough_spans"], ensure_ascii=False),
             "url": item["url"],
             "indexes": "|".join(item["indexes"]),
             "index_memberships": json.dumps(memberships, ensure_ascii=False),
@@ -1487,6 +1568,8 @@ def main():
             "title",
             "meta_title",
             "meta_title_ja",
+            "has_strikethrough",
+            "strikethrough_spans",
             "url",
             "indexes",
             "index_memberships",
@@ -1523,6 +1606,8 @@ def main():
             "title",
             "meta_title",
             "meta_title_ja",
+            "has_strikethrough",
+            "strikethrough_spans",
             "url",
             "indexes",
             "index_memberships",

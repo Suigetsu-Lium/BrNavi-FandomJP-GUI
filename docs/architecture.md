@@ -564,3 +564,55 @@ database/app_settings.json、database/ai/settings.json、.env / .env.*、APIキ�
 ### ストレージ表示
 
 modules/system_dashboard.py は削除対象と同じデータ分類に沿ってファイル数・容量を集計する。アプリ設定JSON・AI設定JSONなど保護対象は、生成データの合計に含めない。ドライブ全体の使用量は従来どおり別表示する。
+
+---
+
+## 全階層リンキング準拠（hierarchy.html）
+
+hierarchy.html は記事リンクの単純な集合ではなく、Wiki全体の階層目次として解析する。専用一覧ページへの誘導リンクは記事候補と分離し、通常記事のタイトルに「の一覧」が含まれるという理由だけでは除外しない。専用一覧ページは既知の一覧ページタイトル／URLにより識別する。
+
+### 言語支部と言語コード
+
+index_memberships の section_path を言語判定の一次根拠とし、記事タイトルの支部別命名規則を補助根拠にする。内部カテゴリ（normal / enigmatic / sublevel 等）と言語コードは独立属性として保持する。
+
+| Wiki見出し・表記 | Master DB language |
+| --- | --- |
+| 無印通常階層・無印通常番外階層 | EN |
+| 通常階層 η 等のη区分 | JP |
+| A | RU |
+| PL | PL |
+| IT | IT |
+| PT | PT |
+| UA | UA |
+| TR | TR |
+| ZH | ZH |
+
+支部コードAはWiki上の表記を保持しつつ、内部言語コードRUへ対応させる。タイトル形式は Level A-95、Level PL-95、Level UA-(-2)、Level 0-IT、Level 40-PT、Level 136-TR、Level ZH 31 のような支部別規則を認識する。A / PL / UAの括弧付き負数、ZHのスペース区切り、IT / PT / TRの後置コードを正規表現で扱い、個別記事名のハードコードは行わない。
+
+カテゴリは一覧IDと見出し階層から決定する。通常階層だけでなく、番外階層・亜階層・番外亜階層等についても、支部言語とカテゴリの組み合わせを保持する。GUIのHTML取得・データ抽出タブでは、RU / PL / IT / PT / UA / TR / ZHごとに存在するカテゴリの組み合わせから一覧入口を動的に生成する。掲載順は section_order / page_order を優先し、支部ごとの番号帯グループ内で維持する。
+
+### 一覧メタタイトルと取り消し線
+
+一覧HTMLから meta_title、meta_title_ja に加え、次の表示専用属性を抽出・伝達する。
+
+- has_strikethrough: 一覧項目に取り消し線要素が存在するか。
+- strikethrough_spans: 対象フィールド（title / meta_title / meta_title_ja）と対象文字列を持つJSON配列。
+
+対象HTML要素は del、s、strike。引用符付きメタタイトルは通常のダブルクォートに加え、スマートクォートおよび «…» を解析する。ネストしたリストの子項目は親項目のメタタイトル文字列へ混入させない。
+
+これらの属性は all_links.csv、pages_database.csv、pages_database_classified.csv、pages_master.csv を通じて同じ列名・JSON表現で保持する。modules/database.py と modules/operations.py は同じ値をGUIへ渡す。GUIは対象文字列だけに line-through を適用する。
+
+取り消し線はWiki上の表示演出であり、記事のDeprecated状態・削除状態・ダウンロード可否・閲覧可否・経路検索可否を意味しない。記事の有効性や検索対象を決めるロジックで has_strikethrough / strikethrough_spans を参照してはならない。
+
+### 手動確認
+
+一覧クリーンアップ後に全更新を実行し、Master DB再構築後、図鑑およびHTML取得・データ抽出タブで以下を確認する。
+
+1. 専用一覧ページへの誘導リンクがLevel記事として登録されない。
+2. EN / JP / RU / PL / IT / PT / UA / TR / ZHが正しい言語として表示される。
+3. A / PL / UAの括弧付き負数、IT / PT / TRの後置コード、ZHのスペース区切りが正しく分類される。
+4. 通常・番外・亜階層の各カテゴリに国際支部が存在する場合、カテゴリと言語の組み合わせで一覧入口が生成される。
+5. Wikiの掲載順・セクション順が保持され、ZH等のネストリストが親項目に混入しない。
+6. メタタイトルの部分取り消し線だけが再現され、Level記事自体は通常どおり閲覧・ダウンロード・経路検索できる。
+
+この機能の実データ再生成・手動動作確認は開発者が行う。AI側ではテスト・モック・fixture・ダミーデータを作成・実行せず、リポジトリ内に動的生成CSV / HTMLを配置しない。

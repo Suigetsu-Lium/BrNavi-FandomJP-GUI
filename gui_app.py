@@ -821,6 +821,10 @@ class BackroomsAPI:
             unique_results[result_key] = {
                 "title": title,
                 "subtitle": subtitle,
+                "meta_title": page.get("meta_title", ""),
+                "meta_title_ja": page.get("meta_title_ja", ""),
+                "has_strikethrough": bool(page.get("has_strikethrough", False)),
+                "strikethrough_spans": page.get("strikethrough_spans", "[]"),
                 "aliases": aliases,
                 "category": category,
                 "category_label": page.get("category_label", metadata.get("カテゴリ名", "")),
@@ -956,6 +960,13 @@ class BackroomsAPI:
                 meta_title = (title_m.group(2) or "").strip()
                 break
 
+        if page_info:
+            # 一覧HTMLのメタタイトルは装飾情報と対になる正本として優先する。
+            meta_title = str(page_info.get("meta_title") or meta_title).strip()
+        meta_title_ja = str(page_info.get("meta_title_ja") or "").strip() if page_info else ""
+        has_strikethrough = bool(page_info.get("has_strikethrough")) if page_info else False
+        strikethrough_spans = page_info.get("strikethrough_spans", "[]") if page_info else "[]"
+
         parsed_danger, _ = extract_danger(raw_text)
         parsed_comprehension, _ = extract_understanding(raw_text)
         if parsed_danger:
@@ -1038,6 +1049,9 @@ class BackroomsAPI:
         return {
             "level_id": level_id,
             "title": meta_title or (page_info.get("title", "") if page_info else ""),
+            "meta_title_ja": meta_title_ja,
+            "has_strikethrough": has_strikethrough,
+            "strikethrough_spans": strikethrough_spans,
             "url": self.current_info["url"],
             "html_path": str(html_file) if html_file and html_file.is_file() else "",
             "category": category,
@@ -3212,15 +3226,26 @@ HTML_TEMPLATE = r"""
 
     function explorerPagesForCategory(categoryId) {
       const source = explorerIndexPages.length ? explorerIndexPages : levelSearchResults;
-      const pages = categoryId === "saved_local"
-        ? uniqueLevelListPages(source.filter(page => Boolean(page.saved)))
-        : levelListPagesForCategory(categoryId, source);
+      let pages;
+      if (categoryId === "saved_local") {
+        pages = uniqueLevelListPages(source.filter(page => Boolean(page.saved)));
+      } else if (categoryId === "all") {
+        // 「階層の一覧」はMaster DB全体ではなく、hierarchy.htmlに直接掲載された記事だけを表示する。
+        pages = uniqueLevelListPages(source.filter(page =>
+          Boolean(getWikiMembership(page, "hierarchy")) || pageHasIndexMembership(page, "hierarchy")
+        )).sort((left, right) => compareWikiMembershipOrder(left, right, "hierarchy"));
+      } else {
+        pages = levelListPagesForCategory(categoryId, source);
+      }
       const metadataByTitle = new Map(levelSearchResults.map(item => [explorerTitleKey(item.title), item]));
-      return pages.map(page => {
+      const mergedPages = pages.map(page => {
         const metadata = metadataByTitle.get(explorerTitleKey(page.title)) || {};
         return {...metadata, ...page, saved: Boolean(metadata.saved || page.saved),
           subtitle: metadata.subtitle || page.subtitle || page.meta_title || ''};
-      }).sort(compareWikiIndexOrder);
+      });
+      return mergedPages.sort((left, right) => categoryId === "all"
+        ? compareWikiMembershipOrder(left, right, "hierarchy")
+        : compareWikiIndexOrder(left, right));
     }
 
     async function loadExplorerIndexPages() {
@@ -3263,7 +3288,14 @@ HTML_TEMPLATE = r"""
       const host = document.getElementById('explorer-category-tiles');
       if (!host || !Array.isArray(levelListCategoryDefinitions)) return;
       host.replaceChildren();
-      const categories = getLevelListCategories(explorerIndexPages.length ? explorerIndexPages : levelSearchResults);
+      const sourcePages = explorerIndexPages.length ? explorerIndexPages : levelSearchResults;
+      // 図鑑トップは固定の基本9タイルのみ。支部別の入口はHTML取得タブ側に限定する。
+      const categories = levelListCategoryDefinitions.map(category => ({
+        ...category,
+        pages: category.id === "all"
+          ? explorerPagesForCategory("all")
+          : levelListPagesForCategory(category.id, sourcePages),
+      }));
       categories.forEach((category, index) => {
         const card = document.createElement('div');
         card.className = 'overflow-hidden rounded-md border border-[#dfd09f] bg-[#fffdf5] shadow-sm transition hover:-translate-y-0.5 hover:border-[#b98a43] hover:shadow-md';
@@ -3361,10 +3393,28 @@ HTML_TEMPLATE = r"""
         button.onauxclick = event => { if (event.button === 1) { event.preventDefault(); createExplorerTab(page); } };
         const title = document.createElement('span');
         title.className = 'block font-semibold text-[#a3420b]';
-        title.textContent = `📖 ${page.title}`;
+        title.appendChild(document.createTextNode('📖 '));
+        let strikeSpans = [];
+        try {
+          const parsedSpans = JSON.parse(page.strikethrough_spans || "[]");
+          if (Array.isArray(parsedSpans)) strikeSpans = parsedSpans;
+        } catch (_) {}
+        appendDecoratedListText(title, page.title, strikeSpans, "title");
         const subtitle = document.createElement('span');
         subtitle.className = 'mt-1 block text-xs text-gray-600';
-        subtitle.textContent = [page.subtitle, page.category_label || page.category].filter(Boolean).join(' · ') || '保存済み';
+        if (page.meta_title || page.subtitle) {
+          appendDecoratedListText(subtitle, page.meta_title || page.subtitle, strikeSpans, "meta_title");
+        }
+        if (page.meta_title_ja) {
+          if (subtitle.childNodes.length) subtitle.appendChild(document.createTextNode(' · '));
+          appendDecoratedListText(subtitle, page.meta_title_ja, strikeSpans, "meta_title_ja");
+        }
+        const categoryLabel = page.category_label || page.category;
+        if (categoryLabel) {
+          if (subtitle.childNodes.length) subtitle.appendChild(document.createTextNode(' · '));
+          subtitle.appendChild(document.createTextNode(categoryLabel));
+        }
+        if (!subtitle.childNodes.length) subtitle.textContent = '保存済み';
         button.append(title, subtitle);
         host.appendChild(button);
       });
@@ -3437,14 +3487,27 @@ HTML_TEMPLATE = r"""
         const link = document.createElement('a');
         link.href = page.url || '#';
         link.className = 'text-[#a3420b] hover:underline';
-        link.textContent = page.title || '無題';
+        let strikeSpans = [];
+        try {
+          const parsedSpans = JSON.parse(page.strikethrough_spans || "[]");
+          if (Array.isArray(parsedSpans)) strikeSpans = parsedSpans;
+        } catch (_) {}
+        appendDecoratedListText(link, page.title || '無題', strikeSpans, "title");
         link.onclick = event => { event.preventDefault(); openExplorerCandidate(page); };
         link.onauxclick = event => { if (event.button === 1) { event.preventDefault(); createExplorerTab(page); } };
         row.appendChild(link);
-        if (page.subtitle) {
+        const subtitleValue = page.meta_title || page.subtitle || "";
+        if (subtitleValue || page.meta_title_ja) {
           const subtitle = document.createElement('span');
           subtitle.className = 'ml-1 text-gray-700';
-          subtitle.textContent = `: "${page.subtitle}"`;
+          subtitle.appendChild(document.createTextNode(': "'));
+          appendDecoratedListText(subtitle, subtitleValue, strikeSpans, "meta_title");
+          subtitle.appendChild(document.createTextNode('"'));
+          if (page.meta_title_ja) {
+            subtitle.appendChild(document.createTextNode(' ('));
+            appendDecoratedListText(subtitle, page.meta_title_ja, strikeSpans, "meta_title_ja");
+            subtitle.appendChild(document.createTextNode(')'));
+          }
           row.appendChild(subtitle);
         }
         const badge = document.createElement('span');
@@ -3454,7 +3517,17 @@ HTML_TEMPLATE = r"""
         host.appendChild(row);
       });
       sections.forEach(section => {
-        appendHeading(section.title, section.key);
+        appendHeading(section.title, section.key, section.level === 4 ? 4 : 3);
+        if (section.wikiCategory) {
+          const dedicatedLink = document.createElement("button");
+          dedicatedLink.type = "button";
+          dedicatedLink.className = section.level === 4
+            ? "mb-2 ml-4 rounded border border-[#d8c99e] bg-[#fff8dc] px-3 py-1.5 text-xs font-semibold text-[#91520f] hover:bg-[#f7edcf]"
+            : "mb-3 rounded border border-[#d8c99e] bg-[#fff8dc] px-3 py-1.5 text-xs font-semibold text-[#91520f] hover:bg-[#f7edcf]";
+          dedicatedLink.textContent = "専用一覧を開く";
+          dedicatedLink.onclick = () => openExplorerCategory(section.wikiCategory);
+          host.appendChild(dedicatedLink);
+        }
         if (section.key === '100-999' && categoryId === 'normal_eta') {
           const buckets = new Map();
           section.pages.forEach(page => {
@@ -3472,7 +3545,7 @@ HTML_TEMPLATE = r"""
               appendPages(items, true);
             });
         } else {
-          appendPages(section.pages);
+          appendPages(section.pages, section.level === 4);
         }
       });
     }
@@ -4005,8 +4078,26 @@ HTML_TEMPLATE = r"""
       if (currentExplorerPage) currentExplorerPage.html_path = d.html_path || '';
       explorerImages = d.images || [];
 
-      document.getElementById('view-level-id').innerText = d.level_id;
-      document.getElementById('view-meta-title').innerText = d.title && d.title !== d.level_id ? `"${d.title}"` : "";
+      let articleStrikeSpans = [];
+      try {
+        const parsed = JSON.parse(d.strikethrough_spans || "[]");
+        if (Array.isArray(parsed)) articleStrikeSpans = parsed;
+      } catch (_) {}
+      const levelHeading = document.getElementById('view-level-id');
+      levelHeading.replaceChildren();
+      appendDecoratedListText(levelHeading, d.level_id, articleStrikeSpans, "title");
+      const metaHeading = document.getElementById('view-meta-title');
+      metaHeading.replaceChildren();
+      if (d.title && d.title !== d.level_id) {
+        metaHeading.appendChild(document.createTextNode('"'));
+        appendDecoratedListText(metaHeading, d.title, articleStrikeSpans, "meta_title");
+        metaHeading.appendChild(document.createTextNode('"'));
+        if (d.meta_title_ja) {
+          metaHeading.appendChild(document.createTextNode(' (' ));
+          appendDecoratedListText(metaHeading, d.meta_title_ja, articleStrikeSpans, "meta_title_ja");
+          metaHeading.appendChild(document.createTextNode(')'));
+        }
+      }
       document.getElementById('print-source-title').textContent = d.level_id || '';
       const printSourceLink = document.getElementById('print-source-link');
       printSourceLink.removeAttribute('href');
@@ -4259,24 +4350,56 @@ HTML_TEMPLATE = r"""
       return category;
     }
 
+    function isInternationalBranchPage(page) {
+      const language = String(page.language || "").trim().toUpperCase();
+      if (["RU", "PL", "IT", "PT", "UA", "TR", "ZH"].includes(language)) return true;
+
+      // hierarchy.html の支部見出しを言語列の欠落・旧データに対する補助判定に使う。
+      const hierarchyMembership = getWikiMembership(page, "hierarchy");
+      const sectionPath = hierarchyMembership?.section_path || [];
+      if (Array.isArray(sectionPath) && sectionPath.some(section =>
+        ["A", "PL", "IT", "PT", "UA", "TR", "ZH"].includes(
+          String(section?.heading || "").replace(/\s*\[[ xX✓✔]?\]\s*$/, "").trim().toUpperCase()
+        )
+      )) return true;
+
+      // 支部別タイトル形式も補助判定に使い、language が欠落した記事の混入を防ぐ。
+      const title = String(page.title || "").trim();
+      return /^Level\s+(?:A|PL|UA|ZH)\s*-?\s*\(?-?\d/i.test(title) ||
+        /^Level\s+-?\d+(?:\.\d+)*(?:\s*-\s*|\s+)(?:IT|PT|TR)\b/i.test(title);
+    }
+
     function levelListPagesForCategory(categoryId, sourcePages = levelListPages) {
+      const branchMatch = String(categoryId || "").match(/^branch:([A-Z]+):([a-z_]+)$/);
       const pages = sourcePages.filter(page => {
         const category = normalizeExplorerCategory(page.category);
+        const language = String(page.language || "unknown").toUpperCase();
         const source = String(page.source_type || "").toLowerCase();
         const sources = source.split("|").map(value => value.trim());
-        const title = String(page.title || "");
+        const defaultLanguage = ["EN", "JP", "UNKNOWN"].includes(language);
+        const internationalBranch = isInternationalBranchPage(page);
+        if (branchMatch) {
+          return language === branchMatch[1] && category === branchMatch[2];
+        }
         if (categoryId === "all") return true;
         if (categoryId === "normal") {
-          return category === "normal" && source !== "translation";
+          // 無印通常階層はEN記事、または normal.html への明示的な掲載所属だけを採用する。
+          // hierarchy.html 上の国際支部は、カテゴリが normal でも基本タイルへ混ぜない。
+          const belongsToNormalIndex = Boolean(getWikiMembership(page, "normal")) ||
+            pageHasIndexMembership(page, "normal");
+          return category === "normal" && !internationalBranch &&
+            (language === "EN" || belongsToNormalIndex) && !sources.includes("translation");
         }
         if (categoryId === "normal_eta") {
-          return category === "normal_eta" && source !== "translation";
+          return category === "normal_eta" && defaultLanguage && !internationalBranch &&
+            !sources.includes("translation");
         }
         if (categoryId === "enigmatic") {
-          return source !== "translation" && ["enigmatic", "enigmatic_eta"].includes(category);
+          return defaultLanguage && !internationalBranch && !sources.includes("translation") &&
+            ["enigmatic", "enigmatic_eta"].includes(category);
         }
         if (categoryId === "sublevel") {
-          return source !== "translation" &&
+          return defaultLanguage && !internationalBranch && !sources.includes("translation") &&
             ["sublevel", "sublevel_eta", "enigmatic_sublevel_eta"].includes(category);
         }
         if (categoryId === "translation") {
@@ -4291,7 +4414,7 @@ HTML_TEMPLATE = r"""
         if (categoryId === "contest") {
           return category === "contest" || category === "contest_level" || pageHasIndexMembership(page, "contest");
         }
-        return category === categoryId;
+        return category === categoryId && defaultLanguage && !internationalBranch;
       });
       return uniqueLevelListPages(pages);
     }
@@ -4315,6 +4438,35 @@ HTML_TEMPLATE = r"""
           id,
           title: `${label}の一覧`,
           visual: label.slice(0, 3),
+          wikiTitle: "",
+          pages,
+        });
+      });
+
+      // 国際支部はカテゴリと支部言語の組み合わせで個別の入口を生成する。
+      const branchLabels = {RU: "A", PL: "PL", IT: "IT", PT: "PT", UA: "UA", TR: "TR", ZH: "ZH"};
+      const categoryLabels = {
+        normal: "通常階層", normal_eta: "通常階層 η",
+        enigmatic: "番外階層", enigmatic_eta: "番外階層 η",
+        sublevel: "亜階層", sublevel_eta: "亜階層 η",
+        enigmatic_sublevel_eta: "番外亜階層 η",
+      };
+      const branchKeys = new Set();
+      sourcePages.forEach(page => {
+        const language = String(page.language || "").toUpperCase();
+        const category = normalizeExplorerCategory(page.category);
+        if (!branchLabels[language] || !categoryLabels[category]) return;
+        const key = `${language}:${category}`;
+        if (branchKeys.has(key)) return;
+        branchKeys.add(key);
+        const pages = levelListPagesForCategory(`branch:${language}:${category}`, sourcePages);
+        if (!pages.length) return;
+        const branchCode = branchLabels[language];
+        const label = categoryLabels[category];
+        categories.push({
+          id: `branch:${language}:${category}`,
+          title: `${label} ${branchCode}（${language}）の一覧`,
+          visual: branchCode,
           wikiTitle: "",
           pages,
         });
@@ -4429,7 +4581,7 @@ HTML_TEMPLATE = r"""
     }
 
     function getLevelNumberRange(number, categoryId = currentLevelListCategory) {
-      const suffix = categoryId === "normal_eta" ? "η" : "";
+      const suffix = /(?:^|:)(?:normal_eta|enigmatic_eta|sublevel_eta|enigmatic_sublevel_eta)$/.test(categoryId) ? "η" : "";
       if (number === 0) return {key: "zero", title: `0${suffix}`};
       if (number >= 1 && number <= 9) return {key: "1-9", title: `1${suffix} から 9${suffix} まで`};
       if (number >= 10 && number <= 99) return {key: "10-99", title: `10${suffix} から 99${suffix} まで`};
@@ -4524,30 +4676,105 @@ HTML_TEMPLATE = r"""
       }
 
       if (categoryId === "all") {
-        const categoryOrder = ["normal", "normal_eta", "enigmatic", "enigmatic_eta",
-          "sublevel", "sublevel_eta", "enigmatic_sublevel_eta", "alias", "terms", "contest",
-          "dimension", "foreign", "entity", "item", "phenomenon", "canon",
-          "joke_level", "joke_article", "person"];
-        const groups = new Map();
+        const roots = new Map();
+        const dedicatedCategoryByHeading = {
+          "無印通常階層": "normal",
+          "通常階層 η": "normal_eta",
+          "無印番外階層": "enigmatic",
+          "番外階層 η": "enigmatic",
+          "無印通常亜階層": "sublevel",
+          "通常亜階層 η": "sublevel",
+          "番外亜階層 η": "sublevel",
+          "番外階層": "enigmatic",
+          "亜階層": "sublevel",
+        };
         pages.forEach(page => {
-          const category = normalizeExplorerCategory(page.category);
-          if (!groups.has(category)) {
-            groups.set(category, {
-              key: category,
-              title: page.category_label || levelListCategoryLabels[category] || category,
-              pages: [],
+          const membership = getWikiMembership(page, "hierarchy");
+          if (!membership && !pageHasIndexMembership(page, "hierarchy")) return;
+          let path = membership?.section_path;
+          if (!Array.isArray(path)) {
+            try { path = JSON.parse(page.section_path || "[]"); } catch (_) { path = []; }
+          }
+          const headings = (Array.isArray(path) ? path : [])
+            .filter(item => item && item.heading && String(item.heading).trim() !== "目次")
+            .map(item => ({
+              level: Number(item.level) || 2,
+              heading: String(item.heading).replace(/\s*\[[ xX✓✔]?\]\s*$/, "").trim(),
+            }));
+          if (!headings.length) return;
+          const rootHeading = headings[0];
+          const rootKey = `hierarchy:${rootHeading.heading}`;
+          if (!roots.has(rootKey)) {
+            roots.set(rootKey, {
+              key: rootKey, title: rootHeading.heading, level: 3,
+              order: Number(membership?.section_order || page.section_order || 0),
+              pages: [], children: new Map(),
+              wikiCategory: dedicatedCategoryByHeading[rootHeading.heading] || "",
             });
           }
-          groups.get(category).pages.push(page);
+          const root = roots.get(rootKey);
+          const sectionOrder = Number(membership?.section_order || page.section_order || 0);
+          root.order = Math.min(root.order || sectionOrder, sectionOrder);
+          if (headings.length === 1) {
+            root.pages.push(page);
+            return;
+          }
+          const childPath = headings.slice(1);
+          const childHeading = childPath[childPath.length - 1];
+          const childKey = `${rootKey}/${childPath.map(item => item.heading).join("/")}`;
+          if (!root.children.has(childKey)) {
+            root.children.set(childKey, {
+              key: childKey, title: childHeading.heading, level: 4,
+              order: sectionOrder, pages: [],
+              wikiCategory: dedicatedCategoryByHeading[childHeading.heading] || "",
+            });
+          }
+          const child = root.children.get(childKey);
+          child.order = Math.min(child.order, sectionOrder);
+          child.pages.push(page);
         });
-        return Array.from(groups.values())
-          .map(group => ({...group, pages: group.pages.sort(compareWikiIndexOrder)}))
-          .sort((left, right) => {
-            const leftIndex = categoryOrder.indexOf(left.key);
-            const rightIndex = categoryOrder.indexOf(right.key);
-            return (leftIndex < 0 ? categoryOrder.length : leftIndex) -
-              (rightIndex < 0 ? categoryOrder.length : rightIndex);
+
+        const normalRoot = Array.from(roots.values()).find(item => item.title === "通常階層");
+        if (normalRoot) {
+          const childOrders = Array.from(normalRoot.children.values()).map(item => item.order);
+          const firstBranchOrder = childOrders.length ? Math.min(...childOrders) : normalRoot.order + 3;
+          [
+            {title: "無印通常階層", wikiCategory: "normal", order: firstBranchOrder - 2},
+            {title: "通常階層 η", wikiCategory: "normal_eta", order: firstBranchOrder - 1},
+          ].forEach(item => {
+            const key = `hierarchy:${normalRoot.title}/${item.title}`;
+            if (!normalRoot.children.has(key)) {
+              normalRoot.children.set(key, {
+                key, title: item.title, level: 4, order: item.order,
+                pages: [], wikiCategory: item.wikiCategory,
+              });
+            }
           });
+          normalRoot.order = Math.min(normalRoot.order, firstBranchOrder - 3);
+        }
+
+        if (!Array.from(roots.values()).some(item => item.title === "番外階層")) {
+          const lastOrder = Math.max(0, ...Array.from(roots.values()).map(item =>
+            Math.max(item.order, ...Array.from(item.children.values()).map(child => child.order))
+          ));
+          roots.set("hierarchy:番外階層", {
+            key: "hierarchy:番外階層", title: "番外階層", level: 3,
+            order: lastOrder + 1, pages: [], children: new Map(),
+            wikiCategory: "enigmatic",
+          });
+        }
+
+        return Array.from(roots.values())
+          .sort((left, right) => left.order - right.order)
+          .flatMap(root => [
+            {...root, pages: root.pages.sort((left, right) => compareWikiMembershipOrder(left, right, "hierarchy"))},
+            ...Array.from(root.children.values())
+              .sort((left, right) => left.order - right.order)
+              .map(child => ({
+                ...child,
+                pages: child.pages.sort((left, right) => compareWikiMembershipOrder(left, right, "hierarchy")),
+              })),
+          ]);
       }
 
       const groups = new Map();
@@ -4564,6 +4791,29 @@ HTML_TEMPLATE = r"""
       return Array.from(groups.values()).sort((left, right) =>
         order.indexOf(left.key) - order.indexOf(right.key)
       );
+    }
+
+    function appendDecoratedListText(host, value, spans, field) {
+      const text = String(value || "");
+      const ranges = (Array.isArray(spans) ? spans : [])
+        .filter(item => item && item.field === field && item.text)
+        .map(item => {
+          const start = text.indexOf(String(item.text));
+          return start >= 0 ? {start, end: start + String(item.text).length} : null;
+        })
+        .filter(Boolean)
+        .sort((left, right) => left.start - right.start);
+      let cursor = 0;
+      ranges.forEach(range => {
+        if (range.start < cursor) return;
+        if (range.start > cursor) host.appendChild(document.createTextNode(text.slice(cursor, range.start)));
+        const struck = document.createElement("span");
+        struck.className = "line-through";
+        struck.textContent = text.slice(range.start, range.end);
+        host.appendChild(struck);
+        cursor = range.end;
+      });
+      if (cursor < text.length) host.appendChild(document.createTextNode(text.slice(cursor)));
     }
 
     function appendLevelListPageRow(host, page) {
@@ -4595,7 +4845,28 @@ HTML_TEMPLATE = r"""
       const link = document.createElement('a');
       link.href = page.url;
       link.className = "min-w-0 flex-1 break-words text-sm text-[#9b3d06] hover:underline";
-      link.textContent = page.title;
+      let strikeSpans = [];
+      try {
+        const parsedSpans = JSON.parse(page.strikethrough_spans || "[]");
+        if (Array.isArray(parsedSpans)) strikeSpans = parsedSpans;
+      } catch (_) {}
+      const titleLine = document.createElement("span");
+      titleLine.className = "block";
+      appendDecoratedListText(titleLine, page.title, strikeSpans, "title");
+      link.appendChild(titleLine);
+      const metaParts = [
+        ["meta_title", page.meta_title],
+        ["meta_title_ja", page.meta_title_ja],
+      ].filter(([, value]) => String(value || "").trim());
+      if (metaParts.length) {
+        const subtitle = document.createElement("span");
+        subtitle.className = "mt-0.5 block text-[11px] text-gray-500";
+        metaParts.forEach(([field, value], index) => {
+          if (index) subtitle.appendChild(document.createTextNode(" · "));
+          appendDecoratedListText(subtitle, value, strikeSpans, field);
+        });
+        link.appendChild(subtitle);
+      }
       link.onclick = event => {
         event.preventDefault();
         event.stopPropagation();

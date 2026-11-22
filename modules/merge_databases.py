@@ -81,6 +81,10 @@ DUPLICATES_TXT = os.path.join(
 
 FIELDNAMES = [
     "title",
+    "meta_title",
+    "meta_title_ja",
+    "has_strikethrough",
+    "strikethrough_spans",
     "url",
     "category",
     "language",
@@ -154,6 +158,10 @@ def clean(value):
 
 def make_record(
     title="",
+    meta_title="",
+    meta_title_ja="",
+    has_strikethrough=False,
+    strikethrough_spans="[]",
     url="",
     category="unknown",
     language="unknown",
@@ -173,6 +181,10 @@ def make_record(
 
     return {
         "title": clean(title),
+        "meta_title": clean(meta_title),
+        "meta_title_ja": clean(meta_title_ja),
+        "has_strikethrough": str(has_strikethrough).strip().lower() in {"1", "true", "yes"},
+        "strikethrough_spans": clean(strikethrough_spans) or "[]",
         "url": clean(url),
         "category": clean(category) or "unknown",
         "language": clean(language) or "unknown",
@@ -270,6 +282,29 @@ def merge_two_records(
         and incoming["title"]
     ):
         result["title"] = incoming["title"]
+
+    # -------------------------------------------------------------------------
+    # Display-only metadata; never use it to filter article eligibility.
+    # -------------------------------------------------------------------------
+
+    for field in ("meta_title", "meta_title_ja"):
+        if not result.get(field) and incoming.get(field):
+            result[field] = incoming[field]
+
+    result["has_strikethrough"] = bool(
+        result.get("has_strikethrough") or incoming.get("has_strikethrough")
+    )
+    merged_spans = []
+    for raw in (result.get("strikethrough_spans", "[]"), incoming.get("strikethrough_spans", "[]")):
+        try:
+            spans = json.loads(raw or "[]")
+        except (TypeError, ValueError):
+            spans = []
+        if isinstance(spans, list):
+            for span in spans:
+                if isinstance(span, dict) and span not in merged_spans:
+                    merged_spans.append(span)
+    result["strikethrough_spans"] = json.dumps(merged_spans, ensure_ascii=False)
 
     # -------------------------------------------------------------------------
     # category
@@ -387,6 +422,10 @@ def add_classified_records(
 
         record = make_record(
             title=row.get("title"),
+            meta_title=row.get("meta_title", ""),
+            meta_title_ja=row.get("meta_title_ja", ""),
+            has_strikethrough=row.get("has_strikethrough", False),
+            strikethrough_spans=row.get("strikethrough_spans", "[]"),
             url=url,
             category=row.get("category"),
             language=row.get("language"),

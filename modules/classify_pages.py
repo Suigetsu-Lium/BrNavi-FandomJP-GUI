@@ -55,43 +55,17 @@ OUTPUT_CSV = os.path.join(
 # 言語版判定
 # =============================================================================
 
-# 「Level XX-数字」「Level XX 数字」のように、
-# タイトル上で明確に言語版を示しているものだけを登録する。
-#
-# A は現時点では除外。
-# "Level A-95" のように見えても、
-# 本当に言語版Aなのか、別の命名なのかをタイトルだけでは
-# 確実に判断できないため。
+# Wikiの支部別タイトル表記。Aは内部コードRUとして保持する。
+# 見出し情報がある場合は見出し判定を優先し、タイトル正規表現は補助に使う。
 LANGUAGE_PATTERNS = {
-    "PL": [
-        re.compile(r"^Level\s+PL-\S+", re.IGNORECASE),
-        re.compile(r"^Level\s+PL\s+\S+", re.IGNORECASE),
-    ],
-
-    "UA": [
-        re.compile(r"^Level\s+UA-\S+", re.IGNORECASE),
-        re.compile(r"^Level\s+UA\s+\S+", re.IGNORECASE),
-    ],
-
-    "ZH": [
-        re.compile(r"^Level\s+ZH-\S+", re.IGNORECASE),
-        re.compile(r"^Level\s+ZH\s+\S+", re.IGNORECASE),
-    ],
-
-    "FR": [
-        re.compile(r"^Level\s+FR-\S+", re.IGNORECASE),
-        re.compile(r"^Level\s+FR\s+\S+", re.IGNORECASE),
-    ],
-
-    "IT": [
-        re.compile(r"^Level\s+IT-\S+", re.IGNORECASE),
-        re.compile(r"^Level\s+IT\s+\S+", re.IGNORECASE),
-    ],
-
-    "PT": [
-        re.compile(r"^Level\s+PT-\S+", re.IGNORECASE),
-        re.compile(r"^Level\s+PT\s+\S+", re.IGNORECASE),
-    ],
+    "RU": [re.compile(r"^Level\s+A-(?:\(-?\d+(?:\.\d+)*\)|-?\d+(?:\.\d+)*)", re.IGNORECASE)],
+    "PL": [re.compile(r"^Level\s+PL-(?:\(-?\d+(?:\.\d+)*\)|-?\d+(?:\.\d+)*)", re.IGNORECASE)],
+    "UA": [re.compile(r"^Level\s+UA-(?:\(-?\d+(?:\.\d+)*\)|-?\d+(?:\.\d+)*)", re.IGNORECASE)],
+    "FR": [re.compile(r"^Level\s+FR-(?:\(-?\d+(?:\.\d+)*\)|-?\d+(?:\.\d+)*)", re.IGNORECASE)],
+    "ZH": [re.compile(r"^Level\s+ZH\s+-?\d+(?:\.\d+)*", re.IGNORECASE)],
+    "IT": [re.compile(r"^Level\s+-?\d+(?:\.\d+)*(?:\s*η)?-IT$", re.IGNORECASE)],
+    "PT": [re.compile(r"^Level\s+-?\d+(?:\.\d+)*(?:\s*η)?-PT$", re.IGNORECASE)],
+    "TR": [re.compile(r"^Level\s+-?\d+(?:\.\d+)*(?:\s*η)?-TR$", re.IGNORECASE)],
 }
 
 
@@ -123,26 +97,47 @@ def has_eta(title):
 # 言語判定
 # =============================================================================
 
-def detect_language(title):
-    """
-    タイトルから明確に判定できる言語版を返す。
+def detect_language(title, index_memberships=""):
+    """一覧見出しを優先し、Wikiの支部別タイトル表記を補助根拠に言語を判定する。"""
+    memberships = load_index_memberships(index_memberships)
+    branch_codes = {"A": "RU", "PL": "PL", "IT": "IT", "PT": "PT", "UA": "UA", "TR": "TR", "ZH": "ZH", "FR": "FR"}
+    membership_headings = []
+    for membership in memberships:
+        headings = [
+            str(item.get("heading") or "").strip()
+            for item in (membership.get("section_path") or [])
+            if isinstance(item, dict)
+        ]
+        membership_headings.append((str(membership.get("index_name") or ""), headings))
 
-    判定できない場合:
-        unknown
-    """
+    # 支部見出しを全membershipから先に探し、無印一覧への所属が別にあっても支部を優先する。
+    for _, headings in membership_headings:
+        for heading_index in range(len(headings) - 1, -1, -1):
+            heading = headings[heading_index]
+            match = re.search(r"(?:階層|Level)\s+(?:η\s*)?(A|PL|IT|PT|UA|TR|ZH|FR)\s*$", heading, re.IGNORECASE)
+            if match:
+                return branch_codes[match.group(1).upper()]
+            if re.fullmatch(r"A|PL|IT|PT|UA|TR|ZH|FR", heading, re.IGNORECASE):
+                if any("階層" in parent for parent in headings[:heading_index]):
+                    return branch_codes[heading.upper()]
 
+    for index_name, headings in membership_headings:
+        if index_name == "normal":
+            return "EN"
+        if index_name == "normal_eta":
+            return "JP"
+        if index_name == "hierarchy":
+            for heading in reversed(headings):
+                if re.search(r"通常階層\s*η|番外階層\s*η|亜階層\s*η", heading):
+                    return "JP"
+                if re.search(r"無印通常階層|通常階層|無印番外階層|番外階層|無印通常亜階層|通常亜階層|無印番外亜階層|番外亜階層", heading):
+                    return "EN"
+    title = (title or "").strip()
     if not title:
         return "unknown"
-
-    title = title.strip()
-
     for language, patterns in LANGUAGE_PATTERNS.items():
-
-        for pattern in patterns:
-
-            if pattern.search(title):
-                return language
-
+        if any(pattern.search(title) for pattern in patterns):
+            return language
     return "unknown"
 
 
@@ -189,36 +184,32 @@ def load_index_memberships(value):
 
 
 def _membership_category(index_name, section_path, title):
-    """一覧ページIDと見出し階層から、その掲載位置のカテゴリを判定する。"""
+    """一覧IDと見出し階層から、言語支部を問わない記事カテゴリを判定する。"""
     headings = [
         str(item.get("heading") or "").strip()
         for item in section_path
         if isinstance(item, dict) and item.get("heading")
     ]
     normalized = [re.sub(r"\s*\[[ xX✓✔]?\]\s*$", "", value).strip() for value in headings]
-    joined = " > ".join(normalized)
-
     if index_name == "normal_eta":
         return "normal_eta"
     if index_name == "normal":
         return "normal"
     if index_name == "enigmatic":
-        if any(re.search(r"番外亜階層\s*η", value) for value in normalized):
+        if any("亜階層" in value for value in normalized):
             return "enigmatic_sublevel_eta"
         if any(re.search(r"番外階層\s*η", value) for value in normalized):
             return "enigmatic_eta"
-        if any("無印番外階層" in value or value == "番外階層" for value in normalized):
-            return "enigmatic"
         return "enigmatic"
     if index_name == "sublevel":
-        if any(re.search(r"番外亜階層\s*η", value) for value in normalized):
+        if any("番外亜階層" in value for value in normalized):
             return "enigmatic_sublevel_eta"
         if any(re.search(r"通常亜階層\s*η", value) for value in normalized):
             return "sublevel_eta"
-        if any("無印通常亜階層" in value or value == "亜階層" for value in normalized):
-            return "sublevel"
         return "sublevel"
     if index_name == "hierarchy":
+        if any("番外亜階層" in value for value in normalized):
+            return "enigmatic_sublevel_eta"
         if any(re.search(r"番外階層\s*η", value) for value in normalized):
             return "enigmatic_eta"
         if any(re.search(r"通常階層\s*η", value) for value in normalized):
@@ -228,15 +219,10 @@ def _membership_category(index_name, section_path, title):
         if any("亜階層" in value for value in normalized):
             return "sublevel_eta" if any("η" in value for value in normalized) else "sublevel"
         if any("通常階層" in value for value in normalized):
-            return "normal"
-        # 階層一覧に分類見出しがない旧HTMLに限り、既存の一般的なη形式を補助利用する。
+            return "normal_eta" if any("η" in value for value in normalized) else "normal"
         return "normal_eta" if has_eta(title) else "normal"
-    if index_name == "alias":
-        return "alias"
-    if index_name == "terms":
-        return "terms"
-    if index_name == "contest":
-        return "contest"
+    if index_name in {"alias", "terms", "contest"}:
+        return index_name
     return None
 
 
@@ -361,7 +347,8 @@ def classify_row(row):
     )
 
     language = detect_language(
-        title
+        title,
+        index_memberships,
     )
 
     # -------------------------------------------------------------------------
@@ -380,7 +367,7 @@ def classify_row(row):
     elif language != "unknown":
 
         language_reason = (
-            f"title_language={language}"
+            f"detected_language={language}"
         )
 
     else:
@@ -416,6 +403,10 @@ def classify_row(row):
 
     return {
         "title": title,
+        "meta_title": row.get("meta_title", ""),
+        "meta_title_ja": row.get("meta_title_ja", ""),
+        "has_strikethrough": str(row.get("has_strikethrough", "")).strip().lower() in {"1", "true", "yes"},
+        "strikethrough_spans": row.get("strikethrough_spans", "[]") or "[]",
         "url": row.get("url", ""),
         "indexes": indexes,
         "index_memberships": index_memberships,
@@ -476,6 +467,10 @@ def save_csv(
 
     fieldnames = [
         "title",
+        "meta_title",
+        "meta_title_ja",
+        "has_strikethrough",
+        "strikethrough_spans",
         "url",
         "indexes",
         "index_memberships",

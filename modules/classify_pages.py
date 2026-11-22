@@ -23,6 +23,7 @@ pages_database.csv に対して、
 """
 
 import csv
+import json
 import os
 import re
 
@@ -178,129 +179,141 @@ def detect_source_type(
 # category 判定
 # =============================================================================
 
-def detect_category(
-    title,
-    indexes
-):
-    """
-    一覧ページの所属とタイトルから階層種別を判定する。
+def load_index_memberships(value):
+    """Master前段CSVの一覧所属JSONを安全に読み込む。"""
+    try:
+        memberships = json.loads(value or "[]")
+    except (TypeError, ValueError):
+        return []
+    return [item for item in memberships if isinstance(item, dict)]
 
-    優先順位:
 
-        normal_eta
-        anomalous_eta
-        sublevel_eta
-        anomalous
-        sublevel
-        normal
-        unknown
+def _membership_category(index_name, section_path, title):
+    """一覧ページIDと見出し階層から、その掲載位置のカテゴリを判定する。"""
+    headings = [
+        str(item.get("heading") or "").strip()
+        for item in section_path
+        if isinstance(item, dict) and item.get("heading")
+    ]
+    normalized = [re.sub(r"\s*\[[ xX✓✔]?\]\s*$", "", value).strip() for value in headings]
+    joined = " > ".join(normalized)
 
-    """
+    if index_name == "normal_eta":
+        return "normal_eta"
+    if index_name == "normal":
+        return "normal"
+    if index_name == "anomalous":
+        if any(re.search(r"番外亜階層\s*η", value) for value in normalized):
+            return "anomalous_sublevel_eta"
+        if any(re.search(r"番外階層\s*η", value) for value in normalized):
+            return "anomalous_eta"
+        if any("無印番外階層" in value or value == "番外階層" for value in normalized):
+            return "anomalous"
+        return "anomalous"
+    if index_name == "sublevel":
+        if any(re.search(r"番外亜階層\s*η", value) for value in normalized):
+            return "anomalous_sublevel_eta"
+        if any(re.search(r"通常亜階層\s*η", value) for value in normalized):
+            return "sublevel_eta"
+        if any("無印通常亜階層" in value or value == "亜階層" for value in normalized):
+            return "sublevel"
+        return "sublevel"
+    if index_name == "hierarchy":
+        if any(re.search(r"番外階層\s*η", value) for value in normalized):
+            return "anomalous_eta"
+        if any(re.search(r"通常階層\s*η", value) for value in normalized):
+            return "normal_eta"
+        if any("番外階層" in value for value in normalized):
+            return "anomalous"
+        if any("亜階層" in value for value in normalized):
+            return "sublevel_eta" if any("η" in value for value in normalized) else "sublevel"
+        if any("通常階層" in value for value in normalized):
+            return "normal"
+        # 階層一覧に分類見出しがない旧HTMLに限り、既存の一般的なη形式を補助利用する。
+        return "normal_eta" if has_eta(title) else "normal"
+    if index_name == "alias":
+        return "alias"
+    if index_name == "terms":
+        return "terms"
+    if index_name == "contest":
+        return "contest"
+    return None
 
-    title = title.strip()
 
-    index_set = set(
-        x.strip()
-        for x in indexes.split("|")
-        if x.strip()
-    )
+INDEX_SOURCE_PRIORITY = {
+    "normal_eta": 0,
+    "anomalous": 1,
+    "sublevel": 2,
+    "normal": 3,
+    "hierarchy": 4,
+    "alias": 5,
+    "terms": 6,
+    "contest": 7,
+}
 
-    eta = has_eta(
-        title
-    )
+CATEGORY_SOURCE_PRIORITY = {
+    "normal_eta": 0,
+    "anomalous_eta": 1,
+    "anomalous_sublevel_eta": 2,
+    "sublevel_eta": 3,
+    "anomalous": 4,
+    "sublevel": 5,
+    "normal": 6,
+    "alias": 7,
+    "terms": 8,
+    "contest": 9,
+}
 
-    # -------------------------------------------------------------------------
-    # 通常階層 η
-    # -------------------------------------------------------------------------
 
+def detect_category(title, indexes, index_memberships=""):
+    """Wiki一覧の掲載所属・見出し階層を一次根拠としてカテゴリを決める。"""
+    memberships = load_index_memberships(index_memberships)
+    candidates = []
+    for membership in memberships:
+        category = _membership_category(
+            str(membership.get("index_name") or ""),
+            membership.get("section_path") or [],
+            title,
+        )
+        if category:
+            index_name = str(membership.get("index_name") or "")
+            candidates.append((
+                INDEX_SOURCE_PRIORITY.get(index_name, 99),
+                CATEGORY_SOURCE_PRIORITY.get(category, 99),
+                int(membership.get("section_order") or 0),
+                int(membership.get("page_order") or 0),
+                category,
+                index_name,
+            ))
+
+    if candidates:
+        candidates.sort()
+        selected = candidates[0]
+        return selected[4], (
+            f"index={selected[5]};"
+            f"section_order={selected[2]};page_order={selected[3]}"
+        )
+
+    index_set = {value.strip() for value in indexes.split("|") if value.strip()}
     if "normal_eta" in index_set:
-        return (
-            "normal_eta",
-            "index=normal_eta"
-        )
-
-    # -------------------------------------------------------------------------
-    # 番外階層 η
-    # -------------------------------------------------------------------------
-
-    if "anomalous" in index_set and eta:
-        return (
-            "anomalous_eta",
-            "index=anomalous + title_eta"
-        )
-
-    # -------------------------------------------------------------------------
-    # 亜階層 η
-    # -------------------------------------------------------------------------
-
-    if "sublevel" in index_set and eta:
-        return (
-            "sublevel_eta",
-            "index=sublevel + title_eta"
-        )
-
-    # -------------------------------------------------------------------------
-    # 番外階層
-    # -------------------------------------------------------------------------
-
+        return "normal_eta", "legacy_index=normal_eta"
     if "anomalous" in index_set:
-        return (
-            "anomalous",
-            "index=anomalous"
-        )
-
-    # -------------------------------------------------------------------------
-    # 亜階層
-    # -------------------------------------------------------------------------
-
+        category = "anomalous_eta" if has_eta(title) else "anomalous"
+        return category, "legacy_index=anomalous_without_section"
     if "sublevel" in index_set:
-        return (
-            "sublevel",
-            "index=sublevel"
-        )
-
-    # -------------------------------------------------------------------------
-    # 階層一覧
-    # -------------------------------------------------------------------------
-
-    if "hierarchy" in index_set:
-
-        if eta:
-            return (
-                "normal_eta",
-                "index=hierarchy + title_eta"
-            )
-
-        return (
-            "normal",
-            "index=hierarchy"
-        )
-
-    # -------------------------------------------------------------------------
-    # 翻訳一覧しかない場合
-    # -------------------------------------------------------------------------
-
+        category = "sublevel_eta" if has_eta(title) else "sublevel"
+        return category, "legacy_index=sublevel_without_section"
+    if "normal" in index_set or "hierarchy" in index_set:
+        return ("normal_eta" if has_eta(title) else "normal"), "legacy_hierarchy_fallback"
+    if "alias" in index_set:
+        return "alias", "legacy_index=alias"
+    if "terms" in index_set:
+        return "terms", "legacy_index=terms"
+    if "contest" in index_set:
+        return "contest", "legacy_index=contest"
     if "translation" in index_set:
-
-        if eta:
-            return (
-                "normal_eta",
-                "index=translation + title_eta"
-            )
-
-        return (
-            "unknown",
-            "index=translation_only"
-        )
-
-    # -------------------------------------------------------------------------
-    # 不明
-    # -------------------------------------------------------------------------
-
-    return (
-        "unknown",
-        "no_matching_index"
-    )
+        return "unknown", "index=translation_only"
+    return "unknown", "no_matching_index"
 
 
 # =============================================================================
@@ -322,10 +335,25 @@ def classify_row(row):
         or ""
     ).strip()
 
+    index_memberships = row.get("index_memberships") or "[]"
     category, category_reason = detect_category(
         title,
-        indexes
+        indexes,
+        index_memberships,
     )
+    selected_membership = {}
+    selected_index = category_reason.split(";", 1)[0]
+    if selected_index.startswith("index="):
+        selected_index = selected_index[len("index="):]
+    for membership in load_index_memberships(index_memberships):
+        if membership.get("index_name") == selected_index:
+            selected_membership = membership
+            break
+    section_path = json.dumps(
+        selected_membership.get("section_path", []), ensure_ascii=False
+    ) if selected_membership else row.get("section_path", "[]")
+    section_order = selected_membership.get("section_order", row.get("section_order", "0"))
+    page_order = selected_membership.get("page_order", row.get("page_order", "0"))
 
     source_type = detect_source_type(
         title,
@@ -390,6 +418,10 @@ def classify_row(row):
         "title": title,
         "url": row.get("url", ""),
         "indexes": indexes,
+        "index_memberships": index_memberships,
+        "section_path": section_path,
+        "section_order": section_order,
+        "page_order": page_order,
         "category": category,
         "language": language,
         "source_type": source_type,
@@ -446,6 +478,10 @@ def save_csv(
         "title",
         "url",
         "indexes",
+        "index_memberships",
+        "section_path",
+        "section_order",
+        "page_order",
         "category",
         "language",
         "source_type",

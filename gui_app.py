@@ -72,11 +72,12 @@ APP_SETTINGS = AppSettingsStore(BASE_DIR / "database" / "app_settings.json")
 # 🌟 ご指定のカテゴリ優先順位（日本独自階層 η を最優先）
 CATEGORY_PRIORITY = {
     "normal_eta": 1,     # 1. 通常階層 η
-    "sublevel_eta": 2,   # 2. 亜階層 η
+    "sublevel_eta": 2,   # 2. 通常亜階層 η
     "anomalous_eta": 3,  # 3. 番外階層 η
-    "normal": 4,         # 4. 通常階層 (EN翻訳)
-    "sublevel": 5,       # 5. 亜階層 (EN翻訳)
-    "anomalous": 6,      # 6. 番外階層 (EN翻訳)
+    "anomalous_sublevel_eta": 4,
+    "normal": 5,         # 通常階層
+    "sublevel": 6,       # 通常亜階層
+    "anomalous": 7,      # 番外階層
 }
 
 
@@ -735,6 +736,10 @@ class BackroomsAPI:
                 "source_type": page.get("source_type", ""),
                 "url": page.get("url", metadata.get("URL", "")),
                 "indexes": page.get("indexes", ""),
+                "index_memberships": page.get("index_memberships", "[]"),
+                "section_path": page.get("section_path", "[]"),
+                "section_order": page.get("section_order", "0"),
+                "page_order": page.get("page_order", "0"),
                 "language": page.get("language", "JP"),
                 "saved": bool(saved_file),
             }
@@ -2875,7 +2880,7 @@ HTML_TEMPLATE = r"""
         const metadata = metadataByTitle.get(explorerTitleKey(page.title)) || {};
         return {...metadata, ...page, saved: Boolean(metadata.saved || page.saved),
           subtitle: metadata.subtitle || page.subtitle || page.meta_title || ''};
-      }).sort(compareLevelListPages);
+      }).sort(compareWikiIndexOrder);
     }
 
     async function loadExplorerIndexPages() {
@@ -3678,12 +3683,18 @@ HTML_TEMPLATE = r"""
         // 元記事URLがない場合は出典リンクを表示しない。
       }
       const categoryNames = {
-        normal: '階層', normal_eta: '番外階層', sublevel: 'サブ階層',
-        sublevel_eta: '番外サブ階層', anomalous: '異常階層',
-        anomalous_eta: '番外異常階層', item: 'アイテム', entity: 'エンティティ',
-        phenomenon: '現象', person: '人物', dimension: '次元',
-        foreign: '外国語記事', canon: 'カノン', joke_level: 'ジョーク階層',
-        joke_article: 'ジョーク記事', foreign_joke: '外国語ジョーク'
+        normal: '無印通常階層',
+        normal_eta: '通常階層 η',
+        sublevel: '無印通常亜階層',
+        sublevel_eta: '通常亜階層 η',
+        anomalous: '無印番外階層',
+        anomalous_eta: '番外階層 η',
+        anomalous_sublevel_eta: '番外亜階層 η',
+        alias: '別名', terms: '用語', contest: 'コンテスト',
+        item: '物品', entity: 'エンティティ', phenomenon: '現象',
+        person: '人物', dimension: '次元', foreign: '国外階層',
+        canon: 'カノン', joke_level: 'ジョーク階層',
+        joke_article: 'ジョーク記事', foreign_joke: '国外ジョーク記事'
       };
       const isItemArticle = d.category === 'item';
       const isTranslation = d.source_type === 'translation';
@@ -3856,6 +3867,8 @@ HTML_TEMPLATE = r"""
       {id: "alias", title: "別名の一覧", visual: "別名", wikiTitle: "別名の一覧",
         imageUrl: "https://static.wikia.nocookie.net/backrooms/images/1/10/%E9%9D%92%E3%81%8D%E6%B0%BE%E6%BF%AB.png/revision/latest/scale-to-width-down/360?cb=20230204154413&path-prefix=ja",
         imagePageUrl: "https://backrooms.fandom.com/ja/wiki/ファイル:青き氾濫.png"},
+      {id: "terms", title: "用語の一覧", visual: "用語", wikiTitle: "用語の一覧",
+        imageUrl: "", imagePageUrl: ""},
       {id: "translation", title: "翻訳の一覧", visual: "翻訳", wikiTitle: "翻訳の一覧",
         imageUrl: "https://static.wikia.nocookie.net/backrooms/images/4/4d/Wilshire_Boulevard_at_Hope_Street%2C_downtown_Los_Angeles%2C_California.jpg/revision/latest/scale-to-width-down/360?cb=20220411112616&path-prefix=ja",
         imagePageUrl: "https://backrooms.fandom.com/ja/wiki/ファイル:Wilshire_Boulevard_at_Hope_Street,_downtown_Los_Angeles,_California.jpg"},
@@ -3865,6 +3878,10 @@ HTML_TEMPLATE = r"""
     ];
 
     const levelListCategoryLabels = {
+      anomalous_sublevel_eta: "番外亜階層 η",
+      alias: "別名",
+      terms: "用語",
+      contest: "コンテスト",
       foreign: "国外階層",
       dimension: "次元",
       entity: "エンティティ",
@@ -3886,6 +3903,10 @@ HTML_TEMPLATE = r"""
       return Array.from(byUrl.values());
     }
 
+    function pageHasIndexMembership(page, indexName) {
+      return String(page.indexes || "").split("|").map(value => value.trim()).includes(indexName);
+    }
+
     function normalizeExplorerCategory(value) {
       const category = String(value || '').trim().toLocaleLowerCase();
       if (/番外.*亜階層|anomalous_sublevel/.test(category)) return 'anomalous_sublevel_eta';
@@ -3902,6 +3923,7 @@ HTML_TEMPLATE = r"""
       const pages = sourcePages.filter(page => {
         const category = normalizeExplorerCategory(page.category);
         const source = String(page.source_type || "").toLowerCase();
+        const sources = source.split("|").map(value => value.trim());
         const title = String(page.title || "");
         if (categoryId === "all") return true;
         if (categoryId === "normal") {
@@ -3911,20 +3933,23 @@ HTML_TEMPLATE = r"""
           return category === "normal_eta" && source !== "translation";
         }
         if (categoryId === "anomalous") {
-          return source !== "translation" && category.startsWith("anomalous");
+          return source !== "translation" && ["anomalous", "anomalous_eta"].includes(category);
         }
         if (categoryId === "sublevel") {
           return source !== "translation" &&
-            (category.startsWith("sublevel") || category.startsWith("anomalous_sublevel"));
+            ["sublevel", "sublevel_eta", "anomalous_sublevel_eta"].includes(category);
         }
         if (categoryId === "translation") {
-          return source === "translation" || category === "translation";
+          return sources.includes("translation") || category === "translation";
         }
         if (categoryId === "alias") {
-          return category === "alias" || source === "alias";
+          return category === "alias" || source === "alias" || pageHasIndexMembership(page, "alias");
+        }
+        if (categoryId === "terms") {
+          return category === "terms" || source === "terms" || pageHasIndexMembership(page, "terms");
         }
         if (categoryId === "contest") {
-          return category === "contest" || category === "contest_level";
+          return category === "contest" || category === "contest_level" || pageHasIndexMembership(page, "contest");
         }
         return category === categoryId;
       });
@@ -4094,37 +4119,75 @@ HTML_TEMPLATE = r"""
       return String(left.title).localeCompare(String(right.title), "ja", {numeric: true});
     }
 
+    function compareWikiIndexOrder(left, right) {
+      const sectionOrder = Number(left.section_order || 0) - Number(right.section_order || 0);
+      if (sectionOrder) return sectionOrder;
+      const pageOrder = Number(left.page_order || 0) - Number(right.page_order || 0);
+      if (pageOrder) return pageOrder;
+      return compareLevelListPages(left, right);
+    }
+
+    function getWikiMembership(page, indexName = "") {
+      if (!indexName) return null;
+      try {
+        const memberships = JSON.parse(page.index_memberships || "[]");
+        return Array.isArray(memberships)
+          ? memberships.find(item => item && item.index_name === indexName) || null
+          : null;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function getWikiSectionHeading(page, indexName = "") {
+      try {
+        const membership = getWikiMembership(page, indexName);
+        const path = membership?.section_path || JSON.parse(page.section_path || "[]");
+        if (Array.isArray(path) && path.length) {
+          const heading = path[path.length - 1]?.heading;
+          if (heading) return String(heading).replace(/\s*\[[ xX✓✔]?\]\s*$/, "").trim();
+        }
+      } catch (_) {}
+      return page.category_label || page.category || "その他";
+    }
+
+    function compareWikiMembershipOrder(left, right, indexName = "") {
+      const leftMembership = getWikiMembership(left, indexName) || left;
+      const rightMembership = getWikiMembership(right, indexName) || right;
+      const sectionOrder = Number(leftMembership.section_order || 0) - Number(rightMembership.section_order || 0);
+      if (sectionOrder) return sectionOrder;
+      const pageOrder = Number(leftMembership.page_order || 0) - Number(rightMembership.page_order || 0);
+      if (pageOrder) return pageOrder;
+      return compareLevelListPages(left, right);
+    }
+
     function getLevelListSections(pages, categoryId = currentLevelListCategory) {
-      if (categoryId === "anomalous" || categoryId === "sublevel") {
-        const categoryOrder = categoryId === "anomalous"
-          ? ["anomalous", "anomalous_eta", "anomalous_pl", "anomalous_ua"]
-          : ["sublevel", "sublevel_eta", "anomalous_sublevel_eta"];
+      if (["anomalous", "sublevel", "alias", "terms", "contest"].includes(categoryId)) {
         const groups = new Map();
+        const sectionIndex = {alias: "alias", terms: "terms", contest: "contest"}[categoryId] || "";
         pages.forEach(page => {
-          const category = normalizeExplorerCategory(page.category);
-          if (!groups.has(category)) {
-            let title = page.category_label || category;
-            if (category === "anomalous") title = "無印番外階層";
-            if (category === "anomalous_eta") title = "番外階層 η";
-            if (category === "sublevel") title = "無印通常亜階層";
-            if (category === "sublevel_eta") title = "通常亜階層 η";
-            if (category === "anomalous_sublevel_eta") title = "番外亜階層 η";
-            groups.set(category, {key: category, title, pages: []});
+          const title = getWikiSectionHeading(page, sectionIndex);
+          const key = title || normalizeExplorerCategory(page.category);
+          if (!groups.has(key)) {
+            groups.set(key, {
+              key,
+              title,
+              order: Number((getWikiMembership(page, sectionIndex) || page).section_order || 0),
+              pages: [],
+            });
           }
-          groups.get(category).pages.push(page);
+          groups.get(key).pages.push(page);
         });
-        return Array.from(groups.values()).sort((left, right) => {
-          const leftIndex = categoryOrder.indexOf(left.key);
-          const rightIndex = categoryOrder.indexOf(right.key);
-          return (leftIndex < 0 ? categoryOrder.length : leftIndex) -
-            (rightIndex < 0 ? categoryOrder.length : rightIndex);
-        });
+        return Array.from(groups.values())
+          .map(group => ({...group, pages: group.pages.sort((left, right) => compareWikiMembershipOrder(left, right, sectionIndex))}))
+          .sort((left, right) => left.order - right.order || left.key.localeCompare(right.key, "ja"));
       }
 
       if (categoryId === "all") {
         const categoryOrder = ["normal", "normal_eta", "anomalous", "anomalous_eta",
-          "sublevel", "sublevel_eta", "dimension", "foreign", "entity", "item",
-          "phenomenon", "canon", "joke_level", "joke_article", "person"];
+          "sublevel", "sublevel_eta", "anomalous_sublevel_eta", "alias", "terms", "contest",
+          "dimension", "foreign", "entity", "item", "phenomenon", "canon",
+          "joke_level", "joke_article", "person"];
         const groups = new Map();
         pages.forEach(page => {
           const category = normalizeExplorerCategory(page.category);
@@ -4137,12 +4200,14 @@ HTML_TEMPLATE = r"""
           }
           groups.get(category).pages.push(page);
         });
-        return Array.from(groups.values()).sort((left, right) => {
-          const leftIndex = categoryOrder.indexOf(left.key);
-          const rightIndex = categoryOrder.indexOf(right.key);
-          return (leftIndex < 0 ? categoryOrder.length : leftIndex) -
-            (rightIndex < 0 ? categoryOrder.length : rightIndex);
-        });
+        return Array.from(groups.values())
+          .map(group => ({...group, pages: group.pages.sort(compareWikiIndexOrder)}))
+          .sort((left, right) => {
+            const leftIndex = categoryOrder.indexOf(left.key);
+            const rightIndex = categoryOrder.indexOf(right.key);
+            return (leftIndex < 0 ? categoryOrder.length : leftIndex) -
+              (rightIndex < 0 ? categoryOrder.length : rightIndex);
+          });
       }
 
       const groups = new Map();
@@ -4209,7 +4274,7 @@ HTML_TEMPLATE = r"""
       const categoryPages = levelListPagesForCategory(currentLevelListCategory);
       visibleLevelListPages = categoryPages
         .filter(page => !query || page.title.toLocaleLowerCase().includes(query))
-        .sort(compareLevelListPages);
+        .sort(compareWikiIndexOrder);
       const sections = getLevelListSections(visibleLevelListPages);
       if (!sections.length) {
         const message = document.createElement('p');

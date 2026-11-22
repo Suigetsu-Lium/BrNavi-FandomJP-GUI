@@ -54,6 +54,7 @@ index_html/ 内に保存されたFandom JPの各種一覧HTMLを解析し、
 
 
 import csv
+import json
 import os
 import re
 import sys
@@ -140,10 +141,14 @@ WIKI_PREFIX = (
 
 INDEX_FILES = {
     "hierarchy": "hierarchy.html",
-    "translation": "translation.html",
+    "normal": "normal.html",
     "normal_eta": "normal_eta.html",
     "anomalous": "anomalous.html",
     "sublevel": "sublevel.html",
+    "alias": "alias.html",
+    "terms": "terms.html",
+    "translation": "translation.html",
+    "contest": "contest.html",
 }
 
 
@@ -813,171 +818,70 @@ def extract_links_from_html(
     index_name
 ):
     """
-    一覧HTMLからWiki記事リンクを抽出する。
-
-    Returns
-    -------
-    list[dict]
-
-        {
-            "title": str,
-            "meta_title": str,
-            "meta_title_ja": str,
-            "url": str,
-            "index_name": str
-        }
+    一覧HTMLからWiki記事リンクを抽出し、DOM上の見出し経路と掲載順を保持する。
     """
 
-    soup = BeautifulSoup(
-        html,
-        "html.parser"
-    )
-
-    # -------------------------------------------------------------------------
-    # 本文領域
-    # -------------------------------------------------------------------------
-
-    roots = find_content_roots(
-        soup
-    )
-
-    if not roots:
-
-        roots = [
-            soup
-        ]
-
+    soup = BeautifulSoup(html, "html.parser")
+    roots = find_content_roots(soup)
+    root = roots[0] if roots else soup
     results = []
-
     seen_urls = set()
+    heading_stack = []
+    section_order = 0
+    page_order = 0
+    heading_names = {"h1", "h2", "h3", "h4", "h5", "h6"}
 
-    # -------------------------------------------------------------------------
-    # リンク探索
-    # -------------------------------------------------------------------------
+    # 見出しとリンクを同じDOM順で走査する。タイトル推測ではなく、
+    # そのリンク直前に有効なWiki見出し階層を一次情報として保持する。
+    for element in root.find_all(list(heading_names) + ["a"]):
+        if element.name in heading_names:
+            level = int(element.name[1])
+            heading = clean_text(element.get_text(" ", strip=True))
+            heading_stack = [
+                item for item in heading_stack if item["level"] < level
+            ]
+            if heading:
+                heading_stack.append({"level": level, "heading": heading})
+                section_order += 1
+                page_order = 0
+            continue
 
-    for root in roots:
+        url = normalize_url(element.get("href"))
+        if not url or not is_wiki_page(url) or is_excluded_url(url):
+            continue
 
-        for anchor in root.find_all(
-            "a",
-            href=True
-        ):
+        anchor_title = extract_page_title_from_anchor(element)
+        if not anchor_title or url in seen_urls:
+            continue
 
-            href = anchor.get(
-                "href"
-            )
+        context = get_listing_context(element)
+        parsed_title, meta_title, meta_title_ja = parse_listing_text(
+            context, anchor_title
+        )
+        parsed_title = parsed_title or anchor_title
+        if is_excluded_title(parsed_title):
+            continue
 
-            # -----------------------------------------------------------------
-            # URL
-            # -----------------------------------------------------------------
-
-            url = normalize_url(
-                href
-            )
-
-            if not url:
-
-                continue
-
-            if not is_wiki_page(
-                url
-            ):
-
-                continue
-
-            if is_excluded_url(
-                url
-            ):
-
-                continue
-
-            # -----------------------------------------------------------------
-            # Anchor title
-            # -----------------------------------------------------------------
-
-            anchor_title = (
-                extract_page_title_from_anchor(
-                    anchor
-                )
-            )
-
-            if not anchor_title:
-
-                continue
-
-            # -----------------------------------------------------------------
-            # 一覧コンテキスト
-            # -----------------------------------------------------------------
-
-            context = (
-                get_listing_context(
-                    anchor
-                )
-            )
-
-            # -----------------------------------------------------------------
-            # title / meta_title / meta_title_ja
-            # -----------------------------------------------------------------
-
-            (
-                parsed_title,
-                meta_title,
-                meta_title_ja
-            ) = parse_listing_text(
-                context,
-                anchor_title
-            )
-
-            # -----------------------------------------------------------------
-            # titleのfallback
-            # -----------------------------------------------------------------
-
-            if not parsed_title:
-
-                parsed_title = (
-                    anchor_title
-                )
-
-            # -----------------------------------------------------------------
-            # 除外
-            # -----------------------------------------------------------------
-
-            if is_excluded_title(
-                parsed_title
-            ):
-
-                continue
-
-            # -----------------------------------------------------------------
-            # URL重複
-            # -----------------------------------------------------------------
-
-            if url in seen_urls:
-
-                continue
-
-            seen_urls.add(
-                url
-            )
-
-            # -----------------------------------------------------------------
-            # 結果
-            # -----------------------------------------------------------------
-
-            results.append({
-
-                "title": parsed_title,
-
-                "meta_title": meta_title,
-
-                "meta_title_ja": (
-                    meta_title_ja
-                ),
-
-                "url": url,
-
-                "index_name": index_name,
-
-            })
+        seen_urls.add(url)
+        page_order += 1
+        section_path = [dict(item) for item in heading_stack]
+        membership = {
+            "index_name": index_name,
+            "section_path": section_path,
+            "section_order": section_order,
+            "page_order": page_order,
+        }
+        results.append({
+            "title": parsed_title,
+            "meta_title": meta_title,
+            "meta_title_ja": meta_title_ja,
+            "url": url,
+            "index_name": index_name,
+            "section_path": json.dumps(section_path, ensure_ascii=False),
+            "section_order": section_order,
+            "page_order": page_order,
+            "index_memberships": json.dumps([membership], ensure_ascii=False),
+        })
 
     return results
 
@@ -1185,183 +1089,87 @@ def save_csv(
 # URL統合
 # =============================================================================
 
-def merge_link_rows(
-    all_rows
-):
-    """
-    URL単位で重複を統合する。
-
-    同一URLが複数一覧に存在する場合:
-
-        indexes = hierarchy|normal_eta
-
-    とする。
-
-    meta_title / meta_title_ja は、
-    空欄でない値を優先して保持する。
-    """
-
+def merge_link_rows(all_rows):
+    """URL単位で統合し、全一覧の見出し所属と元の掲載順を保持する。"""
     merged = {}
 
     for row in all_rows:
-
-        url = row.get(
-            "url",
-            ""
-        )
-
-        if is_excluded_url(
-            url
-        ):
-
+        url = row.get("url", "")
+        if is_excluded_url(url):
             continue
 
-        title = clean_text(
-            row.get(
-                "title",
-                ""
-            )
-        )
-
-        if is_excluded_title(
-            title
-        ):
-
+        title = clean_text(row.get("title", ""))
+        if is_excluded_title(title):
             continue
 
-        meta_title = clean_meta_text(
-            row.get(
-                "meta_title",
-                ""
-            )
-        )
+        index_name = clean_text(row.get("index_name", ""))
+        try:
+            memberships = json.loads(row.get("index_memberships") or "[]")
+        except (TypeError, ValueError):
+            memberships = []
 
-        meta_title_ja = clean_meta_text(
-            row.get(
-                "meta_title_ja",
-                ""
-            )
-        )
-
-        index_name = clean_text(
-            row.get(
-                "index_name",
-                ""
-            )
-        )
-
-        # ---------------------------------------------------------------------
-        # 新規
-        # ---------------------------------------------------------------------
+        if not memberships and index_name:
+            try:
+                section_path = json.loads(row.get("section_path") or "[]")
+            except (TypeError, ValueError):
+                section_path = []
+            memberships = [{
+                "index_name": index_name,
+                "section_path": section_path,
+                "section_order": int(row.get("section_order") or 0),
+                "page_order": int(row.get("page_order") or 0),
+            }]
 
         if url not in merged:
-
             merged[url] = {
-
                 "title": title,
-
-                "meta_title": meta_title,
-
-                "meta_title_ja": meta_title_ja,
-
+                "meta_title": clean_meta_text(row.get("meta_title", "")),
+                "meta_title_ja": clean_meta_text(row.get("meta_title_ja", "")),
                 "url": url,
-
-                "indexes": (
-                    [index_name]
-                    if index_name
-                    else []
-                ),
-
+                "indexes": [],
+                "memberships": [],
             }
 
-            continue
+        item = merged[url]
+        if not item["title"] and title:
+            item["title"] = title
+        if not item["meta_title"]:
+            item["meta_title"] = clean_meta_text(row.get("meta_title", ""))
+        if not item["meta_title_ja"]:
+            item["meta_title_ja"] = clean_meta_text(row.get("meta_title_ja", ""))
+        if index_name and index_name not in item["indexes"]:
+            item["indexes"].append(index_name)
 
-        # ---------------------------------------------------------------------
-        # title
-        # ---------------------------------------------------------------------
-
-        if (
-            not merged[url]["title"]
-            and title
-        ):
-
-            merged[url]["title"] = title
-
-        # ---------------------------------------------------------------------
-        # meta_title
-        # ---------------------------------------------------------------------
-
-        if (
-            not merged[url]["meta_title"]
-            and meta_title
-        ):
-
-            merged[url]["meta_title"] = (
-                meta_title
-            )
-
-        # ---------------------------------------------------------------------
-        # meta_title_ja
-        # ---------------------------------------------------------------------
-
-        if (
-            not merged[url]["meta_title_ja"]
-            and meta_title_ja
-        ):
-
-            merged[url]["meta_title_ja"] = (
-                meta_title_ja
-            )
-
-        # ---------------------------------------------------------------------
-        # indexes
-        # ---------------------------------------------------------------------
-
-        if (
-            index_name
-            and index_name
-            not in merged[url]["indexes"]
-        ):
-
-            merged[url]["indexes"].append(
-                index_name
-            )
+        for membership in memberships:
+            if not isinstance(membership, dict):
+                continue
+            membership = {
+                "index_name": clean_text(membership.get("index_name") or index_name),
+                "section_path": membership.get("section_path") or [],
+                "section_order": int(membership.get("section_order") or 0),
+                "page_order": int(membership.get("page_order") or 0),
+            }
+            if membership["index_name"] and membership not in item["memberships"]:
+                item["memberships"].append(membership)
 
     result = []
-
     for item in merged.values():
-
+        memberships = item["memberships"]
+        primary = memberships[0] if memberships else {}
+        section_path = primary.get("section_path", [])
         result.append({
-
             "title": item["title"],
-
-            "meta_title": (
-                item["meta_title"]
-            ),
-
-            "meta_title_ja": (
-                item["meta_title_ja"]
-            ),
-
+            "meta_title": item["meta_title"],
+            "meta_title_ja": item["meta_title_ja"],
             "url": item["url"],
-
-            "indexes": "|".join(
-                item["indexes"]
-            ),
-
+            "indexes": "|".join(item["indexes"]),
+            "index_memberships": json.dumps(memberships, ensure_ascii=False),
+            "section_path": json.dumps(section_path, ensure_ascii=False),
+            "section_order": primary.get("section_order", 0),
+            "page_order": primary.get("page_order", 0),
         })
 
-    # -------------------------------------------------------------------------
-    # タイトル順
-    # -------------------------------------------------------------------------
-
-    result.sort(
-        key=lambda x: (
-            x["title"].casefold(),
-            x["url"]
-        )
-    )
-
+    # dictの挿入順を維持する。これは一覧群・一覧内のDOM掲載順である。
     return result
 
 
@@ -1681,6 +1489,10 @@ def main():
             "meta_title_ja",
             "url",
             "indexes",
+            "index_memberships",
+            "section_path",
+            "section_order",
+            "page_order",
         ]
     )
 
@@ -1713,6 +1525,10 @@ def main():
             "meta_title_ja",
             "url",
             "indexes",
+            "index_memberships",
+            "section_path",
+            "section_order",
+            "page_order",
         ]
     )
 

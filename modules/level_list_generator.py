@@ -34,6 +34,7 @@ level_lists/
 
 
 import csv
+import json
 import os
 from collections import defaultdict
 
@@ -72,6 +73,10 @@ CATEGORY_ORDER = [
     "sublevel_eta",
     "anomalous",
     "anomalous_eta",
+    "anomalous_sublevel_eta",
+    "alias",
+    "terms",
+    "contest",
     "foreign",
     "dimension",
     "entity",
@@ -87,17 +92,25 @@ CATEGORY_ORDER = [
 
 
 CATEGORY_LABELS = {
-    "normal": "通常階層",
+    "normal": "無印通常階層",
 
     "normal_eta": "通常階層 η",
 
-    "sublevel": "亜階層",
+    "sublevel": "無印通常亜階層",
 
-    "sublevel_eta": "亜階層 η",
+    "sublevel_eta": "通常亜階層 η",
 
-    "anomalous": "番外階層",
+    "anomalous": "無印番外階層",
 
     "anomalous_eta": "番外階層 η",
+
+    "anomalous_sublevel_eta": "番外亜階層 η",
+
+    "alias": "別名",
+
+    "terms": "用語",
+
+    "contest": "コンテスト",
 
     "foreign": "国外階層",
 
@@ -302,9 +315,18 @@ def build_language_database(
             row
         )
 
-        categories = get_categories(
-            row
-        )
+        categories = get_categories(row)
+        try:
+            memberships = json.loads(row.get("index_memberships") or "[]")
+        except (TypeError, ValueError):
+            memberships = []
+        if isinstance(memberships, list):
+            for membership in memberships:
+                if not isinstance(membership, dict):
+                    continue
+                index_name = clean(membership.get("index_name"))
+                if index_name in {"alias", "terms", "contest"} and index_name not in categories:
+                    categories.append(index_name)
 
         for language in languages:
 
@@ -321,6 +343,26 @@ def build_language_database(
                 ][category].add(
                     url
                 )
+
+                category_membership = next(
+                    (
+                        item for item in memberships
+                        if isinstance(item, dict)
+                        and item.get("index_name") == category
+                    ),
+                    None,
+                )
+                if category_membership:
+                    section_path = json.dumps(
+                        category_membership.get("section_path") or [],
+                        ensure_ascii=False,
+                    )
+                    section_order = str(category_membership.get("section_order") or 0)
+                    page_order = str(category_membership.get("page_order") or 0)
+                else:
+                    section_path = clean(row.get("section_path"))
+                    section_order = clean(row.get("section_order")) or "0"
+                    page_order = clean(row.get("page_order")) or "0"
 
                 database[
                     language
@@ -342,6 +384,10 @@ def build_language_database(
                             "translation_section"
                         )
                     ),
+                    "index_memberships": clean(row.get("index_memberships")),
+                    "section_path": section_path,
+                    "section_order": section_order,
+                    "page_order": page_order,
                 })
 
     return database
@@ -355,18 +401,15 @@ def sort_pages(
     pages
 ):
     """
-    タイトルの文字列順で並べる。
-
-    Level 100 / Level 20 のような数値順には
-    あえて変更しない。
-
-    各言語版で命名規則が違うため、
-    現時点では「実際のタイトル順」を優先する。
+    一覧所属のセクション順・記事掲載順を優先する。
+    一覧順序を持たない旧データや翻訳データのみ、タイトル順を補助利用する。
     """
 
     return sorted(
         pages,
         key=lambda row: (
+            int(row.get("section_order") or 0),
+            int(row.get("page_order") or 0),
             row["title"].casefold(),
             row["url"]
         )
@@ -524,6 +567,13 @@ def save_language_txt(
                         f"TRANSLATION_SECTION: "
                         f"{page['translation_section']}\n"
                     )
+
+                if page.get("index_memberships"):
+                    f.write(f"      INDEX_MEMBERSHIPS: {page['index_memberships']}\n")
+                if page.get("section_path"):
+                    f.write(f"      SECTION_PATH: {page['section_path']}\n")
+                f.write(f"      SECTION_ORDER: {page.get('section_order', '0')}\n")
+                f.write(f"      PAGE_ORDER: {page.get('page_order', '0')}\n")
 
                 f.write(
                     "\n"

@@ -32,6 +32,7 @@ Fandom JP内に存在するページを1つのマスターデータベースに�
 
 
 import csv
+import json
 import os
 
 from modules.runtime_paths import get_application_dir
@@ -85,6 +86,10 @@ FIELDNAMES = [
     "language",
     "source_type",
     "indexes",
+    "index_memberships",
+    "section_path",
+    "section_order",
+    "page_order",
     "translation_section",
     "section_number",
     "classification_reason",
@@ -154,6 +159,10 @@ def make_record(
     language="unknown",
     source_type="",
     indexes="",
+    index_memberships="[]",
+    section_path="[]",
+    section_order="0",
+    page_order="0",
     translation_section="",
     section_number="",
     classification_reason="",
@@ -169,6 +178,10 @@ def make_record(
         "language": clean(language) or "unknown",
         "source_type": clean(source_type),
         "indexes": clean(indexes),
+        "index_memberships": clean(index_memberships) or "[]",
+        "section_path": clean(section_path) or "[]",
+        "section_order": clean(section_order) or "0",
+        "page_order": clean(page_order) or "0",
         "translation_section": clean(
             translation_section
         ),
@@ -221,6 +234,22 @@ def merge_pipe_values(
 # =============================================================================
 # 2レコード統合
 # =============================================================================
+
+def merge_membership_json(old_value, new_value):
+    """JSON形式の一覧所属を重複なく統合し、元の掲載順を維持する。"""
+    merged = []
+    for raw_value in (old_value, new_value):
+        try:
+            items = json.loads(raw_value or "[]")
+        except (TypeError, ValueError):
+            items = []
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, dict) and item not in merged:
+                merged.append(item)
+    return json.dumps(merged, ensure_ascii=False)
+
 
 def merge_two_records(
     base,
@@ -293,6 +322,14 @@ def merge_two_records(
         result["indexes"],
         incoming["indexes"]
     )
+    result["index_memberships"] = merge_membership_json(
+        result.get("index_memberships", "[]"),
+        incoming.get("index_memberships", "[]"),
+    )
+    if result.get("section_order", "0") in {"", "0"} and incoming.get("section_order"):
+        result["section_path"] = incoming.get("section_path", "[]")
+        result["section_order"] = incoming.get("section_order", "0")
+        result["page_order"] = incoming.get("page_order", "0")
 
     # -------------------------------------------------------------------------
     # translation_section
@@ -355,6 +392,10 @@ def add_classified_records(
             language=row.get("language"),
             source_type=row.get("source_type"),
             indexes=row.get("indexes"),
+            index_memberships=row.get("index_memberships", "[]"),
+            section_path=row.get("section_path", "[]"),
+            section_order=row.get("section_order", "0"),
+            page_order=row.get("page_order", "0"),
             classification_reason=row.get(
                 "classification_reason"
             ),
@@ -448,6 +489,8 @@ def save_master_csv(
         key=lambda row: (
             row["language"],
             row["category"],
+            int(row.get("section_order") or 0),
+            int(row.get("page_order") or 0),
             row["title"].lower(),
             row["url"],
         )

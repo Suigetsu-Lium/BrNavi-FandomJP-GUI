@@ -362,11 +362,15 @@ Node IDはCanonical URLがある場合はURL由来、ない場合は保守的に
 
 ### 5. 一覧分類と図鑑分類
 
-一覧HTMLは `index_parser.py` 等でMaster/分類済みCSVへ変換され、`operations.py` は `parsed_index/pages_master.csv` を優先してHTML取得タブのページ一覧を構築します。Master CSVがない旧インストールでは `level_lists/*.txt` を互換入力として読みます。
+一覧HTMLは `index_collector.py` が9ページ（階層、無印通常階層、通常階層η、番外階層、亜階層、別名、用語、翻訳、コンテスト）を `index_html/` に取得し、`index_parser.py` がDOM順に見出しと記事リンクを走査します。各記事所属には一覧ID、見出し階層（h1～h6のパンくず）、セクション順、セクション内掲載順を保持します。
 
-カテゴリ値は文字列の表示ラベルだけでなく、`normal`、`normal_eta`、`anomalous`、`anomalous_eta`、`sublevel`、`sublevel_eta` 等の内部IDとして扱います。翻訳・言語・source_type等の情報もページ行に保持されます。
+`all_links.csv`、`pages_database.csv`、`pages_database_classified.csv` は `index_memberships` JSON列と `section_path`、`section_order`、`page_order` を持ちます。同じURLが複数一覧に掲載される場合、所属情報を失わず統合します。URLの重複統合時にタイトル順へ並べ替えず、一覧群とDOMの出現順を維持します。
 
-Python分類器 `classify_pages.py` は一覧所属INDEXとタイトル末尾のηを組み合わせてカテゴリを決定します。少なくとも現行コードでは、`anomalous` INDEXかつηタイトルの場合に `anomalous_eta` を返す分岐があります。一方、GUIのHTML取得タブには独自の `normalizeExplorerCategory()` と `levelListPagesForCategory()` があり、図鑑側にもカテゴリ正規化・表示ラベル処理があります。分類ロジックが複数箇所に存在するため、同一ページの一覧・図鑑タイル・詳細見出しで異なる分類になる可能性があります。
+`classify_pages.py` は記事名の個別例外やη末尾判定を分類の根拠にせず、一覧IDとその見出し階層を優先します。専門一覧（通常階層η、番外階層、亜階層、無印通常階層）を包括的な階層一覧より優先し、各掲載情報と選択した分類根拠をMaster DBへ引き継ぎます。既存互換の内部カテゴリID（`normal`、`normal_eta`、`anomalous`、`anomalous_eta`、`sublevel`、`sublevel_eta`、`anomalous_sublevel_eta` 等）は維持します。
+
+`merge_databases.py` は `index_memberships` と選択されたセクション経路・順序を `pages_master.csv` へ統合します。`database.py` と `operations.py` は同じ列を読み込み、GUIのHTML取得タブ・図鑑一覧へ渡します。`level_list_generator.py` はカテゴリラベルと一覧掲載順を保持した互換TXTも生成します。翻訳一覧は `translation_parser.py` が見出しの親子関係を「親 > 子」の経路として保持し、翻訳分類器は末尾の見出しを分類対象として解釈します。
+
+日本語表示ラベルは内部IDから一元的に解決し、「無印通常階層」「通常階層 η」「無印通常亜階層」「通常亜階層 η」「無印番外階層」「番外階層 η」「番外亜階層 η」等を使用します。「異常階層」「番外異常階層」等の旧誤訳は表示しません。GUIは番外階層・亜階層の一覧で元Wikiの見出しをグループ見出しとして表示し、グループ内の掲載順を保持します。
 
 ### 6. 図鑑記事本文と画像
 
@@ -389,9 +393,9 @@ Python分類器 `classify_pages.py` は一覧所属INDEXとタイトル末尾の
 | ID | 優先度 | 対象 | 症状 | 調査上の注目点 / 完了条件 |
 | --- | --- | --- | --- | --- |
 | BUG-ROUTE-001 | 実装改修済み・手動確認待ち | 経路CSV生成・検索 | 生成側と検索側の形式不一致 | 正規3ファイル、厳密な横断検証、共通フィルター、AI経路コンテキストの整合を実装。実データでの生成・経路検索・GUI表示は開発者の手動確認待ち |
-| BUG-CLASS-001 | 高 | HTML取得タブ・図鑑一覧 | 「あの電話ボックス η」が番外階層ηではなく無印番外階層に分類される | INDEX、タイトル、Master CSV、Python分類器、GUI正規化の全段階を追跡。対象だけの例外ではなく一般規則でη分類を整合させる |
+| BUG-CLASS-001 | 実装改修済み・手動確認待ち | HTML取得タブ・図鑑一覧 | 一覧HTMLの見出し構造・掲載順が失われ、特殊なη記事やサブカテゴリが誤分類される | 9一覧の取得、見出し階層・掲載順保持、所属JSONのMaster伝達、一覧見出しに基づく一般分類、日本語表示ラベル統一を実装。開発者の実環境で再構築・GUI確認待ち |
 | BUG-ARTICLE-001 | 高 | 図鑑詳細本文 | 画像・クレジットが表示されても本文欄が「本文データがありません」になる。通常階層記事と `TH3 SH4DY GR3Y` 等で発生 | HTML本文抽出・TXT保存・ファイル検索・詳細API・描画のどこで欠落するかを特定。記事名の特例ではなく複数形式の一般的な本文抽出を修正する |
-| BUG-CLASS-002 | 中 | 番外階層の図鑑詳細見出し | 番外階層の記事なのに詳細ヘッダーが「異常階層」と表示される | 内部カテゴリIDと日本語表示ラベルのマッピングを一覧・タイル・詳細で統一する。分類自体と見出し表示を分けて検証する |
+| BUG-CLASS-002 | 実装改修済み・手動確認待ち | 番外階層の図鑑詳細見出し | 番外階層の記事なのに詳細ヘッダーが「異常階層」と表示される | 内部カテゴリIDを維持したまま、HTML取得タブ・図鑑タイル・詳細ヘッダーの日本語ラベルを統一。開発者の実環境で確認待ち |
 | DEFER-EN-001 | 次期版 | 英語版記事の危険度表示 | EN記事では生存難易度が文字画像・シンボルで示される形式があり、現行抽出が十分対応していない | 今回は実装しない。上記4件の修正完了後、次期版でENのシンボル表現を解析する。既存のZH/UAおよび一部EN翻訳記事の正常動作を維持する |
 
 ### 8. 不具合修正時の不変条件
@@ -459,3 +463,69 @@ route_migration.py は明示的に呼び出された場合だけ、正確な旧�
 ### 手動確認と制約
 
 AI側は docs/AGENTS.md に従い、テスト、モック、fixture、ダミーデータを作成・実行しません。リポジトリ内に動的生成CSVも作成・配置しません。BUG-ROUTE-001の実環境での生成、検索、旧形式停止動作、GUI、AI、CLIの動作確認は開発者が手動で実施します。実装済みであっても、実データでの動作が手動確認されるまでは完了検証済みとは扱いません。
+
+---
+
+## BUG-CLASS-001 実装確定事項（2026-11-22）
+
+### 一覧取得契約
+
+`index_collector.INDEX_PAGES` と `index_parser.INDEX_FILES` は次の9一覧を同じ内部ID・ファイル名で対応させます。
+
+| 内部ID | Wiki一覧ページ | HTML |
+| --- | --- | --- |
+| hierarchy | 階層の一覧 | hierarchy.html |
+| normal | 無印通常階層の一覧 | normal.html |
+| normal_eta | 通常階層 η の一覧 | normal_eta.html |
+| anomalous | 番外階層の一覧 | anomalous.html |
+| sublevel | 亜階層の一覧 | sublevel.html |
+| alias | 別名の一覧 | alias.html |
+| terms | 用語の一覧 | terms.html |
+| translation | 翻訳の一覧 | translation.html |
+| contest | コンテストの一覧 | contest.html |
+
+全更新は9ファイルすべての取得を試みます。HTMLを再取得しないDB再構築モードでは9ファイルすべての存在を確認し、不足時は処理を開始しません。
+
+### 一覧構造とCSV契約
+
+`index_parser.py` は本文領域のDOM順でh1～h6と記事リンクを走査します。各URLの所属単位に次を保持します。
+
+- `index_name`: 一覧ID
+- `section_path`: 見出しレベルと見出し文字列の配列
+- `section_order`: 一覧内の見出し出現順
+- `page_order`: そのセクション内の記事出現順
+
+`index_memberships` はこれらの所属情報をJSON配列として保持します。同一URLが複数一覧に掲載される場合は各所属を重複なく保持します。`all_links.csv`、`pages_database.csv`、`pages_database_classified.csv`、`pages_master.csv` は同じJSON表現と列名を使用します。CSVは従来どおりUTF-8 BOM付きです。
+
+一覧内の出現順はURL重複統合・Master統合・Level List生成・GUI表示まで保持します。掲載順をタイトル順で上書きしません。複数一覧に所属する記事の分類は専門一覧を優先し、選択された所属のsection_path/orderを表示順の基準にします。
+
+### 分類規則と表示ラベル
+
+分類の一次根拠は一覧IDとsection_pathです。記事タイトル末尾のη判定は旧データ互換の補助経路に限定し、見出し情報がある場合は参照しません。特定記事名による例外処理は禁止します。
+
+| 内部カテゴリID | 日本語表示 |
+| --- | --- |
+| normal | 無印通常階層 |
+| normal_eta | 通常階層 η |
+| sublevel | 無印通常亜階層 |
+| sublevel_eta | 通常亜階層 η |
+| anomalous | 無印番外階層 |
+| anomalous_eta | 番外階層 η |
+| anomalous_sublevel_eta | 番外亜階層 η |
+| alias | 別名 |
+| terms | 用語 |
+| contest | コンテスト |
+
+内部IDは既存互換のため変更しません。表示ラベルは `level_list_generator.py`、`operations.py`、`database.py`、`gui_app.py` で同じ日本語表記を使用します。「異常階層」「番外異常階層」「番外サブ階層」等の誤訳を新たに出力しません。
+
+### 翻訳一覧
+
+`translation_parser.py` は見出し階層を「親 > 子」のパンくずとして保持します。`translation_classifier.py` は最後の見出しを分類対象として解釈し、親見出しを含む翻訳セクション文字列をMaster DBへ残します。
+
+### GUI表示
+
+`operations.load_level_list_pages()` はMaster DBの所属JSON・見出し経路・順序をHTML取得タブへ渡します。`gui_app.py` は番外階層・亜階層の一覧で元Wikiの見出しをグループ見出しに使い、グループ順・記事順を保持します。図鑑詳細のカテゴリ表示も上表のラベルを使用します。別名・用語・翻訳・コンテストの各一覧タイルはそれぞれの取得データに対応します。
+
+### 手動確認と制約
+
+AI側は `docs/AGENTS.md` に従い、テスト、モック、fixture、ダミーデータを作成・実行しません。リポジトリ内に動的生成CSV・HTMLを作成・配置しません。一覧HTMLの取得・DB再構築・GUI表示の実データ確認は開発者が手動で実施します。AST構文確認はテスト実行ではなく構文検査として行います。実装済みであっても、実データでの手動確認が終わるまでは動作確認済みとは扱いません。

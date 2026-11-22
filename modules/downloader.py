@@ -388,6 +388,11 @@ def load_master_database():
                         )
                     ),
 
+                    "index_memberships": clean_value(row.get("index_memberships", "[]")),
+                    "section_path": clean_value(row.get("section_path", "[]")),
+                    "section_order": clean_value(row.get("section_order", "0")),
+                    "page_order": clean_value(row.get("page_order", "0")),
+
                     "translation_section": clean_value(
                         row.get(
                             "translation_section",

@@ -126,7 +126,7 @@ def detect_category(section_name):
 
     name = normalize_heading(
         section_name
-    )
+    ).split(" > ")[-1].strip()
 
     # -------------------------------------------------------------------------
     # 通常階層

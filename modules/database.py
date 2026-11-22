@@ -176,6 +176,19 @@ def load_master_database():
                         )
                     ),
 
+                    "category_label": {
+                        "normal": "無印通常階層",
+                        "normal_eta": "通常階層 η",
+                        "sublevel": "無印通常亜階層",
+                        "sublevel_eta": "通常亜階層 η",
+                        "anomalous": "無印番外階層",
+                        "anomalous_eta": "番外階層 η",
+                        "anomalous_sublevel_eta": "番外亜階層 η",
+                        "alias": "別名",
+                        "terms": "用語",
+                        "contest": "コンテスト",
+                    }.get(clean_value(row.get("category", "")), clean_value(row.get("category", ""))),
+
                     "language": clean_value(
                         row.get(
                             "language",
@@ -196,6 +209,11 @@ def load_master_database():
                             ""
                         )
                     ),
+
+                    "index_memberships": clean_value(row.get("index_memberships", "[]")),
+                    "section_path": clean_value(row.get("section_path", "[]")),
+                    "section_order": clean_value(row.get("section_order", "0")),
+                    "page_order": clean_value(row.get("page_order", "0")),
 
                     "translation_section": clean_value(
                         row.get(

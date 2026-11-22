@@ -34,30 +34,15 @@ BASE_URL = "https://backrooms.fandom.com"
 # =============================================================================
 
 INDEX_PAGES = {
-    "hierarchy": (
-        "https://backrooms.fandom.com/ja/wiki/"
-        "%E9%9A%8E%E5%B1%A4%E3%81%AE%E4%B8%80%E8%A6%A7"
-    ),
-
-    "translation": (
-        "https://backrooms.fandom.com/ja/wiki/"
-        "%E7%BF%BB%E8%A8%B3%E3%81%AE%E4%B8%80%E8%A6%A7"
-    ),
-
-    "normal_eta": (
-        "https://backrooms.fandom.com/ja/wiki/"
-        "%E9%80%9A%E5%B8%B8%E9%9A%8E%E5%B1%A4_%CE%B7_%E3%81%AE%E4%B8%80%E8%A6%A7"
-    ),
-
-    "anomalous": (
-        "https://backrooms.fandom.com/ja/wiki/"
-        "%E7%95%AA%E5%A4%96%E9%9A%8E%E5%B1%A4%E3%81%AE%E4%B8%80%E8%A6%A7"
-    ),
-
-    "sublevel": (
-        "https://backrooms.fandom.com/ja/wiki/"
-        "%E4%BA%9C%E9%9A%8E%E5%B1%A4%E3%81%AE%E4%B8%80%E8%A6%A7"
-    ),
+    "hierarchy": "https://backrooms.fandom.com/ja/wiki/階層の一覧",
+    "normal": "https://backrooms.fandom.com/ja/wiki/無印通常階層の一覧",
+    "normal_eta": "https://backrooms.fandom.com/ja/wiki/通常階層_η_の一覧",
+    "anomalous": "https://backrooms.fandom.com/ja/wiki/番外階層の一覧",
+    "sublevel": "https://backrooms.fandom.com/ja/wiki/亜階層の一覧",
+    "alias": "https://backrooms.fandom.com/ja/wiki/別名の一覧",
+    "terms": "https://backrooms.fandom.com/ja/wiki/用語の一覧",
+    "translation": "https://backrooms.fandom.com/ja/wiki/翻訳の一覧",
+    "contest": "https://backrooms.fandom.com/ja/wiki/コンテストの一覧",
 }
 
 

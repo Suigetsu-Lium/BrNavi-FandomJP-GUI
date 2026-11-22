@@ -72,14 +72,41 @@ def load_level_list_pages(language):
             row_language = str(row.get("language") or "").strip()
             if not all_languages and row_language.casefold() != language.casefold():
                 continue
+            category = str(row.get("category") or "").strip()
+            category_labels = {
+                "normal": "無印通常階層",
+                "normal_eta": "通常階層 η",
+                "sublevel": "無印通常亜階層",
+                "sublevel_eta": "通常亜階層 η",
+                "anomalous": "無印番外階層",
+                "anomalous_eta": "番外階層 η",
+                "anomalous_sublevel_eta": "番外亜階層 η",
+                "alias": "別名",
+                "terms": "用語",
+                "contest": "コンテスト",
+                "foreign": "国外階層",
+                "dimension": "次元",
+                "entity": "エンティティ",
+                "item": "物品",
+                "phenomenon": "現象",
+                "canon": "カノン",
+                "joke_level": "ジョーク階層",
+                "joke_article": "ジョーク記事",
+                "foreign_joke": "国外ジョーク記事",
+                "person": "人物",
+            }
             page = {
                 "title": str(row.get("title") or "").strip(),
                 "url": str(row.get("url") or "").strip(),
-                "category": str(row.get("category") or "").strip(),
-                "category_label": str(row.get("category") or "").strip(),
+                "category": category,
+                "category_label": category_labels.get(category, category),
                 "language": row_language,
                 "source_type": str(row.get("source_type") or "").strip(),
                 "indexes": str(row.get("indexes") or "").strip(),
+                "index_memberships": str(row.get("index_memberships") or "[]"),
+                "section_path": str(row.get("section_path") or "[]"),
+                "section_order": str(row.get("section_order") or "0"),
+                "page_order": str(row.get("page_order") or "0"),
                 "translation_section": str(row.get("translation_section") or "").strip(),
             }
             if page["title"] and is_supported_level_list_url(page["url"]):
@@ -112,6 +139,8 @@ def load_level_list_pages(language):
                     "category": category_code or category_label,
                     "category_label": category_label, "language": language,
                     "source_type": "", "indexes": "", "translation_section": "",
+                    "index_memberships": "[]", "section_path": "[]",
+                    "section_order": "0", "page_order": "0",
                 }
                 continue
             if current_page is None:
@@ -125,6 +154,14 @@ def load_level_list_pages(language):
                 current_page["indexes"] = stripped[6:].strip()
             elif stripped.startswith("TRANSLATION_SECTION:"):
                 current_page["translation_section"] = stripped[len("TRANSLATION_SECTION:"):].strip()
+            elif stripped.startswith("INDEX_MEMBERSHIPS:"):
+                current_page["index_memberships"] = stripped[len("INDEX_MEMBERSHIPS:"):].strip()
+            elif stripped.startswith("SECTION_PATH:"):
+                current_page["section_path"] = stripped[len("SECTION_PATH:"):].strip()
+            elif stripped.startswith("SECTION_ORDER:"):
+                current_page["section_order"] = stripped[len("SECTION_ORDER:"):].strip()
+            elif stripped.startswith("PAGE_ORDER:"):
+                current_page["page_order"] = stripped[len("PAGE_ORDER:"):].strip()
     if current_page and current_page.get("url"):
         pages.append(current_page)
     return [page for page in pages if is_supported_level_list_url(page["url"])]

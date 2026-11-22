@@ -275,103 +275,47 @@ def extract_links(
 # 解析
 # =============================================================================
 
-def parse_translation_html(
-    html
-):
-
-    soup = BeautifulSoup(
-        html,
-        "html.parser"
-    )
-
-    content = find_content_root(
-        soup
-    )
-
+def parse_translation_html(html):
+    """翻訳一覧の見出し階層をパンくずとして保持し、リンク順を維持する。"""
+    soup = BeautifulSoup(html, "html.parser")
+    content = find_content_root(soup)
     sections = []
-
+    heading_stack = []
     current_heading = "（先頭）"
     current_links = []
-
-    # -------------------------------------------------------------------------
-    # 見出し・リンクの順序を維持
-    # -------------------------------------------------------------------------
+    heading_names = {"h1", "h2", "h3", "h4", "h5", "h6"}
 
     for element in content.find_all(
-        [
-            "h1",
-            "h2",
-            "h3",
-            "h4",
-            "h5",
-            "h6",
-            "p",
-            "ul",
-            "ol",
-            "table",
-        ]
+        ["h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "table"]
     ):
-
-        # -------------------------------------------------------------
-        # 見出し
-        # -------------------------------------------------------------
-
-        if element.name in {
-            "h1",
-            "h2",
-            "h3",
-            "h4",
-            "h5",
-            "h6",
-        }:
-
+        if element.name in heading_names:
             if current_links:
-
                 sections.append({
                     "heading": current_heading,
                     "links": current_links,
                 })
-
-            current_heading = element.get_text(
-                " ",
-                strip=True
-            )
-
+            level = int(element.name[1])
+            heading = element.get_text(" ", strip=True)
+            heading_stack = [
+                item for item in heading_stack if item["level"] < level
+            ]
+            if heading:
+                heading_stack.append({"level": level, "heading": heading})
+            current_heading = " > ".join(
+                item["heading"] for item in heading_stack
+            ) or "（先頭）"
             current_links = []
-
             continue
 
-        # -------------------------------------------------------------
-        # リンク
-        # -------------------------------------------------------------
-
-        extracted = extract_links(
-            element
-        )
-
-        for item in extracted:
-
-            if item["url"] in {
-                x["url"]
-                for x in current_links
-            }:
-                continue
-
-            current_links.append(
-                item
-            )
-
-    # -------------------------------------------------------------------------
-    # 最終セクション
-    # -------------------------------------------------------------------------
+        for item in extract_links(element):
+            if item["url"] not in {link["url"] for link in current_links}:
+                current_links.append(item)
 
     if current_links:
-
         sections.append({
             "heading": current_heading,
             "links": current_links,
         })
-
     return sections
 
 

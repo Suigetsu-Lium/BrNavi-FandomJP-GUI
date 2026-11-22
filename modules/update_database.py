@@ -95,10 +95,14 @@ def directory_exists(path):
 def check_index_html(log=print):
     required_files = [
         "hierarchy.html",
-        "translation.html",
+        "normal.html",
         "normal_eta.html",
         "anomalous.html",
         "sublevel.html",
+        "alias.html",
+        "terms.html",
+        "translation.html",
+        "contest.html",
     ]
 
     missing = []
@@ -159,8 +163,9 @@ def _validate_step_output(name, started_at):
         expected = [
             os.path.join(INDEX_HTML_DIR, filename)
             for filename in (
-                "hierarchy.html", "translation.html", "normal_eta.html",
-                "anomalous.html", "sublevel.html",
+                "hierarchy.html", "normal.html", "normal_eta.html",
+                "anomalous.html", "sublevel.html", "alias.html",
+                "terms.html", "translation.html", "contest.html",
             )
         ]
         require_rows = False

@@ -17,6 +17,7 @@
 | `modules/route_service.py` | 経路CSVの読み込み、非対話の候補解決・最短経路検索、AI向け経路コンテキスト |
 | `modules/app_settings.py` | 一般設定の保存、暦上1か月単位の一覧データ自動更新スケジュール |
 | `modules/system_dashboard.py` | ローカル時計表示、ネットワーク・電源状態、記憶域使用量、画像ギャラリー用ファイル一覧の副作用を抑えた計算 |
+| `modules/data_cleanup.py` | 固定ホワイトリストに基づく保存済み生成データのプレビュー、パス安全性検証、計画再検証付き削除 |
 | `modules/ai/groq_client.py` | Groq Chat Completionsとストリーミング通信 |
 | `modules/ai/markdown_renderer.py` | Markdown変換、Pygmentsコードハイライト、HTMLサニタイズ |
 | `modules/ai/conversation.py` | SQLiteスキーマ、会話・メッセージ・回答バージョンの永続化 |
@@ -529,3 +530,37 @@ AI側は docs/AGENTS.md に従い、テスト、モック、fixture、ダミー�
 ### 手動確認と制約
 
 AI側は `docs/AGENTS.md` に従い、テスト、モック、fixture、ダミーデータを作成・実行しません。リポジトリ内に動的生成CSV・HTMLを作成・配置しません。一覧HTMLの取得・DB再構築・GUI表示の実データ確認は開発者が手動で実施します。AST構文確認はテスト実行ではなく構文検査として行います。実装済みであっても、実データでの手動確認が終わるまでは動作確認済みとは扱いません。
+
+## 保存済みデータのクリーンアップ
+
+環境設定の「保存済みデータ管理」は、modules/data_cleanup.py の固定ホワイトリストだけを削除対象とする。.gitignore、拡張子の一括判定、ディレクトリ名の部分一致から削除対象を推測しない。アプリケーションルートは get_application_dir() で解決する。
+
+### 削除カテゴリ
+
+| ID | GUI表示 | 削除を許可する保存先 |
+| --- | --- | --- |
+| articles | 記事HTML・抽出データ・画像 | downloaded_fandom_html/、downloaded_images/、extracted_fandom_levels/、extracted_fandom_levels_all.txt、extracted_fandom_levels_summary.csv |
+| index | 一覧インデックス・Master DB | index_html/、parsed_index/、level_lists/、旧形式の wiki_list.txt |
+| routes | 経路CSV | backrooms_nodes.csv、backrooms_edges.csv、backrooms_evidence.csv。一つのデータセットとして同時に扱う |
+| ai | AI会話履歴・移行バックアップ | database/ai/assistant.sqlite3、SQLiteの -wal / -shm / -journal サイドカー、厳密な名前形式に一致する assistant-pre-migration-*.sqlite3 |
+
+A/B/CはGUIの初期選択状態とし、AI会話履歴・移行バックアップは初期未選択の独立カテゴリとする。database/ 自体を削除対象にしてはならない。
+
+### 常時保護するデータ
+
+database/app_settings.json、database/ai/settings.json、.env / .env.*、APIキー・秘密鍵・証明書、その他の認証情報、ソースコード、ドキュメント、ビルド・アップデーター資産はホワイトリストに含めない。特に database/ は設定ファイルを含むため、親ディレクトリ単位の削除を禁止する。
+
+### プレビュー・確認・削除契約
+
+1. GUIからカテゴリIDだけを受け取り、実際のファイルシステムを読み取り走査する。パス文字列をGUIから直接受け取らない。
+2. プレビューにはカテゴリ、相対パス、ファイル／ディレクトリ区分、ファイル数、容量を表示する。削除対象計画はPython側のメモリに保持し、GUIには不透明な計画IDだけを返す。
+3. 最終確認は DELETE の完全一致入力を必須とする。確認ダイアログのキャンセルでは何も変更しない。
+4. 実行直前に計画を再走査し、ファイル一覧・サイズ・更新時刻・ファイル識別情報がプレビュー時と一致することを確認する。不一致、リンク／ジャンクション、アプリケーションルート外のパス、未知のファイル種別を検出した場合は削除を中止する。
+5. データ専用ディレクトリは内部のファイルと子ディレクトリを削除するが、アプリが今後も利用する最上位の保存先ディレクトリ自体は保持する。
+6. 経路CSVは正規3ファイルを一つのカテゴリとして扱い、個別選択を提供しない。
+7. 保守タスク実行中、AI応答生成中、または別の削除処理中は削除を拒否する。保守タスクとAI生成の開始側も削除ロックを確認し、プレビュー後に処理が始まった場合は最終削除を拒否する。
+8. 削除後は候補カタログ、Wiki検索・図鑑一覧、画像ギャラリー、言語別一覧、経路結果、AI会話履歴、ストレージ表示を該当カテゴリに応じて再読み込みする。AI DBを削除した場合は、保護された settings.json を維持したまま空の会話DBを再初期化する。
+
+### ストレージ表示
+
+modules/system_dashboard.py は削除対象と同じデータ分類に沿ってファイル数・容量を集計する。アプリ設定JSON・AI設定JSONなど保護対象は、生成データの合計に含めない。ドライブ全体の使用量は従来どおり別表示する。

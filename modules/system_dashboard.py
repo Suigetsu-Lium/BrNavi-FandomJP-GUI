@@ -49,34 +49,70 @@ def format_clock(now=None, timezone_name="Asia/Tokyo"):
 
 
 def storage_summary(base_dir):
-    """Count local app data and report the containing drive usage."""
+    """Count generated local data without including protected application settings."""
     base = Path(base_dir)
-    folders = {
-        "取得済みHTML": base / "downloaded_fandom_html",
-        "保存済み画像": base / "downloaded_images",
-        "抽出テキスト": base / "extracted_fandom_levels",
-        "インデックス・DB・CSV": base / "database",
-        "パーサー索引": base / "parsed_index",
-    }
     categories = {}
-    total_files = total_bytes = 0
-    for label, root in folders.items():
-        files = [path for path in root.rglob("*") if path.is_file()] if root.exists() else []
-        size = sum(_safe_size(path) for path in files)
-        categories[label] = {"files": len(files), "bytes": size}
-        total_files += len(files)
-        total_bytes += size
-    # CSVs may be intentionally written at the application root for legacy tools.
-    root_csvs = [path for path in base.glob("*.csv") if path.is_file()] if base.exists() else []
-    if root_csvs:
-        categories["インデックス・DB・CSV"]["files"] += len(root_csvs)
-        categories["インデックス・DB・CSV"]["bytes"] += sum(_safe_size(path) for path in root_csvs)
-        total_files += len(root_csvs)
-        total_bytes += sum(_safe_size(path) for path in root_csvs)
+
+    def add_paths(label, paths):
+        files = []
+        for path in paths:
+            if path.is_dir() and not path.is_symlink():
+                files.extend(candidate for candidate in path.rglob("*") if candidate.is_file() and not candidate.is_symlink())
+            elif path.is_file() and not path.is_symlink():
+                files.append(path)
+        # A path can be supplied by more than one legacy grouping; count it once.
+        unique = list(dict.fromkeys(files))
+        categories[label] = {
+            "files": len(unique),
+            "bytes": sum(_safe_size(path) for path in unique),
+        }
+
+    add_paths("記事HTML", [base / "downloaded_fandom_html"])
+    add_paths("保存済み画像", [base / "downloaded_images"])
+    add_paths("抽出データ", [
+        base / "extracted_fandom_levels",
+        base / "extracted_fandom_levels_all.txt",
+        base / "extracted_fandom_levels_summary.csv",
+    ])
+    add_paths("一覧インデックス・Master DB", [
+        base / "index_html",
+        base / "parsed_index",
+        base / "level_lists",
+        base / "wiki_list.txt",
+    ])
+    add_paths("経路CSV", [
+        base / "backrooms_nodes.csv",
+        base / "backrooms_edges.csv",
+        base / "backrooms_evidence.csv",
+    ])
+
+    ai_dir = base / "database" / "ai"
+    ai_files = []
+    if ai_dir.is_dir() and not ai_dir.is_symlink():
+        for path in ai_dir.iterdir():
+            if path.is_symlink() or not path.is_file():
+                continue
+            if (
+                path.name == "assistant.sqlite3"
+                or path.name in {"assistant.sqlite3-wal", "assistant.sqlite3-shm", "assistant.sqlite3-journal"}
+                or re.fullmatch(
+                    r"assistant-pre-migration-\d{8}T\d{6}Z(?:-\d+)?\.sqlite3",
+                    path.name,
+                )
+            ):
+                ai_files.append(path)
+    add_paths("AI会話履歴・移行バックアップ", ai_files)
+
+    total_files = sum(item["files"] for item in categories.values())
+    total_bytes = sum(item["bytes"] for item in categories.values())
     try:
         usage = shutil.disk_usage(base if base.exists() else base.parent)
-        drive = {"total": usage.total, "used": usage.used, "free": usage.free,
-                 "percent": round(usage.used * 100 / usage.total, 1) if usage.total else 0}
+        drive = {
+            "total": usage.total,
+            "used": usage.used,
+            "free": usage.free,
+            "percent": round(usage.used * 100 / usage.total, 1) if usage.total else 0,
+        }
     except OSError:
         drive = {"total": 0, "used": 0, "free": 0, "percent": 0}
     return {"categories": categories, "files": total_files, "bytes": total_bytes, "drive": drive}

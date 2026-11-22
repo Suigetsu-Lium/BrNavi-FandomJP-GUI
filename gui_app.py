@@ -44,6 +44,11 @@ from modules.online_wiki import search_pages as search_online_wiki_pages
 from modules.route_service import search_routes as search_local_routes
 from modules.wiki_markup import format_wiki_links
 from modules.runtime_paths import get_application_dir
+from modules.data_cleanup import (
+    CleanupSafetyError,
+    create_cleanup_plan,
+    delete_cleanup_plan,
+)
 from modules.system_dashboard import format_clock, find_local_images, get_network_kind, get_power_status, list_local_images, normalize_media_identifier, local_saved_level_list, storage_summary
 from modules.version import VERSION
 from modules.webview_fallback import set_browser_window
@@ -92,6 +97,9 @@ class BackroomsAPI:
         self._ai_jobs = {}
         self._ai_jobs_lock = threading.Lock()
         self._maintenance_lock = threading.Lock()
+        self._activity_lock = threading.Lock()
+        self._cleanup_lock = threading.Lock()
+        self._cleanup_plans = {}
         self._maintenance_cancel_event = threading.Event()
         self._maintenance_done_event = threading.Event()
         self._maintenance_done_event.set()
@@ -137,6 +145,77 @@ class BackroomsAPI:
 
     def get_storage_summary(self):
         return storage_summary(BASE_DIR)
+
+    def get_cleanup_preview(self, categories):
+        if self._cleanup_lock.locked():
+            return {"status": "busy", "error": "保存済みデータの削除中です。"}
+        try:
+            plan = create_cleanup_plan(BASE_DIR, categories)
+        except (ValueError, CleanupSafetyError, OSError) as error:
+            return {"status": "error", "error": str(error)}
+        self._cleanup_plans = {plan["plan_id"]: plan}
+        return {
+            "status": "ready",
+            "plan_id": plan["plan_id"],
+            "categories": plan["category_summaries"],
+            "items": [
+                {
+                    "category": item["category"],
+                    "category_label": item["category_label"],
+                    "path": item["path"],
+                    "kind": item["kind"],
+                    "root": bool(item.get("root", False)),
+                    "bytes": item["bytes"],
+                }
+                for item in plan["items"]
+            ],
+            "total_files": plan["total_files"],
+            "total_bytes": plan["total_bytes"],
+            "confirmation_keyword": "DELETE",
+        }
+
+    def execute_cleanup_data(self, plan_id, confirmation):
+        plan = self._cleanup_plans.get(str(plan_id or ""))
+        if plan is None:
+            return {"status": "error", "error": "削除計画がありません。対象を再計測してください。"}
+        if not self._activity_lock.acquire(blocking=False):
+            return {"status": "busy", "error": "別の保守・削除処理が開始されています。"}
+        acquired_cleanup_lock = False
+        try:
+            if self._maintenance_lock.locked() or not self._maintenance_done_event.is_set():
+                return {"status": "busy", "error": "ダウンロード・一覧更新・CSV生成等の保守処理中は削除できません。"}
+            with self._ai_jobs_lock:
+                if self._ai_jobs:
+                    return {"status": "busy", "error": "AI応答生成中は削除できません。生成完了後に再試行してください。"}
+            acquired_cleanup_lock = self._cleanup_lock.acquire(blocking=False)
+            if not acquired_cleanup_lock:
+                return {"status": "busy", "error": "別の削除処理が実行中です。"}
+        finally:
+            self._activity_lock.release()
+
+        try:
+            result = delete_cleanup_plan(BASE_DIR, plan, confirmation)
+            if "ai" in plan["categories"] and self.ai:
+                from modules.ai.conversation import ConversationStore
+                self.ai.store = ConversationStore(self.ai.data_dir)
+            if {"articles", "index"} & set(plan["categories"]):
+                self._candidate_catalog = None
+                if self.ai:
+                    from modules.ai.wiki_retriever import WikiRetriever
+                    self.ai.retriever = WikiRetriever(TEXT_DIR)
+            return {
+                "status": "deleted",
+                "files": result["files"],
+                "bytes": result["bytes"],
+                "removed_files": result["removed_files"],
+                "removed_directories": result["removed_directories"],
+                "categories": result["categories"],
+            }
+        except (ValueError, CleanupSafetyError, OSError, RuntimeError) as error:
+            return {"status": "error", "error": str(error)}
+        finally:
+            self._cleanup_plans.pop(str(plan_id), None)
+            self._cleanup_lock.release()
 
     def get_local_image_gallery(self):
         result = []
@@ -385,6 +464,18 @@ class BackroomsAPI:
         )
 
     def _start_ai_generation(self, conversation_id, message, operation, message_id, request_id):
+        if not self._activity_lock.acquire(blocking=False):
+            return {"accepted": False, "error": "保守・削除処理の開始中です。少し待ってから再試行してください。"}
+        try:
+            if self._cleanup_lock.locked():
+                return {"accepted": False, "error": "保存済みデータの削除中はAI応答を開始できません。"}
+            return self._start_ai_generation_unlocked(
+                conversation_id, message, operation, message_id, request_id
+            )
+        finally:
+            self._activity_lock.release()
+
+    def _start_ai_generation_unlocked(self, conversation_id, message, operation, message_id, request_id):
         try:
             generation = self.ai.store.begin_generation(
                 conversation_id,
@@ -1188,6 +1279,16 @@ class BackroomsAPI:
         return self.run_maintenance_task("save_online_wiki_page", page)
 
     def run_maintenance_task(self, task_name, selected_urls=None, options=None):
+        if not self._activity_lock.acquire(blocking=False):
+            return {"status": "busy", "message": "別の保守・削除処理を開始しています。"}
+        try:
+            if self._cleanup_lock.locked():
+                return {"status": "busy", "message": "保存済みデータの削除中は保守処理を開始できません。"}
+            return self._run_maintenance_task_unlocked(task_name, selected_urls, options)
+        finally:
+            self._activity_lock.release()
+
+    def _run_maintenance_task_unlocked(self, task_name, selected_urls=None, options=None):
         if task_name in {"download_html", "download_selected_html"}:
             return {
                 "status": "error",
@@ -2286,6 +2387,62 @@ HTML_TEMPLATE = r"""
           <div id="storage-summary" class="space-y-2 text-xs text-gray-600">計測中...</div>
         </section>
         <section class="space-y-3 border-t border-[#e2d8b5] pt-4">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <h3 class="text-sm font-bold text-gray-800">保存済みデータ管理・クリーンアップ</h3>
+            <button type="button" onclick="refreshStorageSummary()" class="rounded border border-[#d6c79a] px-3 py-1.5 text-xs">対象件数を再計測</button>
+          </div>
+          <p class="text-xs leading-relaxed text-gray-600">アプリが取得・生成したローカルデータだけをカテゴリ別に削除できます。設定・APIキー・ソースコード・ドキュメントは対象外です。削除前に実際のファイル一覧を確認します。</p>
+          <div class="grid gap-2 sm:grid-cols-2">
+            <label class="flex items-start gap-2 rounded border border-[#e2d8b5] bg-[#fffdf5] p-3 text-xs">
+              <input id="cleanup-category-articles" data-cleanup-category="articles" type="checkbox" checked class="mt-0.5">
+              <span><b>記事HTML・抽出データ・画像</b><span class="mt-1 block text-gray-500">保存記事HTML、画像、個別TXT、統合TXT、Summary CSV</span></span>
+            </label>
+            <label class="flex items-start gap-2 rounded border border-[#e2d8b5] bg-[#fffdf5] p-3 text-xs">
+              <input id="cleanup-category-index" data-cleanup-category="index" type="checkbox" checked class="mt-0.5">
+              <span><b>一覧インデックス・Master DB</b><span class="mt-1 block text-gray-500">一覧HTML、parsed_index、Level Lists、旧一覧</span></span>
+            </label>
+            <label class="flex items-start gap-2 rounded border border-[#e2d8b5] bg-[#fffdf5] p-3 text-xs">
+              <input id="cleanup-category-routes" data-cleanup-category="routes" type="checkbox" checked class="mt-0.5">
+              <span><b>経路CSV</b><span class="mt-1 block text-gray-500">Nodes / Edges / Evidenceの正規3ファイルを一括削除</span></span>
+            </label>
+            <label class="flex items-start gap-2 rounded border border-amber-300 bg-amber-50 p-3 text-xs">
+              <input id="cleanup-category-ai" data-cleanup-category="ai" type="checkbox" class="mt-0.5">
+              <span><b>AI会話履歴・移行バックアップ</b><span class="mt-1 block text-gray-600">会話DBと移行バックアップ。AI設定JSONは保護されます。</span></span>
+            </label>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <button type="button" onclick="setAllCleanupCategories(true)" class="rounded border border-[#d6c79a] px-3 py-1.5 text-xs">全カテゴリを選択</button>
+            <button type="button" onclick="setAllCleanupCategories(false)" class="rounded border border-[#d6c79a] px-3 py-1.5 text-xs">選択解除</button>
+            <button id="cleanup-preview-button" type="button" onclick="previewCleanupData()" class="rounded bg-[#91520f] px-4 py-2 text-xs font-semibold text-white">削除対象を確認</button>
+          </div>
+          <div id="cleanup-status" role="status" aria-live="polite" class="hidden rounded border border-[#dfd3a8] bg-[#fffdf5] p-3 text-xs text-gray-700"></div>
+          <div id="cleanup-preview" class="hidden space-y-3 rounded border border-[#d6c79a] bg-[#fffdf5] p-3">
+            <div id="cleanup-preview-summary" class="space-y-1 text-xs text-gray-700"></div>
+            <div class="max-h-64 overflow-auto rounded border border-[#e2d8b5] bg-white p-2">
+              <ul id="cleanup-preview-items" class="space-y-1 font-mono text-[11px] text-gray-700"></ul>
+            </div>
+            <p class="text-[11px] leading-relaxed text-rose-800">上記に表示されたファイルだけが削除対象です。リンク・ジャンクション・未知の保存先など安全性を確認できない対象がある場合、プレビューまたは削除を中止します。</p>
+            <div class="flex flex-wrap gap-2">
+              <button id="cleanup-final-step-button" type="button" onclick="openCleanupConfirmation()" class="rounded bg-red-700 px-4 py-2 text-xs font-semibold text-white">最終確認へ進む</button>
+              <button type="button" onclick="clearCleanupPreview()" class="rounded border border-[#d6c79a] px-4 py-2 text-xs">閉じる</button>
+            </div>
+          </div>
+          <div id="cleanup-confirmation-dialog" class="hidden fixed inset-0 z-[120] items-center justify-center bg-black/60 p-4" role="dialog" aria-modal="true" aria-labelledby="cleanup-confirmation-title">
+            <div class="w-full max-w-lg space-y-4 rounded-lg border-2 border-red-700 bg-[#fffdf5] p-5 shadow-2xl">
+              <div class="flex items-center gap-2 text-red-800"><span class="text-2xl">⚠</span><h3 id="cleanup-confirmation-title" class="text-base font-bold">保存済みデータを完全に削除します</h3></div>
+              <p id="cleanup-confirmation-summary" class="text-xs leading-relaxed text-gray-700"></p>
+              <p class="rounded bg-red-50 p-3 text-xs font-semibold leading-relaxed text-red-900">この操作は元に戻せません。対象のファイル一覧を確認済みの場合のみ実行してください。APIキー・環境設定・アプリ本体は削除されません。</p>
+              <label class="block text-xs font-semibold text-gray-800">確認のため <code>DELETE</code> と入力してください。
+                <input id="cleanup-confirmation-input" type="text" autocomplete="off" spellcheck="false" oninput="updateCleanupConfirmationButton()" class="mt-2 block w-full rounded border border-red-300 bg-white px-3 py-2 font-mono text-sm" placeholder="DELETE">
+              </label>
+              <div class="flex flex-wrap justify-end gap-2">
+                <button type="button" onclick="closeCleanupConfirmation()" class="rounded border border-[#d6c79a] px-4 py-2 text-xs">キャンセル</button>
+                <button id="cleanup-confirm-button" type="button" onclick="confirmCleanupData()" disabled class="rounded bg-red-700 px-4 py-2 text-xs font-bold text-white disabled:cursor-not-allowed disabled:opacity-40">選択したデータを削除</button>
+              </div>
+            </div>
+          </div>
+        </section>
+        <section class="space-y-3 border-t border-[#e2d8b5] pt-4">
           <h3 class="text-sm font-bold text-gray-800">一覧データの手動更新</h3>
           <p class="text-xs text-gray-600">Level一覧HTMLを再取得し、Master Databaseと各言語のLevel Listを作り直します。更新中も画面を操作できます。</p>
           <div class="flex flex-wrap gap-2">
@@ -2520,6 +2677,189 @@ HTML_TEMPLATE = r"""
         const drive = data.drive || {};
         target.innerHTML = `<div>${categories}</div><p class="mt-2 font-semibold">ローカルデータ合計: ${data.files} 件 · ${formatBytes(data.bytes)}</p><div class="mt-2 flex justify-between"><span>ドライブ使用量</span><span>${formatBytes(drive.used)} / ${formatBytes(drive.total)} · 空き ${formatBytes(drive.free)}</span></div><progress class="mt-1 h-2 w-full" max="100" value="${Number(drive.percent)||0}"></progress>`;
       } catch (error) { target.textContent = `計測できません: ${error}`; }
+    }
+
+    let cleanupPlanId = null;
+
+    function setAllCleanupCategories(checked) {
+      document.querySelectorAll('[data-cleanup-category]').forEach(input => {
+        input.checked = Boolean(checked);
+      });
+      clearCleanupPreview();
+    }
+
+    function clearCleanupPreview() {
+      cleanupPlanId = null;
+      document.getElementById('cleanup-preview').classList.add('hidden');
+      document.getElementById('cleanup-preview-items').replaceChildren();
+      closeCleanupConfirmation();
+    }
+
+    function showCleanupStatus(message, isError = false) {
+      const target = document.getElementById('cleanup-status');
+      target.textContent = message;
+      target.classList.remove('hidden', 'border-red-300', 'bg-red-50', 'text-red-800');
+      if (isError) target.classList.add('border-red-300', 'bg-red-50', 'text-red-800');
+    }
+
+    async function previewCleanupData() {
+      const button = document.getElementById('cleanup-preview-button');
+      const categories = Array.from(document.querySelectorAll('[data-cleanup-category]:checked'))
+        .map(input => input.dataset.cleanupCategory);
+      if (!categories.length) {
+        showCleanupStatus('削除するカテゴリを1つ以上選択してください。', true);
+        return;
+      }
+      button.disabled = true;
+      button.textContent = '対象を確認中...';
+      clearCleanupPreview();
+      try {
+        const result = await pywebview.api.get_cleanup_preview(categories);
+        if (result.status !== 'ready') throw new Error(result.error || '削除対象を確認できませんでした。');
+        cleanupPlanId = result.plan_id;
+        const summary = (result.categories || []).map(item =>
+          `<div class="flex flex-wrap justify-between gap-2"><span>${escapeHTML(item.label)} · ${item.exists ? '存在' : 'データなし'}</span><span>${item.files} ファイル · ${formatBytes(item.bytes)}</span></div>`
+        ).join('');
+        document.getElementById('cleanup-preview-summary').innerHTML =
+          summary + `<p class="mt-2 border-t border-[#e2d8b5] pt-2 font-bold">削除対象合計：${result.total_files} ファイル · ${formatBytes(result.total_bytes)}</p>`;
+        const list = document.getElementById('cleanup-preview-items');
+        list.replaceChildren();
+        (result.items || []).forEach(item => {
+          const row = document.createElement('li');
+          row.className = 'break-all';
+          row.textContent = (item.kind === 'directory' ? '[DIR] ' : '[FILE] ') +
+            item.path + (item.kind === 'file' ? ' · ' + formatBytes(item.bytes) :
+              (item.root ? '（保存先フォルダー自体は保持）' : ''));
+          list.appendChild(row);
+        });
+        if (!result.items || !result.items.length) {
+          const empty = document.createElement('li');
+          empty.className = 'text-gray-500';
+          empty.textContent = '対象カテゴリに削除可能なデータはありません。';
+          list.appendChild(empty);
+        }
+        document.getElementById('cleanup-preview').classList.remove('hidden');
+        document.getElementById('cleanup-status').classList.add('hidden');
+      } catch (error) {
+        cleanupPlanId = null;
+        showCleanupStatus('プレビューを作成できませんでした: ' + error.message, true);
+      } finally {
+        button.disabled = false;
+        button.textContent = '削除対象を確認';
+      }
+    }
+
+    function openCleanupConfirmation() {
+      if (!cleanupPlanId) return;
+      const total = document.getElementById('cleanup-preview-summary').textContent;
+      document.getElementById('cleanup-confirmation-summary').textContent =
+        total + '。表示された対象のみを削除します。';
+      document.getElementById('cleanup-confirmation-input').value = '';
+      updateCleanupConfirmationButton();
+      const dialog = document.getElementById('cleanup-confirmation-dialog');
+      dialog.classList.remove('hidden');
+      dialog.style.display = 'flex';
+      document.getElementById('cleanup-confirmation-input').focus();
+    }
+
+    function closeCleanupConfirmation() {
+      const dialog = document.getElementById('cleanup-confirmation-dialog');
+      if (!dialog) return;
+      dialog.classList.add('hidden');
+      dialog.style.display = 'none';
+      const input = document.getElementById('cleanup-confirmation-input');
+      if (input) input.value = '';
+      updateCleanupConfirmationButton();
+    }
+
+    function updateCleanupConfirmationButton() {
+      const input = document.getElementById('cleanup-confirmation-input');
+      const button = document.getElementById('cleanup-confirm-button');
+      if (input && button) button.disabled = input.value !== 'DELETE';
+    }
+
+    async function confirmCleanupData() {
+      if (!cleanupPlanId) return;
+      const button = document.getElementById('cleanup-confirm-button');
+      const input = document.getElementById('cleanup-confirmation-input');
+      if (input.value !== 'DELETE') return;
+      button.disabled = true;
+      button.textContent = '削除中...';
+      try {
+        const result = await pywebview.api.execute_cleanup_data(cleanupPlanId, input.value);
+        if (result.status !== 'deleted') throw new Error(result.error || '削除できませんでした。');
+        const categories = result.categories || [];
+        cleanupPlanId = null;
+        closeCleanupConfirmation();
+        clearCleanupPreview();
+        try {
+          await refreshAfterCleanup(categories);
+          showCleanupStatus(`削除完了：${result.files} ファイル（${formatBytes(result.bytes)}）。図鑑・経路・ストレージ表示を再読み込みしました。`);
+        } catch (refreshError) {
+          showCleanupStatus(`データ削除は完了しましたが、画面の再読み込みに失敗しました: ${refreshError.message}`, true);
+        }
+      } catch (error) {
+        showCleanupStatus('削除を中止しました: ' + error.message, true);
+        closeCleanupConfirmation();
+        cleanupPlanId = null;
+        document.getElementById('cleanup-preview').classList.add('hidden');
+      } finally {
+        button.textContent = '選択したデータを削除';
+        updateCleanupConfirmationButton();
+      }
+    }
+
+    async function refreshAfterCleanup(categories) {
+      const selected = new Set(categories || []);
+      await pywebview.api.refresh_application_data();
+      explorerCatalogPromise = null;
+      localImages = [];
+      if (selected.has('articles')) {
+        explorerImages = [];
+        lightboxImages = [];
+        closeImageLightbox();
+        currentExplorerPage = null;
+        explorerTabs.forEach(tab => {
+          tab.page = null;
+          tab.title = 'New tab';
+          tab.history = [];
+          tab.historyIndex = -1;
+        });
+        renderExplorerTabs();
+        showExplorerIndexHome();
+      }
+      await Promise.all([
+        onSearchInput(),
+        loadExplorerIndexPages(),
+        refreshStorageSummary(),
+      ]);
+      const gallery = document.getElementById('explorer-gallery-view');
+      if (gallery && !gallery.classList.contains('hidden')) await loadLocalImageGallery();
+      if (selected.has('index')) {
+        levelListLanguagesLoaded = false;
+        if (!document.getElementById('view-data-tools').classList.contains('hidden')) {
+          await loadLevelListLanguages();
+        }
+      }
+      routeLastResults = [];
+      const routeResults = document.getElementById('route-results');
+      if (routeResults) routeResults.replaceChildren();
+      document.getElementById('route-detail-content').replaceChildren();
+      document.getElementById('route-detail-view').classList.add('hidden');
+      document.getElementById('route-results-list').classList.remove('hidden');
+      if (selected.has('routes')) {
+        document.getElementById('route-status').textContent = '経路CSVが削除されました。再生成後に検索できます。';
+      } else {
+        document.getElementById('route-status').textContent = '経路検索結果を更新しました。必要に応じて再検索してください。';
+        const routeStart = document.getElementById('route-start').value.trim();
+        const routeGoal = document.getElementById('route-goal').value.trim();
+        if (routeStart && routeGoal) await searchRoutes();
+      }
+      if (selected.has('ai')) {
+        aiConversationId = null;
+        document.getElementById('ai-chat-messages').replaceChildren();
+        await aiLoadConversationList();
+      }
     }
     async function switchExplorerSubtab(tab) {
       const gallery = tab === 'gallery';
@@ -4744,6 +5084,11 @@ HTML_TEMPLATE = r"""
     function setMaintenanceBusy(busy) {
       document.getElementById('maintenance-cancel').disabled = !busy;
       document.getElementById('level-list-cancel-button').disabled = !busy;
+      const cleanupPreviewButton = document.getElementById('cleanup-preview-button');
+      if (cleanupPreviewButton) cleanupPreviewButton.disabled = Boolean(busy);
+      document.querySelectorAll('[data-cleanup-category]').forEach(input => {
+        input.disabled = Boolean(busy);
+      });
     }
 
     async function runTask(taskName, options = {}) {

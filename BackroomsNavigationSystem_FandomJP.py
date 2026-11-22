@@ -688,8 +688,8 @@ def network_update():
     print()
 
     print(
-        "extracted_fandom_levels_all.txt から "
-        "Level間の接続を解析します。"
+        "downloaded_fandom_html/ の保存記事から "
+        "Nodes / Edges / Evidence の正規3ファイルを生成します。"
     )
 
     print()

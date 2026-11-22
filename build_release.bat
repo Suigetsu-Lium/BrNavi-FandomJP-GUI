@@ -86,14 +86,8 @@ for %%D in (parsed_index level_lists index_html downloaded_fandom_html extracted
 if not exist "%TARGET%\database\ai" mkdir "%TARGET%\database\ai"
 if errorlevel 1 exit /b 1
 
-for %%F in (backrooms_nodes_v2.csv backrooms_edges_v2.csv backrooms_evidence_v2.csv) do (
-    if not exist "%%F" (
-        echo Required route data file is missing: %%F
-        exit /b 1
-    )
-    copy /y "%%F" "%TARGET%\%%F" > nul
-    if errorlevel 1 exit /b 1
-)
+rem Route CSVs are runtime user data generated from locally saved article HTML.
+rem Do not require or package generated route datasets in the release build.
 
 > "%TARGET%\VERSION.txt" echo v%APP_VERSION%
 if errorlevel 1 exit /b 1

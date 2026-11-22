@@ -182,8 +182,8 @@ def run_maintenance_operation(task_name, options=None, context=None):
         success = process_backrooms_data(context=context)
         return OperationResult(
             success=bool(success),
-            message="ネットワークを更新しました。"
-            if success else "ネットワークを更新できませんでした。",
+            message="Nodes / Edges / Evidenceの正規3ファイルを更新しました。"
+            if success else "経路CSV3ファイルを更新できませんでした。既存データとログを確認してください。",
         )
 
     if task_name == "refresh_saved_wiki_page":
@@ -209,14 +209,14 @@ def run_maintenance_operation(task_name, options=None, context=None):
             )
 
         context.check_cancelled()
-        context.log("最新の保存済みHTMLと抽出メタデータから経路CSVを再構築します。")
+        context.log("最新の保存済みHTMLと抽出メタデータからNodes / Edges / Evidenceを再構築します。")
         network_updated = bool(process_backrooms_data(context=context))
         return OperationResult(
             success=network_updated,
             message=(
-                "本文・メタデータを抽出し、図鑑用データと経路CSVを更新しました。"
+                "本文・メタデータを抽出し、図鑑用データと経路CSV3ファイルを更新しました。"
                 if network_updated else
-                "本文は抽出しましたが、経路CSVを更新できませんでした。"
+                "本文は抽出しましたが、経路CSV3ファイルを更新できませんでした。"
             ),
             details={"extraction_completed": True, "network_updated": network_updated},
         )

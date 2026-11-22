@@ -12,11 +12,20 @@ Level間の接続情報を解析し、
 """
 
 import csv
+import hashlib
+import json
 import os
 import re
 import shutil
 import tempfile
 import unicodedata
+from urllib.parse import urlsplit, urlunsplit
+
+from modules.route_schema import (
+    NODE_FIELDS, EDGE_FIELDS, EVIDENCE_FIELDS,
+    NODE_FILENAME, EDGE_FILENAME, EVIDENCE_FILENAME,
+    validate_dataset,
+)
 
 from modules.operation_context import OperationCancelled
 from modules.runtime_paths import get_application_dir
@@ -27,6 +36,8 @@ from modules.extractor import (
     extract_danger,
     extract_article_text,
     extract_page_title_from_html,
+    extract_url_from_html,
+    extract_meta_info_from_html,
     extract_understanding,
 )
 
@@ -39,15 +50,9 @@ BASE_DIR = str(get_application_dir())
 
 HTML_DIR = os.path.join(BASE_DIR, "downloaded_fandom_html")
 
-EDGES_OUTPUT_FILE = os.path.join(
-    BASE_DIR,
-    "backrooms_edges.csv"
-)
-
-NODES_OUTPUT_FILE = os.path.join(
-    BASE_DIR,
-    "backrooms_nodes.csv"
-)
+EDGES_OUTPUT_FILE = os.path.join(BASE_DIR, EDGE_FILENAME)
+NODES_OUTPUT_FILE = os.path.join(BASE_DIR, NODE_FILENAME)
+EVIDENCE_OUTPUT_FILE = os.path.join(BASE_DIR, EVIDENCE_FILENAME)
 
 
 # =============================================================================
@@ -236,6 +241,8 @@ def _write_csv_staging_file(output_path, fieldnames, rows):
 def _replace_csv_outputs(staged_outputs):
     backups = {}
     replaced = []
+    completed = False
+    preserve_backups = False
     try:
         for target, staging_path in staged_outputs:
             if os.path.exists(target):
@@ -244,34 +251,66 @@ def _replace_csv_outputs(staged_outputs):
                     dir=os.path.dirname(os.path.abspath(target)),
                 )
                 os.close(fd)
-                shutil.copy2(target, backup_path)
                 backups[target] = backup_path
+                shutil.copy2(target, backup_path)
             else:
                 backups[target] = None
 
         for target, staging_path in staged_outputs:
             os.replace(staging_path, target)
             replaced.append(target)
+        completed = True
     except Exception:
+        rollback_errors = []
         for target in reversed(replaced):
             backup_path = backups.get(target)
-            if backup_path:
-                os.replace(backup_path, target)
-                backups[target] = None
-            elif os.path.exists(target):
-                os.unlink(target)
+            try:
+                if backup_path:
+                    os.replace(backup_path, target)
+                    backups[target] = None
+                elif os.path.exists(target):
+                    os.unlink(target)
+            except OSError as rollback_error:
+                rollback_errors.append(f"{target}: {rollback_error}")
+        if rollback_errors:
+            preserve_backups = True
+            raise OSError(
+                "CSV replacement failed and rollback was incomplete; retained backup files: "
+                + "; ".join(rollback_errors)
+            )
         raise
     finally:
         for _, staging_path in staged_outputs:
             if os.path.exists(staging_path):
                 os.unlink(staging_path)
-        for backup_path in backups.values():
-            if backup_path and os.path.exists(backup_path):
-                os.unlink(backup_path)
+        if completed or not preserve_backups:
+            for backup_path in backups.values():
+                if backup_path and os.path.exists(backup_path):
+                    os.unlink(backup_path)
 
 
 def _metadata_key(value):
     return re.sub(r"[\s_]+", "", unicodedata.normalize("NFKC", str(value or "")).casefold())
+
+
+def _stable_route_id(prefix, identity):
+    digest = hashlib.sha256(str(identity).encode("utf-8")).hexdigest()[:24]
+    return f"{prefix}:{digest}"
+
+
+def _node_identity(title, canonical_url=""):
+    if canonical_url:
+        parts = urlsplit(canonical_url.strip())
+        normalized_url = urlunsplit((
+            parts.scheme.casefold(),
+            parts.netloc.casefold(),
+            parts.path.rstrip("/"),
+            "",
+            "",
+        ))
+        return _stable_route_id("url", normalized_url)
+    normalized = re.sub(r"\s+", " ", unicodedata.normalize("NFKC", str(title or "")).strip()).casefold()
+    return _stable_route_id("node", normalized)
 
 
 def _load_extracted_metadata():
@@ -297,10 +336,10 @@ def _load_extracted_metadata():
 
 def process_backrooms_data(context=None):
     """
-    保存済みの各HTMLを直接解析し、ノード・エッジ情報をCSVに保存する。
+    保存済みHTMLからNodes / Edges / Evidenceの3ファイルを生成する。
 
-    CSVの列構成は従来形式を維持する。入力ページが解析できない場合は
-    既存CSVを空データで上書きせず失敗として返す。
+    3ファイルをメモリ上とステージング後の両方で検証し、検証完了後に
+    バックアップ付きでまとめて置換する。旧形式CSVは自動移行・上書きしない。
 
     Returns
     -------
@@ -310,8 +349,37 @@ def process_backrooms_data(context=None):
 
     unique_edges = {}
     nodes_info = {}
+    page_urls = {}
     extracted_metadata = _load_extracted_metadata()
     log = context.log if context else print
+
+    # Never overwrite a legacy or unrecognized existing schema.
+    legacy_headers = {
+        ("Id", "Label", "Comprehension", "Danger"),
+        ("Source", "Target", "Type", "Category", "Condition", "Certainty",
+         "SourceKind", "TargetKind", "Evidence"),
+    }
+    expected_headers = {
+        NODES_OUTPUT_FILE: NODE_FIELDS,
+        EDGES_OUTPUT_FILE: EDGE_FIELDS,
+        EVIDENCE_OUTPUT_FILE: EVIDENCE_FIELDS,
+    }
+    for output_path, expected_fields in expected_headers.items():
+        if os.path.isfile(output_path):
+            try:
+                with open(output_path, "r", encoding="utf-8-sig", newline="") as stream:
+                    header = tuple(next(csv.reader(stream), ()))
+            except (OSError, csv.Error, UnicodeError) as error:
+                log(f"【エラー】既存経路CSVを確認できません: {error}")
+                return False
+            if header in legacy_headers:
+                log(f"【エラー】旧形式CSVを検出しました: {os.path.basename(output_path)}")
+                log("自動移行・上書きは行いません。旧形式の移行は別ディレクトリへの明示的な操作として実施してください。")
+                return False
+            if header != tuple(expected_fields):
+                log(f"【エラー】未対応または破損した経路CSVヘッダーです: {os.path.basename(output_path)}")
+                log("既存ファイルは変更していません。ファイルの内容と形式を確認してください。")
+                return False
 
     html_files = []
     if os.path.isdir(HTML_DIR):
@@ -332,6 +400,7 @@ def process_backrooms_data(context=None):
     log(f"保存HTMLを直接解析します: {len(html_files)} 件")
     parsed_pages = 0
     current_level = None
+    current_article_id = ""
     current_section_type = None
 
     # =========================================================================
@@ -358,6 +427,22 @@ def process_backrooms_data(context=None):
                 if not level_title or not level_code:
                     continue
                 current_level = clean_level_name(level_code)
+                canonical_url = (
+                    extract_url_from_html(html_text)
+                    or extract_meta_info_from_html(html_text).get("url", "")
+                )
+                previous_url = page_urls.get(current_level, "")
+                if (previous_url and canonical_url
+                        and _node_identity(current_level, previous_url)
+                        != _node_identity(current_level, canonical_url)):
+                    log(
+                        f"【エラー】同じLevel識別子に異なる記事URLが対応しています: "
+                        f"{current_level}。曖昧な記事統合を避けるため更新を中止します。"
+                    )
+                    return False
+                if canonical_url:
+                    page_urls[current_level] = canonical_url
+                current_article_id = current_level
                 current_section_type = None
                 current_section_certainty = "Unspecified"
                 page_node = nodes_info.setdefault(current_level, {
@@ -492,7 +577,7 @@ def process_backrooms_data(context=None):
 
                 if (
                     current_section_type
-                    and current_level
+                    and current_article_id
                 ):
 
                     # ノイズ除外
@@ -522,9 +607,9 @@ def process_backrooms_data(context=None):
                     if explicit_transitions:
                         edge_pairs = explicit_transitions
                     elif current_section_type == "Entrance":
-                        edge_pairs = [(target, current_level) for target in found_levels]
+                        edge_pairs = [(target, current_article_id) for target in found_levels]
                     else:
-                        edge_pairs = [(current_level, target) for target in found_levels]
+                        edge_pairs = [(current_article_id, target) for target in found_levels]
 
                     for src, tgt in edge_pairs:
                         src = clean_level_name(src)
@@ -539,20 +624,18 @@ def process_backrooms_data(context=None):
                                 "Danger": "",
                             })
                         identifier = (
-                            src, tgt, current_section_type,
+                            src, tgt, current_article_id, current_section_type,
                             current_section_certainty, line,
                         )
                         if identifier not in unique_edges:
                             unique_edges[identifier] = {
                                 "Source": src,
                                 "Target": tgt,
-                                "Type": "Directed",
-                                "Category": current_section_type,
-                                "Condition": line,
+                                "Article": current_article_id,
+                                "Relation_Type": current_section_type,
+                                "Raw_Text": line,
                                 "Certainty": current_section_certainty,
-                                "SourceKind": classify_route_node(src),
-                                "TargetKind": classify_route_node(tgt),
-                                "Evidence": "ExplicitTransition" if explicit_transitions else "SectionInference",
+                                "Extract_Method": "ExplicitTransition" if explicit_transitions else "SectionInference",
                             }
 
     except OperationCancelled:
@@ -584,94 +667,126 @@ def process_backrooms_data(context=None):
                 if not item.get(field) and metadata.get(field):
                     item[field] = metadata[field]
 
-    # =========================================================================
-    # エッジCSV
-    # =========================================================================
+    # Canonical node IDs are URL-based for saved article pages and otherwise
+    # based on conservative normalized identity. No fuzzy title merging occurs.
+    node_id_by_title = {}
+    nodes_rows = []
+    for title, item in nodes_info.items():
+        canonical_url = page_urls.get(title, "")
+        node_id = _node_identity(title, canonical_url)
+        node_id_by_title[title] = node_id
+        nodes_rows.append({
+            "Node_ID": node_id,
+            "Canonical_Title": item.get("Label") or title,
+            "Canonical_URL": canonical_url,
+            "Aliases": json.dumps(
+                [title] if title and title != (item.get("Label") or title) else [],
+                ensure_ascii=False,
+            ),
+            "Comprehension": item.get("Comprehension", ""),
+            "Danger": item.get("Danger", ""),
+            "Node_Type": classify_route_node(title),
+            "Data_Status": "NeedsReview",
+        })
 
-    edges_fieldnames = [
-        "Source",
-        "Target",
-        "Type",
-        "Category",
-        "Condition",
-        "Certainty",
-        "SourceKind",
-        "TargetKind",
-        "Evidence",
-    ]
+    edge_groups = {}
+    evidence_rows = []
+    for evidence in unique_edges.values():
+        source_id = node_id_by_title.get(evidence["Source"])
+        target_id = node_id_by_title.get(evidence["Target"])
+        article_id = node_id_by_title.get(evidence["Article"])
+        if not source_id or not target_id or not article_id or source_id == target_id:
+            log("【エラー】抽出した根拠が既知ノードを参照していません。既存CSVは変更していません。")
+            return False
+        edge_key = (source_id, target_id, "Directed")
+        edge_id = _stable_route_id("edge", "\n".join(edge_key))
+        group = edge_groups.setdefault(edge_key, {
+            "Edge_ID": edge_id,
+            "Source_ID": source_id,
+            "Target_ID": target_id,
+            "Direction": "Directed",
+            "Certainty": evidence["Certainty"] if evidence["Certainty"] in {"Confirmed", "Uncertain"} else "Unknown",
+            "Availability": "Unknown",
+            "Evidence_Type": "Unknown",
+            "Probability": "Unknown",
+            "Condition": evidence["Raw_Text"],
+            "Review_Status": "NeedsReview",
+        })
+        certainty = evidence["Certainty"] if evidence["Certainty"] in {"Confirmed", "Uncertain"} else "Unknown"
+        if group["Certainty"] != certainty:
+            group["Certainty"] = "Unknown"
+        if group["Condition"] != evidence["Raw_Text"]:
+            group["Condition"] = ""
+        evidence_identity = "\n".join((
+            edge_id, article_id, evidence["Relation_Type"],
+            evidence["Raw_Text"], evidence["Extract_Method"],
+        ))
+        evidence_rows.append({
+            "Evidence_ID": _stable_route_id("evidence", evidence_identity),
+            "Edge_ID": edge_id,
+            "Article_ID": article_id,
+            "Relation_Type": evidence["Relation_Type"],
+            "Source_Raw": evidence["Source"],
+            "Target_Raw": evidence["Target"],
+            "Raw_Text": evidence["Raw_Text"],
+            "Extract_Method": evidence["Extract_Method"],
+            "Confidence": "",
+            "Certainty": certainty,
+            "Availability": "Unknown",
+            "Evidence_Type": "Unknown",
+            "Probability": "Unknown",
+        })
 
-    nodes_fieldnames = [
-        "Id",
-        "Label",
-        "Comprehension",
-        "Danger"
-    ]
-
-    edges_staging_path = None
-    nodes_staging_path = None
+    edges_rows = list(edge_groups.values())
+    rows_by_name = {
+        NODE_FILENAME: nodes_rows,
+        EDGE_FILENAME: edges_rows,
+        EVIDENCE_FILENAME: evidence_rows,
+    }
+    staging_paths = []
     try:
         if context:
             context.check_cancelled()
-            context.progress(None, None, "CSV出力を準備中")
-        edges_staging_path = _write_csv_staging_file(
-            EDGES_OUTPUT_FILE,
-            edges_fieldnames,
-            unique_edges.values(),
+            context.progress(None, None, "3ファイルの整合性を検証中")
+        validate_dataset(BASE_DIR, rows_by_name=rows_by_name)
+
+        outputs = (
+            (NODES_OUTPUT_FILE, NODE_FIELDS, nodes_rows),
+            (EDGES_OUTPUT_FILE, EDGE_FIELDS, edges_rows),
+            (EVIDENCE_OUTPUT_FILE, EVIDENCE_FIELDS, evidence_rows),
         )
-        try:
-            nodes_staging_path = _write_csv_staging_file(
-                NODES_OUTPUT_FILE,
-                nodes_fieldnames,
-                nodes_info.values(),
-            )
-        except Exception:
-            os.unlink(edges_staging_path)
-            raise
+        for target, fields, rows in outputs:
+            staging_paths.append((target, _write_csv_staging_file(target, fields, rows)))
+
+        # Re-read the staged bytes, not only the in-memory objects, before publish.
+        staged_rows = {}
+        for (target, fields, _rows), (_same_target, staged_path) in zip(outputs, staging_paths):
+            with open(staged_path, "r", encoding="utf-8-sig", newline="") as stream:
+                staged_rows[os.path.basename(target)] = list(csv.DictReader(stream))
+        validate_dataset(BASE_DIR, rows_by_name=staged_rows)
 
         if context:
             context.check_cancelled()
-            context.progress(None, None, "既存ネットワークデータを更新中")
-        _replace_csv_outputs(
-            [
-                (EDGES_OUTPUT_FILE, edges_staging_path),
-                (NODES_OUTPUT_FILE, nodes_staging_path),
-            ]
-        )
+            context.progress(None, None, "検証済み3ファイルを更新中")
+        _replace_csv_outputs(staging_paths)
+        staging_paths = []
     except OperationCancelled:
-        for staging_path in (edges_staging_path, nodes_staging_path):
-            if staging_path and os.path.exists(staging_path):
-                os.unlink(staging_path)
         raise
-    except Exception as e:
-        for staging_path in (edges_staging_path, nodes_staging_path):
-            if staging_path and os.path.exists(staging_path):
-                os.unlink(staging_path)
-        log()
-        log("【エラー】ネットワークCSVの書き込みに失敗しました。")
-        log(f"詳細: {e}")
+    except Exception as error:
+        log("【エラー】ネットワークCSVの生成・検証・更新に失敗しました。")
+        log(f"詳細: {type(error).__name__}: {error}")
         return False
+    finally:
+        for _target, staging_path in staging_paths:
+            if os.path.exists(staging_path):
+                os.unlink(staging_path)
 
     log()
-    log(f"エッジ抽出完了: {len(unique_edges)} 件")
-    log(f" -> '{EDGES_OUTPUT_FILE}'")
-    log(f"ノード抽出完了: {len(nodes_info)} 件")
-    log(f" -> '{NODES_OUTPUT_FILE}'")
-
-    # =========================================================================
-    # 完了
-    # =========================================================================
-
-    log()
-    log("=" * 70)
+    log(f"ノード: {len(nodes_rows)} 件 / エッジ: {len(edges_rows)} 件 / 根拠: {len(evidence_rows)} 件")
+    log(f" -> {NODES_OUTPUT_FILE}")
+    log(f" -> {EDGES_OUTPUT_FILE}")
+    log(f" -> {EVIDENCE_OUTPUT_FILE}")
     log("ネットワークデータの更新が完了しました。")
-    log(
-        f"ノード数 : {len(nodes_info):,}"
-    )
-    log(
-        f"エッジ数 : {len(unique_edges):,}"
-    )
-    log("=" * 70)
     if context:
         context.progress(len(html_files), len(html_files), "完了")
-
     return True

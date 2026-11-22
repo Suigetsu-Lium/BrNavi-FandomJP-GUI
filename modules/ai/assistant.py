@@ -114,15 +114,15 @@ class AIAssistant:
         route_context = build_route_context(prompt)
         if route_context:
             context = (context + "\n\n" + "## 経路・場所の補足データ\n" + route_context).strip()
-            if route_context.startswith("ローカル経路グラフ"):
+            if route_context.startswith(("ローカルルートグラフ", "ローカル経路グラフ")):
                 sources.append({
                     "id": f"S{len(sources) + 1}",
                     "name": "ローカル経路CSV",
                     "title": "ローカル経路CSV",
-                    "url": "backrooms_nodes.csv / backrooms_edges.csv (local)",
+                    "url": "backrooms_nodes.csv / backrooms_edges.csv / backrooms_evidence.csv (local)",
                     "language": "local",
                     "source_kind": "route_data",
-                    "file": "backrooms_nodes.csv, backrooms_edges.csv",
+                    "file": "backrooms_nodes.csv, backrooms_edges.csv, backrooms_evidence.csv",
                     "file_modified_at": None,
                     "retrieved_at": None,
                     "retrieval_time_basis": "local_route_csv",

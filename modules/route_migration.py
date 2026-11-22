@@ -1,13 +1,19 @@
-"""Non-destructive migration from legacy route CSVs to the v2 evidence model."""
+"""Explicit, non-destructive migration from legacy CSVs to the canonical evidence model."""
 from __future__ import annotations
 
 import csv
 import hashlib
 import json
+import os
+import tempfile
 from collections import OrderedDict
 from pathlib import Path
 
-from modules.route_schema import EDGE_FIELDS, EVIDENCE_FIELDS, NODE_FIELDS
+from modules.route_schema import (
+    EDGE_FIELDS, EVIDENCE_FIELDS, NODE_FIELDS,
+    NODE_FILENAME, EDGE_FILENAME, EVIDENCE_FILENAME,
+    validate_dataset,
+)
 
 
 def _stable_id(prefix: str, value: str) -> str:
@@ -38,14 +44,51 @@ def migrate_legacy_route_csvs(
     edges_path: str | Path,
     output_dir: str | Path,
 ) -> dict[str, object]:
-    """Write v2 files to a separate directory; never modify either input.
+    """Write canonical route files to a separate directory; never modify either input.
 
     Legacy classifications are not guessed. Missing dimensions become Unknown,
     and every imported edge/evidence row is marked NeedsReview.
     """
     nodes_path, edges_path, output_dir = Path(nodes_path), Path(edges_path), Path(output_dir)
+    if not nodes_path.is_file() or not edges_path.is_file():
+        raise FileNotFoundError("Both legacy Node and Edge CSV inputs are required.")
+    if nodes_path.resolve() == edges_path.resolve():
+        raise ValueError("Legacy Node and Edge inputs must be different files.")
+    legacy_node_fields = ("Id", "Label", "Comprehension", "Danger")
+    legacy_edge_fields = (
+        "Source", "Target", "Type", "Category", "Condition", "Certainty",
+        "SourceKind", "TargetKind", "Evidence",
+    )
+    for source_path, expected_fields in (
+        (nodes_path, legacy_node_fields), (edges_path, legacy_edge_fields),
+    ):
+        with source_path.open("r", encoding="utf-8-sig", newline="") as stream:
+            actual_fields = tuple(next(csv.reader(stream), ()))
+        if actual_fields != expected_fields:
+            raise ValueError(
+                f"{source_path.name}: unsupported legacy header; expected {expected_fields}, got {actual_fields}"
+            )
+    output_targets = (
+        output_dir / NODE_FILENAME,
+        output_dir / EDGE_FILENAME,
+        output_dir / EVIDENCE_FILENAME,
+    )
+    input_directories = {nodes_path.parent.resolve(), edges_path.parent.resolve()}
+    if output_dir.resolve() in input_directories:
+        raise ValueError("Migration output directory must be separate from both legacy input directories.")
+    input_paths = {nodes_path.resolve(), edges_path.resolve()}
+    if any(path.resolve() in input_paths for path in output_targets):
+        raise ValueError("Migration output must be a separate directory; source CSVs will not be overwritten.")
+    existing_outputs = [path.name for path in output_targets if path.exists()]
+    if existing_outputs:
+        raise FileExistsError(
+            "Migration output already exists; refusing to overwrite: "
+            + ", ".join(existing_outputs)
+        )
     legacy_nodes = _read_csv(nodes_path)
     legacy_edges = _read_csv(edges_path)
+    if not legacy_nodes or not legacy_edges:
+        raise ValueError("Legacy Node and Edge CSVs must both contain data rows.")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     nodes: OrderedDict[str, dict[str, str]] = OrderedDict()
@@ -154,19 +197,58 @@ def migrate_legacy_route_csvs(
             "Probability": "Unknown",
         })
 
+    if not nodes or not edges or not evidence:
+        raise ValueError("Legacy migration produced no complete Node/Edge/Evidence dataset.")
+
     outputs = {
-        "backrooms_nodes_v2.csv": (NODE_FIELDS, list(nodes.values())),
-        "backrooms_edges_v2.csv": (EDGE_FIELDS, list(edges.values())),
-        "backrooms_evidence_v2.csv": (EVIDENCE_FIELDS, evidence),
+        NODE_FILENAME: (NODE_FIELDS, list(nodes.values())),
+        EDGE_FILENAME: (EDGE_FIELDS, list(edges.values())),
+        EVIDENCE_FILENAME: (EVIDENCE_FIELDS, evidence),
     }
-    written = {}
-    for filename, (fields, rows) in outputs.items():
-        path = output_dir / filename
-        with path.open("w", encoding="utf-8-sig", newline="") as stream:
-            writer = csv.DictWriter(stream, fieldnames=fields)
-            writer.writeheader()
-            writer.writerows(rows)
-        written[filename] = len(rows)
+    rows_by_name = {filename: rows for filename, (_fields, rows) in outputs.items()}
+    validate_dataset(output_dir, rows_by_name=rows_by_name)
+
+    staging_paths = {}
+    published_paths = []
+    try:
+        for filename, (fields, rows) in outputs.items():
+            fd, staging_path = tempfile.mkstemp(
+                prefix=".brnavi-route-migration-",
+                suffix=".tmp",
+                dir=output_dir,
+            )
+            os.close(fd)
+            staging_paths[filename] = Path(staging_path)
+            with open(staging_path, "w", encoding="utf-8-sig", newline="") as stream:
+                writer = csv.DictWriter(stream, fieldnames=fields)
+                writer.writeheader()
+                writer.writerows(rows)
+
+        staged_rows = {}
+        for filename, (_fields, _rows) in outputs.items():
+            with staging_paths[filename].open("r", encoding="utf-8-sig", newline="") as stream:
+                staged_rows[filename] = list(csv.DictReader(stream))
+        validate_dataset(output_dir, rows_by_name=staged_rows)
+
+        for filename in outputs:
+            destination = output_dir / filename
+            os.replace(staging_paths[filename], destination)
+            published_paths.append(destination)
+    except Exception:
+        for destination in published_paths:
+            try:
+                destination.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+    finally:
+        for staging_path in staging_paths.values():
+            try:
+                staging_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    written = {filename: len(rows) for filename, (_fields, rows) in outputs.items()}
 
     return {
         "nodes": len(nodes),

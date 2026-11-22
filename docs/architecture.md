@@ -1,4 +1,4 @@
-# アーキテクチャと開発ガイド
+﻿# アーキテクチャと開発ガイド
 
 この文書はBrNavi Fandom JPの内部構成、データフロー、永続化方式、および開発時の方針を説明します。利用者向けの機能・導入手順は[README.md](../README.md)を参照してください。
 
@@ -44,7 +44,7 @@ flowchart LR
     Bridge --> Local[既存ローカルデータ<br/>検索・Level詳細]
     Bridge --> Wiki[modules/online_wiki.py<br/>Fandom API・HTML保存]
     Bridge --> Route[modules/route_service.py<br/>経路CSV検索]
-    Route --> RouteCSV[(backrooms_nodes.csv<br/>backrooms_edges.csv)]
+    Route --> RouteCSV[(backrooms_nodes.csv<br/>backrooms_edges.csv<br/>backrooms_evidence.csv)]
     UI --> Frame[Fandom埋め込みフレーム]
     Frame --> Fandom[Fandom日本語版]
     Bridge --> HiddenWebView[非表示WebView2<br/>403時のDOM取得]
@@ -57,7 +57,7 @@ flowchart LR
     AI --> SQLite[(database/ai/assistant.sqlite3)]
 ```
 
-経路タブ、CLI、AIは `modules/route_service.py` のCSV読込・候補解決を共有します。GUIは曖昧なLevel名に候補を返し、利用者が選択して再検索します。経路は有向グラフ上の最短経路を最大8件、最大深度30で返します。GUIは一覧から個別の縦型タイムラインへ進み、移動条件を大きく表示します。各Levelを図鑑で開き、本文が未保存なら内蔵Wikiへ案内します。環境設定からの接続CSV生成は `downloaded_fandom_html/` 内のLevel記事HTMLを直接解析し、従来と同じ列構成の `backrooms_nodes.csv` と `backrooms_edges.csv` を出力します。危険度・理解度はHTML本文から抽出し、不足する値を `extracted_fandom_levels_summary.csv` からLevelコードまたはメタタイトルで補完します。危険度の数値、可変、条件付き、N/Aと補足文を保持し、図鑑・経路詳細で同じ色区分を使います。LevelタイトルをHTMLページ情報から解決するため、記事本文を一つのTXTへ統合する処理に依存しません。解析できるLevelまたは接続が0件の場合は失敗として既存CSVを維持します。
+経路タブ、CLI、AIは `modules/route_service.py` のCSV読込・候補解決を共有します。GUIは曖昧なLevel名に候補を返し、利用者が選択して再検索します。経路は有向グラフ上の最短経路を最大8件、最大深度30で返します。GUIは一覧から個別の縦型タイムラインへ進み、移動条件を大きく表示します。各Levelを図鑑で開き、本文が未保存なら内蔵Wikiへ案内します。環境設定からの接続CSV生成は `downloaded_fandom_html/` 内のLevel記事HTMLを直接解析し、正規スキーマの `backrooms_nodes.csv`、`backrooms_edges.csv`、`backrooms_evidence.csv` を検証付きで出力します。危険度・理解度はHTML本文から抽出し、不足する値を `extracted_fandom_levels_summary.csv` からLevelコードまたはメタタイトルで補完します。危険度の数値、可変、条件付き、N/Aと補足文を保持し、図鑑・経路詳細で同じ色区分を使います。LevelタイトルをHTMLページ情報から解決するため、記事本文を一つのTXTへ統合する処理に依存しません。解析できるLevelまたは接続が0件の場合は失敗として既存CSVを維持します。
 
 AIは経路・出口・移動などの相談で、Levelが一つ指定された場合は登録された直接接続先、二つ指定された場合は両者間の最短経路候補をコンテキストに追加します。質問文に接続CSVの条件文が含まれる場合は、その条件と一致する経路レコードも優先して渡します。これらはローカルCSV出典として回答に付記します。情報が未登録なら未登録として扱います。グラフの欠落やWiki設定のフィクション性があるため、現実の安全や到達を保証するものではありません。
 
@@ -306,9 +306,9 @@ python -m unittest discover -s tests -v
 | 抽出 | `modules/extractor.py` | 保存HTMLから記事タイトル・本文・メタデータ・Summaryを抽出 |
 | 画像 | `modules/image_downloader.py` | 保存HTML内の画像取得、画像ファイル名、旧画像名の安全な移行 |
 | 一覧・分類 | `modules/index_parser.py`、`modules/classify_pages.py`、`modules/level_list_generator.py`、`modules/translation_parser.py`、`modules/translation_classifier.py` | 一覧HTMLのリンク・カテゴリ・言語・翻訳セクション解析と一覧ファイル生成 |
-| 経路生成 | `modules/network.py` | 保存済み記事HTMLと抽出メタデータから旧形式のNode/Edge CSVを生成 |
-| 経路検索 | `modules/route_service.py` | 旧形式CSV、または証拠ベース形式CSVを読み、候補解決・最短経路・AI向けコンテキストを提供 |
-| 経路形式・移行 | `modules/route_schema.py`、`modules/route_migration.py` | 証拠ベース形式の列・列挙値検証、旧形式からの別ディレクトリへの変換 |
+| 経路生成 | `modules/network.py` | 保存済み記事HTMLと抽出メタデータから正規Nodes/Edges/Evidenceの3ファイルを生成・検証・更新 |
+| 経路検索 | `modules/route_service.py` | 正規3ファイルを厳密検証して読み、候補解決・共通フィルター・最短経路・AI向けコンテキストを提供 |
+| 経路形式・移行 | `modules/route_schema.py`、`modules/route_migration.py` | 3ファイルの列・列挙値・ID参照検証、旧形式から正規3ファイルへの明示的な別ディレクトリ変換 |
 | AI | `modules/ai/assistant.py`、`wiki_retriever.py`、`groq_client.py`、`conversation.py` | ローカル/オンライン資料検索、Groq生成、ストリーミング、出典検証、SQLite会話履歴 |
 | パス・設定 | `modules/runtime_paths.py`、`modules/app_settings.py` | ソース/凍結実行時のアプリルート、設定JSONと更新スケジュール |
 
@@ -326,11 +326,9 @@ GUIのJavaScriptはPython APIを `pywebview.api` 経由で呼び出します。�
 | `parsed_index/` | Master/分類済み一覧CSV等 | Index parser / classifier / merge処理 |
 | `level_lists/` | 言語別・カテゴリ別の一覧テキストと補助一覧 | 一覧生成処理。HTML取得タブの互換入力にも使う |
 | `index_html/` | 一覧HTMLの入力 | 一覧更新・パーサー |
-| `backrooms_nodes.csv` | 旧形式の経路Node | `network.py` が生成、`route_service.py` が読む |
-| `backrooms_edges.csv` | 旧形式の経路Edge | `network.py` が生成、`route_service.py` が読む |
-| `backrooms_nodes_v2.csv` | 証拠ベース形式Node | 現在の移行処理が出力、検索側が優先読込 |
-| `backrooms_edges_v2.csv` | 証拠ベース形式Edge | 現在の移行処理が出力、検索側が優先読込 |
-| `backrooms_evidence_v2.csv` | Edgeの根拠・出典行 | 現在の移行処理が出力、検索側が根拠情報として読む |
+| `backrooms_nodes.csv` | 正規経路Node | `network.py` が生成、`route_service.py` が厳密検証して読む |
+| `backrooms_edges.csv` | 正規経路Edge | `network.py` が生成、`route_service.py` が厳密検証して読む |
+| `backrooms_evidence.csv` | 記事別の経路Evidence | `network.py` が生成、`route_service.py` が厳密検証して読む |
 | `database/app_settings.json` | GUI設定・一覧自動更新状態 | `app_settings.py` / `gui_app.py` |
 | `database/ai/assistant.sqlite3` | 会話・メッセージ・回答バージョン・生成要求 | `modules/ai/conversation.py` |
 
@@ -339,48 +337,28 @@ GUIのJavaScriptはPython APIを `pywebview.api` 経由で呼び出します。�
 1. 一覧HTML/記事URLを取得し、記事HTMLを `downloaded_fandom_html/` に保存する。
 2. `extractor.py` が記事ごとの本文TXTとSummary CSVを作成・更新する。
 3. `image_downloader.py` が同じ対象HTMLから画像を取得する。
-4. `network.py` が保存済み記事HTMLの本文とSummaryを参照し、旧形式のNode/Edge CSVを生成する。
+4. `network.py` が保存済み記事HTMLの本文とSummaryを参照し、正規Node/Edge/Evidenceの3ファイルを検証付きで生成する。
 5. 図鑑はMaster/一覧/抽出Summary/ローカル本文/画像を統合して表示する。経路検索はCSVを検索時に読み直す。AI検索はローカルTXT/HTML/メタデータを索引する。
 
 記事保存後の `refresh_saved_wiki_page` は、対象HTMLだけの抽出（既存データとのマージ）を行い、その後ネットワークCSVを再生成します。HTML保存が成功しても抽出またはネットワーク更新が失敗する可能性があるため、保存・抽出・経路更新の成否は別々に扱います。
 
-### 4. 現行の経路CSV契約（重要）
+### 4. 正規経路CSV契約（BUG-ROUTE-001）
 
-現在のソースには、互換性が自動的には保証されていない2系統のCSV形式があります。
+経路データはアプリケーションルート直下の3ファイルを一体として扱います。ファイル名にv2接尾辞は付けず、Dataset_ID列も追加しません。
 
-#### 4.1 旧形式：現在の標準生成側
+- Nodes: `backrooms_nodes.csv` — Node_ID, Canonical_Title, Canonical_URL, Aliases, Comprehension, Danger, Node_Type, Data_Status
+- Edges: `backrooms_edges.csv` — Edge_ID, Source_ID, Target_ID, Direction, Certainty, Availability, Evidence_Type, Probability, Condition, Review_Status
+- Evidence: `backrooms_evidence.csv` — Evidence_ID, Edge_ID, Article_ID, Relation_Type, Source_Raw, Target_Raw, Raw_Text, Extract_Method, Confidence, Certainty, Availability, Evidence_Type, Probability
 
-生成元は `modules/network.py:process_backrooms_data()` です。出力先はアプリケーションルート直下です。
+列順・列挙値は `modules/route_schema.py` が正本です。CSVはUTF-8 BOM付きです。Node_ID / Edge_ID / Evidence_IDは各ファイル内で一意かつ必須で、EdgeのSource_ID / Target_IDはNodeを、EvidenceのEdge_IDはEdgeを、Article_IDは根拠元記事のNodeを参照します。AliasesはJSON文字列配列です。必須値、列挙値、JSON、ID参照の不正が一つでもあればデータセット全体を拒否し、部分的に読み飛ばしません。
 
-- `backrooms_nodes.csv`：列は `Id, Label, Comprehension, Danger`
-- `backrooms_edges.csv`：列は `Source, Target, Type, Category, Condition, Certainty, SourceKind, TargetKind, Evidence`
-- この生成処理はNode/Edgeの2ファイルをステージングし、置換時にバックアップを用いた復元処理を行います。
-- 旧形式には独立したEvidence CSVはありません。根拠情報はEdgeの `Evidence` 列等に格納されます。
-- `modules/route_service.py:_load_legacy()` がこの形式を読みます。Node情報はNode CSV、Summary CSV、`wiki_list.txt` から補完し、Edge CSVからグラフを構築します。
+`network.py` は保存HTMLから3ファイル分の行をメモリ上で構築・横断検証し、ステージング書込後に再読込・再検証してからバックアップ付きで置換します。通常の置換例外ではロールバックし、復元に失敗したバックアップは保持します。電源断・強制終了を含む完全なファイルシステム原子性は保証できないため、`route_service.py` も読み込み時に毎回3ファイルを検証し、不完全・混在セットを拒否します。
 
-#### 4.2 証拠ベース形式：スキーマ・移行・検索側に存在
+Node IDはCanonical URLがある場合はURL由来、ない場合は保守的に正規化したタイトル由来です。曖昧なタイトルは自動統合しません。複数記事が同じEdgeを裏付ける場合はEvidenceを記事単位で複数行保持し、Article_IDは根拠元記事自身のNode_IDにします。Entrance / Exitの向きを記事の視点に従って保持し、不明なAvailability / Evidence_Type / Probability / Confidenceは推測しません。生成時のNodeはNeedsReview、EdgeもNeedsReviewです。
 
-`modules/route_schema.py` の `SCHEMA_VERSION = "2"` が定義する形式です。
+旧形式ヘッダーを検出した場合は明確なエラーで停止します。自動フォールバック・自動移行・上書き・削除はしません。`route_migration.py` は明示的に呼び出された場合だけ旧形式入力を指定された別ディレクトリへ正規3ファイル名で変換し、入力と出力の衝突や既存出力ファイルへの上書きを拒否します。
 
-- Node列：`Node_ID, Canonical_Title, Canonical_URL, Aliases, Comprehension, Danger, Node_Type, Data_Status`
-- Edge列：`Edge_ID, Source_ID, Target_ID, Direction, Certainty, Availability, Evidence_Type, Probability, Condition, Review_Status`
-- Evidence列：`Evidence_ID, Edge_ID, Article_ID, Relation_Type, Source_Raw, Target_Raw, Raw_Text, Extract_Method, Confidence, Certainty, Availability, Evidence_Type, Probability`
-- 列挙値の許可集合は `route_schema.py:ENUM_VALUES` が正本です。
-- `modules/route_migration.py:migrate_legacy_route_csvs()` は旧形式Node/Edge CSVを読み、出力ディレクトリに `backrooms_nodes_v2.csv`、`backrooms_edges_v2.csv`、`backrooms_evidence_v2.csv` を書きます。入力CSVを直接変更しません。
-- 移行時に不明な情報は推測せずUnknown/NeedsReviewにし、移行されたEdgeはレビュー対象になります。
-- `modules/route_service.py:_load_v2()` は上記3ファイルを読みます。Node/Edge/Evidence間のID整合性を厳密に検証する処理は、現行実装で十分に確認できていません。
-
-#### 4.3 現行の不整合
-
-1. **生成側は旧形式2ファイル、移行側はv2形式3ファイルを出力する。** 現行の標準生成処理 `network.py` はv2形式を出力しません。
-2. **ファイル名が分岐している。** 移行処理・検索側は `*_v2.csv` を使用します。利用者が希望する正規名 `backrooms_nodes.csv` / `backrooms_edges.csv` / `backrooms_evidence.csv` とは異なります。
-3. **検索側は `backrooms_nodes_v2.csv` が存在するとv2を優先します。** そのファイルだけが残り、残り2ファイルが欠ける場合は `_load_v2()` が不完全セットとしてエラーになります。旧形式への自動フォールバックは行いません。
-4. **移行結果の標準保存先と検索側の探索先の契約が明確でない。** `migrate_legacy_route_csvs()` は呼び出し元指定の出力ディレクトリへ書きますが、検索側は `base_dir` 直下の固定ファイル名を探します。別ディレクトリへ出力しただけでは検索対象になりません。
-5. **Evidence CSVは移行処理で作成されるが、通常のネットワーク生成処理にはEvidence CSV生成機能がない。** 3ファイルを一体として更新する標準ワークフローがありません。
-6. **v2形式の既定検索条件は厳しい。** `Reviewed` で、`Available` かつ `Confirmed` のEdgeは既定で通します。Unknown/Uncertain/NeedsReviewはオプション指定なしでは除外されます。移行直後のデータはNeedsReview/Unknownが多く、読み込みに成功しても経路0件になり得ます。
-7. **旧形式とv2形式は意味論も異なる。** 旧形式のType/Category/Condition/Evidenceをv2のDirection/Certainty/Availability/Evidence_Type/Probability/Review_Statusへ変換する際、不明情報はUnknown扱いです。単純な列名変更では互換になりません。
-
-**結論：現在は旧形式生成とv2形式検索/移行が併存し、完全なエンドツーエンド契約が成立していません。** 新しいCSV実データを作る前に、正規ファイル名、保存ディレクトリ、3ファイルの必須性、列仕様、ID参照整合性、状態フィルター、更新単位を決定し、生成側と検索側を同じ契約へ統一する必要があります。設計確認まではCSVを生成・上書きしないでください。
+既定検索ではUnknown / Uncertain / NeedsReviewを含めます。Rumor、Closed、Disappearedは既定で除外し、False / Meta / Rejectedは常に除外します。Deprecated Nodeとその接続も除外します。Evidence行単位にも同じ確実性・利用可否・証拠種別のフィルターを適用します。GUI、AI、CLIは共通フィルターを使い、未確認情報を実際の到達保証として扱いません。
 
 ### 5. 一覧分類と図鑑分類
 
@@ -410,7 +388,7 @@ Python分類器 `classify_pages.py` は一覧所属INDEXとタイトル末尾の
 
 | ID | 優先度 | 対象 | 症状 | 調査上の注目点 / 完了条件 |
 | --- | --- | --- | --- | --- |
-| BUG-ROUTE-001 | 最優先 | 経路CSV生成・検索 | 生成されたCSVを経路検索が正常に利用できず、検索が機能しない | 旧形式生成とv2検索/移行の契約を統一。Nodes/Edges/Evidenceの列・ID・参照整合性を検証し、生成直後のデータを検索側が読み、実際に経路を返すこと |
+| BUG-ROUTE-001 | 実装改修済み・手動確認待ち | 経路CSV生成・検索 | 生成側と検索側の形式不一致 | 正規3ファイル、厳密な横断検証、共通フィルター、AI経路コンテキストの整合を実装。実データでの生成・経路検索・GUI表示は開発者の手動確認待ち |
 | BUG-CLASS-001 | 高 | HTML取得タブ・図鑑一覧 | 「あの電話ボックス η」が番外階層ηではなく無印番外階層に分類される | INDEX、タイトル、Master CSV、Python分類器、GUI正規化の全段階を追跡。対象だけの例外ではなく一般規則でη分類を整合させる |
 | BUG-ARTICLE-001 | 高 | 図鑑詳細本文 | 画像・クレジットが表示されても本文欄が「本文データがありません」になる。通常階層記事と `TH3 SH4DY GR3Y` 等で発生 | HTML本文抽出・TXT保存・ファイル検索・詳細API・描画のどこで欠落するかを特定。記事名の特例ではなく複数形式の一般的な本文抽出を修正する |
 | BUG-CLASS-002 | 中 | 番外階層の図鑑詳細見出し | 番外階層の記事なのに詳細ヘッダーが「異常階層」と表示される | 内部カテゴリIDと日本語表示ラベルのマッピングを一覧・タイル・詳細で統一する。分類自体と見出し表示を分けて検証する |
@@ -419,9 +397,9 @@ Python分類器 `classify_pages.py` は一覧所属INDEXとタイトル末尾の
 ### 8. 不具合修正時の不変条件
 
 - 記事HTML、TXT、画像、Summary CSV、会話DB、設定などの既存ユーザーデータを、調査目的で削除・初期化・一括再生成しない。
-- CSVの出力形式が確定するまでは実データを生成しない。形式検証はテスト用の一時データ・fixtureで行い、実データへの反映は利用者が確認した後に行う。
-- ルートCSVの正規ファイル名は、設計決定後は `backrooms_nodes.csv`、`backrooms_edges.csv`、`backrooms_evidence.csv` とする方針。ファイル名へ `v2` 接尾辞を再導入しない。これは目標契約であり、現行コードがまだ満たしているという意味ではない。
-- ルートCSV3ファイルは一つのデータセットとして扱う。いずれか一つだけが新旧混在した状態を公開しない。検証済みステージング・バックアップ・復元を用いて一括更新する。
+- AI作業中は実データを生成せず、リポジトリ内に動的生成CSVを作成・配置しない。テスト・モック・fixture・ダミーデータの作成および実行も行わず、実データの生成と動作確認は開発者が手動で実施する。
+- ルートCSVの正規ファイル名は `backrooms_nodes.csv`、`backrooms_edges.csv`、`backrooms_evidence.csv`。ファイル名へ `v2` 接尾辞を付けず、Dataset_ID列も追加しない。
+- ルートCSV3ファイルは一つのデータセットとして扱う。メモリ上とステージング後に横断検証し、バックアップ・ロールバックを用いて更新する。電源断・強制終了時の完全な原子性は保証せず、読込時にも全体を検証する。
 - 旧形式の既存CSVを自動削除・上書き・暗黙移行しない。移行は入力と出力を分離し、結果を検証してから切り替える。
 - カテゴリ修正は一覧取得と図鑑詳細の両方で同じ分類規則を使い、ZH/UAおよび既存EN翻訳の分類を壊さない。
 - 本文抽出修正は複数の記事レイアウトを対象にし、画像・クレジット抽出の正常動作を維持する。本文が空のときにHTML全体やナビゲーションを本文として誤保存しない。
@@ -433,12 +411,51 @@ Python分類器 `classify_pages.py` は一覧所属INDEXとタイトル末尾の
 
 2026-11-22のクリーンアップで、GPT作業由来のテスト一式とpytest設定を削除しています。そのため、過去の `tests/test_*.py` に関する記述は履歴情報であり、現在実行できるテストとして扱いません。
 
-今後の修正では、まず小さなfixtureを使った再現テストを必要な範囲で新規作成します。推奨する検証の順序は次のとおりです。
+テスト・モック・fixture・ダミーデータの作成および実行はdocs/AGENTS.mdにより禁止されています。過去のテスト関連記述は履歴としてのみ扱い、現行作業では実行しません。以下は開発者が実環境で行う手動確認項目です。AI作業ではテストやダミーデータを作成・実行しません。
 
-1. 経路：CSVヘッダー・値・Node/Edge/Evidence参照・欠損ファイル・不正列挙値・空データをfixtureで検証する。
-2. 経路：fixture生成 → route loader → 出発/到着候補解決 → 最短経路返却までを一連で検証する。
-3. 分類：通常/η/番外/番外η/亜階層/亜階層η、ZH/UA/EN翻訳を含む一覧fixtureで、HTML取得タブと図鑑の分類を比較する。
-4. 本文：MediaWiki API由来HTMLとWebView DOM由来HTML、通常階層と特殊レイアウトをfixture化し、抽出TXT・Summary・図鑑詳細レスポンスまで確認する。
-5. 全体：対象機能の検証後にGUI起動・既存機能の回帰確認を行う。実データを用いた更新は、fixture検証と形式確定の後に別途承認を得る。
+1. 経路：正規3ファイルのヘッダー・必須値・ID一意性・Node/Edge/Evidence参照関係を確認する。
+2. 経路：保存済みHTMLから生成し、GUIとCLIで出発/目的候補解決および最短経路を確認する。
+3. フィルター：Unknown / Uncertain / NeedsReviewの既定包含、Rumor / Closed / Disappearedの既定除外、False / Meta / Rejectedの常時除外を確認する。
+4. 旧形式：旧ヘッダーまたは不完全な3ファイルを検出したとき、エラー停止し既存ファイルを変更しないことを確認する。
+5. 全体：GUIのNode状態・Edge状態・記事別Evidence表示と、AIの経路コンテキスト・出典表示を確認する。
 
-テストコードは実装を支える開発資産であり、アプリの実行時必須ファイルではありません。テストを再作成する場合も、ユーザーデータやアプリの実行ファイルをテストfixtureとして流用しないでください。
+実データでの確認は開発者がバックアップを確保したうえで手動実施します。AI作業ではdocs/AGENTS.mdに従い、テスト・モック・fixture・ダミーデータを作成・実行せず、リポジトリ内へ動的生成CSVを配置しません。
+
+
+---
+
+## BUG-ROUTE-001 実装確定事項（2026-11-22）
+
+この節は旧記述に優先する現行契約です。docs/AGENTS.md の禁止事項は、本書の過去のテスト推奨記述より優先します。
+
+### 正規ファイルと列仕様
+
+正規ファイル名は backrooms_nodes.csv、backrooms_edges.csv、backrooms_evidence.csv の3つです。ファイル名に _v2 を付けず、Dataset_ID列も追加しません。列順・列挙値は modules/route_schema.py を正本とします。すべてUTF-8 BOM付きCSVです。
+
+### データセット整合性
+
+- Node_ID / Edge_ID / Evidence_IDは各ファイル内で一意かつ必須です。
+- EdgeのSource_ID / Target_IDはNode_IDを参照します。
+- EvidenceのEdge_IDはEdge_ID、Article_IDは根拠元記事のNode_IDを参照します。
+- AliasesはJSON文字列配列です。必須値・列挙値・JSON・ID参照に不正があれば、部分的に読み飛ばさずデータセット全体を拒否します。
+- 3ファイルすべてが存在し、ヘッダーと参照が正しい場合のみ読み込みます。旧形式ヘッダーはエラー停止し、自動フォールバック・自動移行・自動上書きしません。
+
+### 生成と更新
+
+network.py は保存HTMLから3ファイル分の行をメモリ上で作り、横断検証後にステージングへ書き出し、ステージングを再読込して再検証してからバックアップ付きで3ファイルを置換します。通常の置換例外ではロールバックし、復元に失敗したバックアップは手動復旧用に保持します。電源断・プロセス強制終了まで含む完全な原子性は保証できないため、読込側も毎回3ファイルを厳密検証します。
+
+Node IDはCanonical URLがある場合はURL由来、ない場合は保守的に正規化したタイトル由来です。曖昧なタイトルは自動統合しません。Evidenceは記事単位で保持し、複数記事が同じEdgeを裏付ける場合はEvidence行を複数保持します。Article_IDはEvidenceを抽出した記事自身です。Entrance / Exitの向きは記事の視点を維持します。不明なAvailability / Evidence_Type / Probability / Confidenceは推測しません。生成時のNodeはNeedsReview、EdgeはNeedsReviewです。
+
+### 検索とAI / CLI
+
+既定ではUnknown / Uncertain / NeedsReviewを含めます。Rumor、Closed、Disappearedは既定で除外します。False / Meta / Rejectedは常に除外し、Deprecated Nodeとその接続も除外します。Evidence行自体にも同じ確実性・利用可否・証拠種別フィルターを適用し、False / Metaのみの根拠からEdgeを通しません。GUI、AI、CLIは共通のフィルター関数を使用します。GUIの詳細表示ではNodeのData_StatusとEdgeの各状態・記事Evidenceを確認できます。
+
+AI経路コンテキストは直接接続、条件一致、複数Level経路のすべてで共通フィルターを通し、未確認情報を参考情報として明記します。ローカル経路CSVの出典は3ファイルすべてを記録します。
+
+### 明示的な旧形式移行
+
+route_migration.py は明示的に呼び出された場合だけ、正確な旧形式ヘッダーを持つ2ファイルを読み、指定された別ディレクトリへ正規3ファイル名で出力します。入力ファイルと出力先が衝突する場合は停止します。自動移行ではありません。
+
+### 手動確認と制約
+
+AI側は docs/AGENTS.md に従い、テスト、モック、fixture、ダミーデータを作成・実行しません。リポジトリ内に動的生成CSVも作成・配置しません。BUG-ROUTE-001の実環境での生成、検索、旧形式停止動作、GUI、AI、CLIの動作確認は開発者が手動で実施します。実装済みであっても、実データでの動作が手動確認されるまでは完了検証済みとは扱いません。

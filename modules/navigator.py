@@ -4,10 +4,9 @@ Route Navigation Module
 
 backrooms_nodes.csv
 backrooms_edges.csv
-extracted_fandom_levels_summary.csv
-wiki_list.txt
+backrooms_evidence.csv
 
-を読み込み、Level間の経路を検索する。
+を一体として検証・読込し、Level間の経路を検索する。
 """
 
 import csv
@@ -605,30 +604,17 @@ def format_node_display(
         {}
     )
 
-    title = info.get(
-        "title",
-        ""
-    )
+    title = info.get("title", "")
+    aliases = info.get("aliases", [])
+    display_name = (aliases[0] if aliases else title) or node_id
 
-    danger = info.get(
-        "danger",
-        ""
-    )
+    danger = info.get("danger", "")
+    comprehension = info.get("comprehension", "")
 
-    comprehension = info.get(
-        "comprehension",
-        ""
-    )
+    parts = [f"[{index}] {display_name}"]
 
-    parts = [
-        f"[{index}] {node_id}"
-    ]
-
-    if title:
-
-        parts.append(
-            f'"{title}"'
-        )
+    if title and display_name != title:
+        parts.append(f'"{title}"')
 
     meta_details = []
 
@@ -657,88 +643,38 @@ def format_node_display(
 # 接続条件表示
 # =============================================================================
 
-def print_edge_info(
-    source,
-    target,
-    edge_info
-):
-    """
-    2つのLevel間の接続条件を表示する。
-    """
-
-    infos = edge_info.get(
-        (source, target),
-        []
-    )
-
+def print_edge_info(source, target, edge_info, nodes=None):
+    """Display route state and article-level evidence for one transition."""
+    infos = edge_info.get((source, target), [])
     if not infos:
         return
 
-    print(
-        f"    → {target}"
-    )
+    target_info = (nodes or {}).get(target, {})
+    target_label = target_info.get("title") or target
+    print(f"    → {target_label}")
 
-    if len(infos) == 1:
-
-        info = infos[0]
-
-        if info["type"]:
-
-            print(
-                f"      Type     : "
-                f"{info['type']}"
-            )
-
-        if info["category"]:
-
-            print(
-                f"      Category : "
-                f"{info['category']}"
-            )
-
-        if info["condition"]:
-
-            print(
-                f"      条件     : "
-                f"{info['condition']}"
-            )
-
-    else:
-
+    for index, info in enumerate(infos, 1):
+        if len(infos) > 1:
+            print(f"      [{index}]")
         print(
-            f"      接続条件 : "
-            f"{len(infos)} 件"
+            "      状態: "
+            f"{info.get('certainty', 'Unknown')} / "
+            f"{info.get('availability', 'Unknown')} / "
+            f"{info.get('evidence_type', 'Unknown')} / "
+            f"{info.get('review_status', 'NeedsReview')}"
         )
-
-        for index, info in enumerate(
-            infos,
-            1
-        ):
-
+        if info.get("type"):
+            print(f"      Direction: {info['type']}")
+        if info.get("condition"):
+            print(f"      条件: {info['condition']}")
+        for evidence in info.get("evidence", []):
+            article = evidence.get("article_title") or evidence.get("article_id") or "記事不明"
             print(
-                f"      [{index}]"
+                f"      根拠記事: {article} "
+                f"({evidence.get('relation_type') or '区分不明'})"
             )
-
-            if info["type"]:
-
-                print(
-                    f"        Type     : "
-                    f"{info['type']}"
-                )
-
-            if info["category"]:
-
-                print(
-                    f"        Category : "
-                    f"{info['category']}"
-                )
-
-            if info["condition"]:
-
-                print(
-                    f"        条件     : "
-                    f"{info['condition']}"
-                )
+            if evidence.get("condition"):
+                print(f"        原文: {evidence['condition']}")
 
 
 # =============================================================================
@@ -789,7 +725,8 @@ def print_route(
             print_edge_info(
                 node_id,
                 next_node,
-                edge_info
+                edge_info,
+                nodes,
             )
 
 
@@ -1081,37 +1018,7 @@ def run_navigation():
     print("=" * 80)
 
     # =========================================================================
-    # データファイル確認
-    # =========================================================================
-
-    if not NODES_FILE.exists():
-
-        print()
-        print("[エラー]")
-        print(
-            "nodes CSV が見つかりません:"
-        )
-        print(
-            NODES_FILE
-        )
-
-        return
-
-    if not EDGES_FILE.exists():
-
-        print()
-        print("[エラー]")
-        print(
-            "edges CSV が見つかりません:"
-        )
-        print(
-            EDGES_FILE
-        )
-
-        return
-
-    # =========================================================================
-    # データ読み込み
+    # データ読み込み（正規3ファイル・旧形式検出・整合性検証を共通ローダーへ委譲）
     # =========================================================================
 
     print()
@@ -1504,6 +1411,7 @@ def run_navigation():
 # Shared route data and candidate matching used by the GUI, AI and CLI.
 from modules.route_service import load_route_graph as _load_shared_route_graph
 from modules.route_service import resolve_node_candidates as _resolve_shared_candidates
+from modules.route_service import _filtered_edges as _filter_shared_edges
 
 
 def load_nodes():
@@ -1512,8 +1420,19 @@ def load_nodes():
 
 
 def load_edges():
-    _, graph, edge_info = _load_shared_route_graph()
-    return graph, edge_info
+    nodes, _all_graph, all_edge_info = _load_shared_route_graph()
+    edge_info = _filter_shared_edges(
+        nodes, all_edge_info,
+        include_uncertain=True,
+        include_unknown=True,
+        include_rumor=False,
+        include_closed=False,
+        include_needs_review=True,
+    )
+    graph = defaultdict(list)
+    for source, target in edge_info:
+        graph[source].append(target)
+    return dict(graph), edge_info
 
 
 def find_node(nodes, query):

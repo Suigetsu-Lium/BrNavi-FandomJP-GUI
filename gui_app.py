@@ -2222,13 +2222,13 @@ HTML_TEMPLATE = r"""
           <span class="pb-2 text-gray-400">→</span><label class="text-xs font-semibold">目的Level<input id="route-goal" class="block mt-1 border border-[#d6c79a] rounded px-3 py-2 text-sm" placeholder="Level 4"></label>
           <button onclick="searchRoutes()" class="px-4 py-2 rounded bg-[#b45309] text-white text-xs font-semibold">経路を検索</button><span id="route-status" class="text-xs text-gray-600" role="status"></span></div>
         <div class="flex flex-wrap gap-x-4 gap-y-2 rounded border border-[#e2d8b5] bg-[#fffdf5] p-3 text-xs text-gray-700">
-          <label class="flex items-center gap-2"><input id="route-include-uncertain" type="checkbox">不確実な接続を含める</label>
-          <label class="flex items-center gap-2"><input id="route-include-unknown" type="checkbox">状態不明を含める</label>
+          <label class="flex items-center gap-2"><input id="route-include-uncertain" type="checkbox" checked>不確実な接続を含める</label>
+          <label class="flex items-center gap-2"><input id="route-include-unknown" type="checkbox" checked>状態不明を含める</label>
           <label class="flex items-center gap-2"><input id="route-include-rumor" type="checkbox">噂を含める</label>
           <label class="flex items-center gap-2"><input id="route-include-closed" type="checkbox">閉鎖・消失済みを含める</label>
-          <label class="flex items-center gap-2"><input id="route-include-review" type="checkbox">要確認データを含める</label>
+          <label class="flex items-center gap-2"><input id="route-include-review" type="checkbox" checked>要確認データを含める</label>
         </div>
-        <p class="text-[11px] text-gray-500">標準では「確定・利用可能・確認済み」の接続のみを検索します。未確認データを含める場合は、該当項目を有効にしてください。</p>
+        <p class="text-[11px] text-gray-500">初期設定では Unknown / Uncertain / NeedsReview も参考情報として検索します。結果は到達可能性を保証しません。各接続の確実性・利用可否・審査状態を確認してください。Rumor、Closed / Disappeared は初期状態で除外し、False / Meta / Rejected は常に除外します。</p>
         <div id="route-results-list" class="space-y-3"><div id="route-results" class="space-y-4"></div></div>
         <div id="route-detail-view" class="hidden space-y-3">
           <button type="button" onclick="showRouteResults()" class="rounded border border-[#d6c79a] px-3 py-2 text-sm font-semibold hover:bg-amber-50">← 検索結果一覧へ戻る</button>
@@ -3423,7 +3423,7 @@ HTML_TEMPLATE = r"""
       const edgeInfo = routeLastResults.edge_info || {};
       const levelBlock = node => `<article class="rounded-lg border border-[#d6c79a] bg-white p-4 shadow-sm">
         <div class="flex flex-wrap items-center justify-between gap-3"><div><div class="text-lg font-bold">${escapeHTML(node.id)}</div><div class="text-sm text-[#91520f]">${escapeHTML(node.title || '題名なし')}</div></div>
-        <div class="flex flex-wrap items-center gap-2"><span class="${dangerBadgeClass(node.danger)}">危険度 ${escapeHTML(node.danger || '未登録')}</span><span class="rounded-full bg-sky-100 px-2 py-0.5 text-xs font-bold text-sky-800">理解度 ${escapeHTML(node.comprehension || '未登録')}</span>
+        <div class="flex flex-wrap items-center gap-2"><span class="${dangerBadgeClass(node.danger)}">危険度 ${escapeHTML(node.danger || '未登録')}</span><span class="rounded-full bg-sky-100 px-2 py-0.5 text-xs font-bold text-sky-800">理解度 ${escapeHTML(node.comprehension || '未登録')}</span><span class="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-bold text-amber-800">データ状態 ${escapeHTML(node.data_status || 'Unknown')}</span>
         <button type="button" data-route-level="${escapeHTML(node.id)}" class="rounded bg-[#91520f] px-3 py-1.5 text-xs font-semibold text-white">Level 図鑑で開く</button></div></div></article>`;
       let timeline = levelBlock(route[0]);
       for (let index = 0; index < route.length - 1; index++) {
@@ -3433,7 +3433,7 @@ HTML_TEMPLATE = r"""
           <div class="text-xs font-bold text-[#78440f]">${[info.category, info.type].filter(Boolean).map(escapeHTML).join(' · ') || '移動条件'}</div>
           <div class="mt-1 flex flex-wrap gap-1 text-[11px]">確実性: ${escapeHTML(info.certainty || 'Unknown')} · 利用可否: ${escapeHTML(info.availability || 'Unknown')} · 証拠: ${escapeHTML(info.evidence_type || 'Unknown')} · 頻度: ${escapeHTML(info.probability || 'Unknown')} · 審査: ${escapeHTML(info.review_status || '—')}</div>
           <div class="mt-1 whitespace-pre-wrap break-words text-base font-semibold leading-relaxed">${escapeHTML(info.condition || '条件の記載なし')}</div>
-          ${(info.evidence || []).map(ev => `<div class="mt-2 rounded border border-[#e4d6b2] bg-white p-2 text-xs"><div class="font-semibold">記事証拠: ${escapeHTML(ev.article_id || '不明')} · ${escapeHTML(ev.relation_type || '区分不明')}</div><div class="mt-1 whitespace-pre-wrap">${escapeHTML(ev.condition || '')}</div><div class="mt-1 text-gray-500">抽出: ${escapeHTML(ev.extract_method || '不明')} · 信頼度: ${escapeHTML(ev.confidence || '未設定')}</div></div>`).join('')}</div>`).join('') : '<div class="text-sm text-gray-600">移動条件の記載はありません。</div>';
+          ${(info.evidence || []).map(ev => `<div class="mt-2 rounded border border-[#e4d6b2] bg-white p-2 text-xs"><div class="font-semibold">記事証拠: ${escapeHTML(ev.article_title || ev.article_id || '不明')} · ${escapeHTML(ev.relation_type || '区分不明')}</div><div class="mt-1 whitespace-pre-wrap">${escapeHTML(ev.condition || '')}</div><div class="mt-1 text-gray-500">抽出: ${escapeHTML(ev.extract_method || '不明')} · 信頼度: ${escapeHTML(ev.confidence || '未設定')}</div></div>`).join('')}</div>`).join('') : '<div class="text-sm text-gray-600">移動条件の記載はありません。</div>';
         timeline += `<div class="ml-6 border-l-2 border-[#c68a2b] py-3 pl-5"><div class="mb-2 text-xs font-bold text-[#91520f]">↓ ${escapeHTML(source.id)} から ${escapeHTML(target.id)} へ</div><div class="space-y-2">${details}</div></div>${levelBlock(target)}`;
       }
       const content = document.getElementById('route-detail-content');

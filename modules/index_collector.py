@@ -37,7 +37,7 @@ INDEX_PAGES = {
     "hierarchy": "https://backrooms.fandom.com/ja/wiki/階層の一覧",
     "normal": "https://backrooms.fandom.com/ja/wiki/無印通常階層の一覧",
     "normal_eta": "https://backrooms.fandom.com/ja/wiki/通常階層_η_の一覧",
-    "anomalous": "https://backrooms.fandom.com/ja/wiki/番外階層の一覧",
+    "enigmatic": "https://backrooms.fandom.com/ja/wiki/番外階層の一覧",
     "sublevel": "https://backrooms.fandom.com/ja/wiki/亜階層の一覧",
     "alias": "https://backrooms.fandom.com/ja/wiki/別名の一覧",
     "terms": "https://backrooms.fandom.com/ja/wiki/用語の一覧",

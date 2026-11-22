@@ -143,7 +143,7 @@ INDEX_FILES = {
     "hierarchy": "hierarchy.html",
     "normal": "normal.html",
     "normal_eta": "normal_eta.html",
-    "anomalous": "anomalous.html",
+    "enigmatic": "enigmatic.html",
     "sublevel": "sublevel.html",
     "alias": "alias.html",
     "terms": "terms.html",

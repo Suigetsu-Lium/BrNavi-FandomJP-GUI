@@ -35,16 +35,16 @@ Fandom JP のWikiページHTMLをダウンロードする。
     normal_eta
     sublevel
     sublevel_eta
-    anomalous
-    anomalous_eta
+    enigmatic
+    enigmatic_eta
     ...
 
 画面表示時には、
 
-    通常階層（JP）
+    無印通常階層（JP）
     通常階層 η（JP）
-    亜階層（JP）
-    番外階層（UA）
+    無印通常亜階層（JP）
+    無印番外階層（UA）
 
 などの表示に変換する。
 
@@ -129,14 +129,15 @@ REQUEST_TIMEOUT = 15
 # =============================================================================
 
 CATEGORY_LABELS = {
-    "normal": "通常階層",
+    "normal": "無印通常階層",
     "normal_eta": "通常階層 η",
 
-    "sublevel": "亜階層",
-    "sublevel_eta": "亜階層 η",
+    "sublevel": "無印通常亜階層",
+    "sublevel_eta": "通常亜階層 η",
 
-    "anomalous": "番外階層",
-    "anomalous_eta": "番外階層 η",
+    "enigmatic": "無印番外階層",
+    "enigmatic_eta": "番外階層 η",
+    "enigmatic_sublevel_eta": "番外亜階層 η",
 
     "foreign": "国外階層",
 
@@ -172,8 +173,9 @@ CATEGORY_ORDER = [
     "sublevel",
     "sublevel_eta",
 
-    "anomalous",
-    "anomalous_eta",
+    "enigmatic",
+    "enigmatic_eta",
+    "enigmatic_sublevel_eta",
 
     "foreign",
 

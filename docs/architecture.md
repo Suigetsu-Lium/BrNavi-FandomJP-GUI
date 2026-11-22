@@ -367,11 +367,11 @@ Node IDはCanonical URLがある場合はURL由来、ない場合は保守的に
 
 `all_links.csv`、`pages_database.csv`、`pages_database_classified.csv` は `index_memberships` JSON列と `section_path`、`section_order`、`page_order` を持ちます。同じURLが複数一覧に掲載される場合、所属情報を失わず統合します。URLの重複統合時にタイトル順へ並べ替えず、一覧群とDOMの出現順を維持します。
 
-`classify_pages.py` は記事名の個別例外やη末尾判定を分類の根拠にせず、一覧IDとその見出し階層を優先します。専門一覧（通常階層η、番外階層、亜階層、無印通常階層）を包括的な階層一覧より優先し、各掲載情報と選択した分類根拠をMaster DBへ引き継ぎます。既存互換の内部カテゴリID（`normal`、`normal_eta`、`anomalous`、`anomalous_eta`、`sublevel`、`sublevel_eta`、`anomalous_sublevel_eta` 等）は維持します。
+`classify_pages.py` は記事名の個別例外やη末尾判定を分類の根拠にせず、一覧IDとその見出し階層を優先します。専門一覧（通常階層η、番外階層、亜階層、無印通常階層）を包括的な階層一覧より優先し、各掲載情報と選択した分類根拠をMaster DBへ引き継ぎます。Wiki標準用語に統一した内部カテゴリID（`normal`、`normal_eta`、`enigmatic`、`enigmatic_eta`、`sublevel`、`sublevel_eta`、`enigmatic_sublevel_eta` 等）は維持します。
 
 `merge_databases.py` は `index_memberships` と選択されたセクション経路・順序を `pages_master.csv` へ統合します。`database.py` と `operations.py` は同じ列を読み込み、GUIのHTML取得タブ・図鑑一覧へ渡します。`level_list_generator.py` はカテゴリラベルと一覧掲載順を保持した互換TXTも生成します。翻訳一覧は `translation_parser.py` が見出しの親子関係を「親 > 子」の経路として保持し、翻訳分類器は末尾の見出しを分類対象として解釈します。
 
-日本語表示ラベルは内部IDから一元的に解決し、「無印通常階層」「通常階層 η」「無印通常亜階層」「通常亜階層 η」「無印番外階層」「番外階層 η」「番外亜階層 η」等を使用します。「異常階層」「番外異常階層」等の旧誤訳は表示しません。GUIは番外階層・亜階層の一覧で元Wikiの見出しをグループ見出しとして表示し、グループ内の掲載順を保持します。
+日本語表示ラベルは内部IDから一元的に解決し、「無印通常階層」「通常階層 η」「無印通常亜階層」「通常亜階層 η」「無印番外階層」「番外階層 η」「番外亜階層 η」等を使用します。誤った旧称・複合表記は表示しません。GUIは番外階層・亜階層の一覧で元Wikiの見出しをグループ見出しとして表示し、グループ内の掲載順を保持します。
 
 ### 6. 図鑑記事本文と画像
 
@@ -396,7 +396,7 @@ Node IDはCanonical URLがある場合はURL由来、ない場合は保守的に
 | BUG-ROUTE-001 | 実装改修済み・手動確認待ち | 経路CSV生成・検索 | 生成側と検索側の形式不一致 | 正規3ファイル、厳密な横断検証、共通フィルター、AI経路コンテキストの整合を実装。実データでの生成・経路検索・GUI表示は開発者の手動確認待ち |
 | BUG-CLASS-001 | 実装改修済み・手動確認待ち | HTML取得タブ・図鑑一覧 | 一覧HTMLの見出し構造・掲載順が失われ、特殊なη記事やサブカテゴリが誤分類される | 9一覧の取得、見出し階層・掲載順保持、所属JSONのMaster伝達、一覧見出しに基づく一般分類、日本語表示ラベル統一を実装。開発者の実環境で再構築・GUI確認待ち |
 | BUG-ARTICLE-001 | 高 | 図鑑詳細本文 | 画像・クレジットが表示されても本文欄が「本文データがありません」になる。通常階層記事と `TH3 SH4DY GR3Y` 等で発生 | HTML本文抽出・TXT保存・ファイル検索・詳細API・描画のどこで欠落するかを特定。記事名の特例ではなく複数形式の一般的な本文抽出を修正する |
-| BUG-CLASS-002 | 実装改修済み・手動確認待ち | 番外階層の図鑑詳細見出し | 番外階層の記事なのに詳細ヘッダーが「異常階層」と表示される | 内部カテゴリIDを維持したまま、HTML取得タブ・図鑑タイル・詳細ヘッダーの日本語ラベルを統一。開発者の実環境で確認待ち |
+| BUG-CLASS-002 | 実装改修済み・手動確認待ち | 番外階層の図鑑詳細見出し | 番外階層の記事の詳細ヘッダー表示が標準ラベルと一致しない | 内部カテゴリIDと表示ラベルをWiki標準用語に統一し、HTML取得タブ・図鑑タイル・詳細ヘッダーへ反映。開発者の実環境で確認待ち |
 | DEFER-EN-001 | 次期版 | 英語版記事の危険度表示 | EN記事では生存難易度が文字画像・シンボルで示される形式があり、現行抽出が十分対応していない | 今回は実装しない。上記4件の修正完了後、次期版でENのシンボル表現を解析する。既存のZH/UAおよび一部EN翻訳記事の正常動作を維持する |
 
 ### 8. 不具合修正時の不変条件
@@ -478,7 +478,7 @@ AI側は docs/AGENTS.md に従い、テスト、モック、fixture、ダミー�
 | hierarchy | 階層の一覧 | hierarchy.html |
 | normal | 無印通常階層の一覧 | normal.html |
 | normal_eta | 通常階層 η の一覧 | normal_eta.html |
-| anomalous | 番外階層の一覧 | anomalous.html |
+| enigmatic | 番外階層の一覧 | enigmatic.html |
 | sublevel | 亜階層の一覧 | sublevel.html |
 | alias | 別名の一覧 | alias.html |
 | terms | 用語の一覧 | terms.html |
@@ -510,14 +510,14 @@ AI側は docs/AGENTS.md に従い、テスト、モック、fixture、ダミー�
 | normal_eta | 通常階層 η |
 | sublevel | 無印通常亜階層 |
 | sublevel_eta | 通常亜階層 η |
-| anomalous | 無印番外階層 |
-| anomalous_eta | 番外階層 η |
-| anomalous_sublevel_eta | 番外亜階層 η |
+| enigmatic | 無印番外階層 |
+| enigmatic_eta | 番外階層 η |
+| enigmatic_sublevel_eta | 番外亜階層 η |
 | alias | 別名 |
 | terms | 用語 |
 | contest | コンテスト |
 
-内部IDは既存互換のため変更しません。表示ラベルは `level_list_generator.py`、`operations.py`、`database.py`、`gui_app.py` で同じ日本語表記を使用します。「異常階層」「番外異常階層」「番外サブ階層」等の誤訳を新たに出力しません。
+内部IDはWiki標準用語に合わせて統一します。旧IDとの自動互換・読み替えは行いません。表示ラベルは `level_list_generator.py`、`operations.py`、`database.py`、`gui_app.py` で同じ日本語表記を使用します。誤った旧称や複合表記を新たに出力しません。
 
 ### 翻訳一覧
 

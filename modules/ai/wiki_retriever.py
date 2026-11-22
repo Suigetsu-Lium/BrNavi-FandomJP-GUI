@@ -61,7 +61,7 @@ RESEARCH_QUERY_RE = re.compile(
 )
 LEVEL_METADATA_QUERY_RE = re.compile(
     r"おすすめ|オススメ|一覧|危険度|安全|危険|理解度|カテゴリ|カテゴリー|分類|条件|絞り|"
-    r"η|イータ|\beta\b|normal_eta|sublevel_eta|anomalous_eta",
+    r"η|イータ|\beta\b|normal_eta|sublevel_eta|enigmatic_eta",
     re.IGNORECASE,
 )
 
@@ -306,7 +306,7 @@ class WikiRetriever:
         if not LEVEL_METADATA_QUERY_RE.search(str(query or "")):
             return []
         query_text = str(query or "")
-        eta_query = bool(re.search(r"η|イータ|\beta\b|(?:normal|sublevel|anomalous)_eta", query_text, re.I))
+        eta_query = bool(re.search(r"η|イータ|\beta\b|(?:normal|sublevel|enigmatic)_eta", query_text, re.I))
         has_filter_intent = bool(re.search(
             r"おすすめ|オススメ|一覧|危険度|安全|危険|理解度|カテゴリ|カテゴリー|分類|条件|絞り",
             query_text,
@@ -322,7 +322,7 @@ class WikiRetriever:
             return []
 
         normalized_query = _normalize(query)
-        wants_eta = bool(re.search(r"η|イータ|\beta\b|(?:normal|sublevel|anomalous)_eta", normalized_query, re.I))
+        wants_eta = bool(re.search(r"η|イータ|\beta\b|(?:normal|sublevel|enigmatic)_eta", normalized_query, re.I))
         danger_clause = re.search(r"(?:危険度|danger|安全|危険性)([^。！？\n]{0,24})", normalized_query, re.I)
         requested_danger = set(re.findall(r"(?<!\d)(\d)(?!\d)", danger_clause.group(1))) if danger_clause else set()
         wants_safe = bool(re.search(r"安全|低危険|危険度が低", normalized_query))

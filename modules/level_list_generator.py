@@ -71,9 +71,9 @@ CATEGORY_ORDER = [
     "normal_eta",
     "sublevel",
     "sublevel_eta",
-    "anomalous",
-    "anomalous_eta",
-    "anomalous_sublevel_eta",
+    "enigmatic",
+    "enigmatic_eta",
+    "enigmatic_sublevel_eta",
     "alias",
     "terms",
     "contest",
@@ -100,11 +100,11 @@ CATEGORY_LABELS = {
 
     "sublevel_eta": "通常亜階層 η",
 
-    "anomalous": "無印番外階層",
+    "enigmatic": "無印番外階層",
 
-    "anomalous_eta": "番外階層 η",
+    "enigmatic_eta": "番外階層 η",
 
-    "anomalous_sublevel_eta": "番外亜階層 η",
+    "enigmatic_sublevel_eta": "番外亜階層 η",
 
     "alias": "別名",
 

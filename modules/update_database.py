@@ -97,7 +97,7 @@ def check_index_html(log=print):
         "hierarchy.html",
         "normal.html",
         "normal_eta.html",
-        "anomalous.html",
+        "enigmatic.html",
         "sublevel.html",
         "alias.html",
         "terms.html",
@@ -164,7 +164,7 @@ def _validate_step_output(name, started_at):
             os.path.join(INDEX_HTML_DIR, filename)
             for filename in (
                 "hierarchy.html", "normal.html", "normal_eta.html",
-                "anomalous.html", "sublevel.html", "alias.html",
+                "enigmatic.html", "sublevel.html", "alias.html",
                 "terms.html", "translation.html", "contest.html",
             )
         ]

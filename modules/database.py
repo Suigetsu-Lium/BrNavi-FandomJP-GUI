@@ -181,9 +181,9 @@ def load_master_database():
                         "normal_eta": "通常階層 η",
                         "sublevel": "無印通常亜階層",
                         "sublevel_eta": "通常亜階層 η",
-                        "anomalous": "無印番外階層",
-                        "anomalous_eta": "番外階層 η",
-                        "anomalous_sublevel_eta": "番外亜階層 η",
+                        "enigmatic": "無印番外階層",
+                        "enigmatic_eta": "番外階層 η",
+                        "enigmatic_sublevel_eta": "番外亜階層 η",
                         "alias": "別名",
                         "terms": "用語",
                         "contest": "コンテスト",
@@ -280,8 +280,8 @@ def find_master_candidates(
             normal_eta
             sublevel
             sublevel_eta
-            anomalous
-            anomalous_eta
+            enigmatic
+            enigmatic_eta
 
     Returns
     -------

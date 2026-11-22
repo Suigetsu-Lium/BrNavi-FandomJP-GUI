@@ -78,11 +78,11 @@ APP_SETTINGS = AppSettingsStore(BASE_DIR / "database" / "app_settings.json")
 CATEGORY_PRIORITY = {
     "normal_eta": 1,     # 1. 通常階層 η
     "sublevel_eta": 2,   # 2. 通常亜階層 η
-    "anomalous_eta": 3,  # 3. 番外階層 η
-    "anomalous_sublevel_eta": 4,
+    "enigmatic_eta": 3,  # 3. 番外階層 η
+    "enigmatic_sublevel_eta": 4,
     "normal": 5,         # 通常階層
     "sublevel": 6,       # 通常亜階層
-    "anomalous": 7,      # 番外階層
+    "enigmatic": 7,      # 番外階層
 }
 
 
@@ -4027,9 +4027,9 @@ HTML_TEMPLATE = r"""
         normal_eta: '通常階層 η',
         sublevel: '無印通常亜階層',
         sublevel_eta: '通常亜階層 η',
-        anomalous: '無印番外階層',
-        anomalous_eta: '番外階層 η',
-        anomalous_sublevel_eta: '番外亜階層 η',
+        enigmatic: '無印番外階層',
+        enigmatic_eta: '番外階層 η',
+        enigmatic_sublevel_eta: '番外亜階層 η',
         alias: '別名', terms: '用語', contest: 'コンテスト',
         item: '物品', entity: 'エンティティ', phenomenon: '現象',
         person: '人物', dimension: '次元', foreign: '国外階層',
@@ -4198,7 +4198,7 @@ HTML_TEMPLATE = r"""
       {id: "normal_eta", title: "通常階層 η の一覧", visual: "η", wikiTitle: "通常階層 η の一覧",
         imageUrl: "https://static.wikia.nocookie.net/backrooms/images/7/7b/Playroom_of_West_Hikari_train.jpg/revision/latest/scale-to-width-down/360?cb=20220606092655&path-prefix=ja",
         imagePageUrl: "https://backrooms.fandom.com/ja/wiki/ファイル:Playroom_of_West_Hikari_train.jpg"},
-      {id: "anomalous", title: "番外階層の一覧", visual: "!", wikiTitle: "番外階層の一覧",
+      {id: "enigmatic", title: "番外階層の一覧", visual: "!", wikiTitle: "番外階層の一覧",
         imageUrl: "https://static.wikia.nocookie.net/backrooms/images/8/87/Ventilation.jpg/revision/latest/scale-to-width-down/360?cb=20220301165212&path-prefix=ja",
         imagePageUrl: "https://backrooms.fandom.com/ja/wiki/ファイル:Ventilation.jpg"},
       {id: "sublevel", title: "亜階層の一覧", visual: "1.1", wikiTitle: "亜階層の一覧",
@@ -4218,7 +4218,7 @@ HTML_TEMPLATE = r"""
     ];
 
     const levelListCategoryLabels = {
-      anomalous_sublevel_eta: "番外亜階層 η",
+      enigmatic_sublevel_eta: "番外亜階層 η",
       alias: "別名",
       terms: "用語",
       contest: "コンテスト",
@@ -4249,9 +4249,9 @@ HTML_TEMPLATE = r"""
 
     function normalizeExplorerCategory(value) {
       const category = String(value || '').trim().toLocaleLowerCase();
-      if (/番外.*亜階層|anomalous_sublevel/.test(category)) return 'anomalous_sublevel_eta';
+      if (/番外.*亜階層|enigmatic_sublevel/.test(category)) return 'enigmatic_sublevel_eta';
       if (/通常.*亜階層|sublevel/.test(category)) return /η|eta/.test(category) ? 'sublevel_eta' : 'sublevel';
-      if (/番外階層|anomalous/.test(category)) return /η|eta/.test(category) ? 'anomalous_eta' : 'anomalous';
+      if (/番外階層|enigmatic/.test(category)) return /η|eta/.test(category) ? 'enigmatic_eta' : 'enigmatic';
       if (/通常階層|normal/.test(category)) return /η|eta/.test(category) ? 'normal_eta' : 'normal';
       if (/別名|alias/.test(category)) return 'alias';
       if (/翻訳|translation/.test(category)) return 'translation';
@@ -4272,12 +4272,12 @@ HTML_TEMPLATE = r"""
         if (categoryId === "normal_eta") {
           return category === "normal_eta" && source !== "translation";
         }
-        if (categoryId === "anomalous") {
-          return source !== "translation" && ["anomalous", "anomalous_eta"].includes(category);
+        if (categoryId === "enigmatic") {
+          return source !== "translation" && ["enigmatic", "enigmatic_eta"].includes(category);
         }
         if (categoryId === "sublevel") {
           return source !== "translation" &&
-            ["sublevel", "sublevel_eta", "anomalous_sublevel_eta"].includes(category);
+            ["sublevel", "sublevel_eta", "enigmatic_sublevel_eta"].includes(category);
         }
         if (categoryId === "translation") {
           return sources.includes("translation") || category === "translation";
@@ -4304,8 +4304,8 @@ HTML_TEMPLATE = r"""
         normalizeExplorerCategory(page.category)
       )))
         .filter(id => id && !knownIds.has(id) &&
-          !["normal_eta", "anomalous_eta", "sublevel_eta"].includes(id) &&
-          !id.startsWith("normal") && !id.startsWith("anomalous") && !id.startsWith("sublevel"))
+          !["normal_eta", "enigmatic_eta", "sublevel_eta"].includes(id) &&
+          !id.startsWith("normal") && !id.startsWith("enigmatic") && !id.startsWith("sublevel"))
         .sort((left, right) => left.localeCompare(right));
       additionalIds.forEach(id => {
         const pages = levelListPagesForCategory(id, sourcePages);
@@ -4502,7 +4502,7 @@ HTML_TEMPLATE = r"""
     }
 
     function getLevelListSections(pages, categoryId = currentLevelListCategory) {
-      if (["anomalous", "sublevel", "alias", "terms", "contest"].includes(categoryId)) {
+      if (["enigmatic", "sublevel", "alias", "terms", "contest"].includes(categoryId)) {
         const groups = new Map();
         const sectionIndex = {alias: "alias", terms: "terms", contest: "contest"}[categoryId] || "";
         pages.forEach(page => {
@@ -4524,8 +4524,8 @@ HTML_TEMPLATE = r"""
       }
 
       if (categoryId === "all") {
-        const categoryOrder = ["normal", "normal_eta", "anomalous", "anomalous_eta",
-          "sublevel", "sublevel_eta", "anomalous_sublevel_eta", "alias", "terms", "contest",
+        const categoryOrder = ["normal", "normal_eta", "enigmatic", "enigmatic_eta",
+          "sublevel", "sublevel_eta", "enigmatic_sublevel_eta", "alias", "terms", "contest",
           "dimension", "foreign", "entity", "item", "phenomenon", "canon",
           "joke_level", "joke_article", "person"];
         const groups = new Map();

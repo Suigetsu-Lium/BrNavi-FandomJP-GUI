@@ -202,17 +202,17 @@ def _membership_category(index_name, section_path, title):
         return "normal_eta"
     if index_name == "normal":
         return "normal"
-    if index_name == "anomalous":
+    if index_name == "enigmatic":
         if any(re.search(r"番外亜階層\s*η", value) for value in normalized):
-            return "anomalous_sublevel_eta"
+            return "enigmatic_sublevel_eta"
         if any(re.search(r"番外階層\s*η", value) for value in normalized):
-            return "anomalous_eta"
+            return "enigmatic_eta"
         if any("無印番外階層" in value or value == "番外階層" for value in normalized):
-            return "anomalous"
-        return "anomalous"
+            return "enigmatic"
+        return "enigmatic"
     if index_name == "sublevel":
         if any(re.search(r"番外亜階層\s*η", value) for value in normalized):
-            return "anomalous_sublevel_eta"
+            return "enigmatic_sublevel_eta"
         if any(re.search(r"通常亜階層\s*η", value) for value in normalized):
             return "sublevel_eta"
         if any("無印通常亜階層" in value or value == "亜階層" for value in normalized):
@@ -220,11 +220,11 @@ def _membership_category(index_name, section_path, title):
         return "sublevel"
     if index_name == "hierarchy":
         if any(re.search(r"番外階層\s*η", value) for value in normalized):
-            return "anomalous_eta"
+            return "enigmatic_eta"
         if any(re.search(r"通常階層\s*η", value) for value in normalized):
             return "normal_eta"
         if any("番外階層" in value for value in normalized):
-            return "anomalous"
+            return "enigmatic"
         if any("亜階層" in value for value in normalized):
             return "sublevel_eta" if any("η" in value for value in normalized) else "sublevel"
         if any("通常階層" in value for value in normalized):
@@ -242,7 +242,7 @@ def _membership_category(index_name, section_path, title):
 
 INDEX_SOURCE_PRIORITY = {
     "normal_eta": 0,
-    "anomalous": 1,
+    "enigmatic": 1,
     "sublevel": 2,
     "normal": 3,
     "hierarchy": 4,
@@ -253,10 +253,10 @@ INDEX_SOURCE_PRIORITY = {
 
 CATEGORY_SOURCE_PRIORITY = {
     "normal_eta": 0,
-    "anomalous_eta": 1,
-    "anomalous_sublevel_eta": 2,
+    "enigmatic_eta": 1,
+    "enigmatic_sublevel_eta": 2,
     "sublevel_eta": 3,
-    "anomalous": 4,
+    "enigmatic": 4,
     "sublevel": 5,
     "normal": 6,
     "alias": 7,
@@ -297,9 +297,9 @@ def detect_category(title, indexes, index_memberships=""):
     index_set = {value.strip() for value in indexes.split("|") if value.strip()}
     if "normal_eta" in index_set:
         return "normal_eta", "legacy_index=normal_eta"
-    if "anomalous" in index_set:
-        category = "anomalous_eta" if has_eta(title) else "anomalous"
-        return category, "legacy_index=anomalous_without_section"
+    if "enigmatic" in index_set:
+        category = "enigmatic_eta" if has_eta(title) else "enigmatic"
+        return category, "legacy_index=enigmatic_without_section"
     if "sublevel" in index_set:
         category = "sublevel_eta" if has_eta(title) else "sublevel"
         return category, "legacy_index=sublevel_without_section"

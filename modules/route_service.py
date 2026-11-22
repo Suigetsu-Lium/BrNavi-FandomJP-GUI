@@ -6,6 +6,7 @@ from collections import defaultdict, deque
 from pathlib import Path
 
 from modules.runtime_paths import get_application_dir
+from modules.wiki_markup import format_wiki_links
 from modules.route_schema import (
     NODE_FILENAME, EDGE_FILENAME, EVIDENCE_FILENAME,
     validate_dataset, SchemaError,
@@ -345,7 +346,7 @@ def build_route_context(query, *, base_dir=None):
             raw_text = evidence.get("condition") or ""
             rows.append(f"  根拠記事: {article} ({relation})")
             if raw_text:
-                rows.append(f"    原文: {raw_text}")
+                rows.append(f"    原文: {format_wiki_links(raw_text)}")
 
     if condition_matches:
         rows = ["ローカルルートグラフ（未確認情報を含む参考情報。実際の到達・安全性は保証しません）:"]
@@ -353,7 +354,7 @@ def build_route_context(query, *, base_dir=None):
             rows.append(f"- {_node(source, nodes)['id']} → {_node(target, nodes)['id']}")
             rows.append(f"  状態: {info.get('certainty', 'Unknown')}/{info.get('availability', 'Unknown')}/{info.get('review_status', 'NeedsReview')}")
             if info.get("condition"):
-                rows.append(f"  接続条件: {info['condition']}")
+                rows.append(f"  接続条件: {format_wiki_links(info['condition'])}")
             append_evidence(rows, info)
         return "\n".join(rows)
     if len(mentions) == 1:
@@ -364,7 +365,7 @@ def build_route_context(query, *, base_dir=None):
             for info in selected_info.get((current, target), []):
                 rows.append(f"  状態: {info.get('certainty', 'Unknown')}/{info.get('availability', 'Unknown')}/{info.get('review_status', 'NeedsReview')}")
                 if info.get("condition"):
-                    rows.append(f"  接続条件: {info['condition']}")
+                    rows.append(f"  接続条件: {format_wiki_links(info['condition'])}")
                 append_evidence(rows, info)
         return "\n".join(rows)
     if len(mentions) >= 2:
@@ -377,7 +378,7 @@ def build_route_context(query, *, base_dir=None):
                 for info in selected_info.get((source_id, target_id), []):
                     rows.append(f"  状態: {info.get('certainty', 'Unknown')}/{info.get('availability', 'Unknown')}/{info.get('review_status', 'NeedsReview')}")
                     if info.get("condition"):
-                        rows.append(f"  接続条件: {info['condition']}")
+                        rows.append(f"  接続条件: {format_wiki_links(info['condition'])}")
                     append_evidence(rows, info)
         if not result.get("routes"):
             rows.append(result.get("message") or result.get("error") or "該当経路はありません。")

@@ -21,6 +21,7 @@ from pathlib import Path
 import os
 
 from modules.runtime_paths import get_application_dir
+from modules.wiki_markup import format_wiki_links
 
 # =============================================================================
 # ローカルデータベース
@@ -321,7 +322,7 @@ def show_connection_detail(
 
             print(
                 f"条件     : "
-                f"{info['condition']}"
+                f"{format_wiki_links(info['condition'])}"
             )
 
     else:
@@ -358,7 +359,7 @@ def show_connection_detail(
 
                 print(
                     f"  条件     : "
-                    f"{info['condition']}"
+                    f"{format_wiki_links(info['condition'])}"
                 )
 
     print()

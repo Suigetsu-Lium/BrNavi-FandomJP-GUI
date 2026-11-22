@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 from modules.runtime_paths import get_application_dir
+from modules.wiki_markup import format_wiki_links
 
 # =============================================================================
 # 基本パス
@@ -666,7 +667,7 @@ def print_edge_info(source, target, edge_info, nodes=None):
         if info.get("type"):
             print(f"      Direction: {info['type']}")
         if info.get("condition"):
-            print(f"      条件: {info['condition']}")
+            print(f"      条件: {format_wiki_links(info['condition'])}")
         for evidence in info.get("evidence", []):
             article = evidence.get("article_title") or evidence.get("article_id") or "記事不明"
             print(
@@ -674,7 +675,7 @@ def print_edge_info(source, target, edge_info, nodes=None):
                 f"({evidence.get('relation_type') or '区分不明'})"
             )
             if evidence.get("condition"):
-                print(f"        原文: {evidence['condition']}")
+                print(f"        原文: {format_wiki_links(evidence['condition'])}")
 
 
 # =============================================================================
@@ -940,7 +941,7 @@ def save_search_result(
 
                     lines.append(
                         f"      条件     : "
-                        f"{info['condition']}"
+                        f"{format_wiki_links(info['condition'])}"
                     )
 
             else:
@@ -977,7 +978,7 @@ def save_search_result(
 
                         lines.append(
                             f"        条件     : "
-                            f"{info['condition']}"
+                            f"{format_wiki_links(info['condition'])}"
                         )
 
     lines.append("")

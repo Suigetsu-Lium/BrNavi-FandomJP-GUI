@@ -42,6 +42,7 @@ from modules.online_wiki import is_supported_wiki_url
 from modules.online_wiki import save_page as save_online_wiki_page
 from modules.online_wiki import search_pages as search_online_wiki_pages
 from modules.route_service import search_routes as search_local_routes
+from modules.wiki_markup import format_wiki_links
 from modules.runtime_paths import get_application_dir
 from modules.system_dashboard import format_clock, find_local_images, get_network_kind, get_power_status, list_local_images, normalize_media_identifier, local_saved_level_list, storage_summary
 from modules.version import VERSION
@@ -971,7 +972,16 @@ class BackroomsAPI:
                 for key, value in (options or {}).items()
                 if key in allowed
             }
-            return search_local_routes(start, goal, **filters)
+            result = search_local_routes(start, goal, **filters)
+            # Keep canonical/raw fields intact; add separate presentation-only values.
+            for infos in result.get("edge_info", {}).values():
+                for info in infos:
+                    info["condition_display"] = format_wiki_links(info.get("condition", ""))
+                    for evidence in info.get("evidence", []):
+                        evidence["condition_display"] = format_wiki_links(
+                            evidence.get("condition", "")
+                        )
+            return result
         except Exception as error:
             return {"error": f"経路検索に失敗しました: {error}", "routes": [], "start_candidates": [], "goal_candidates": []}
 
@@ -3432,8 +3442,8 @@ HTML_TEMPLATE = r"""
         const details = transitions.length ? transitions.map(info => `<div class="rounded border border-[#e4d6b2] bg-[#fbf6de] p-3">
           <div class="text-xs font-bold text-[#78440f]">${[info.category, info.type].filter(Boolean).map(escapeHTML).join(' · ') || '移動条件'}</div>
           <div class="mt-1 flex flex-wrap gap-1 text-[11px]">確実性: ${escapeHTML(info.certainty || 'Unknown')} · 利用可否: ${escapeHTML(info.availability || 'Unknown')} · 証拠: ${escapeHTML(info.evidence_type || 'Unknown')} · 頻度: ${escapeHTML(info.probability || 'Unknown')} · 審査: ${escapeHTML(info.review_status || '—')}</div>
-          <div class="mt-1 whitespace-pre-wrap break-words text-base font-semibold leading-relaxed">${escapeHTML(info.condition || '条件の記載なし')}</div>
-          ${(info.evidence || []).map(ev => `<div class="mt-2 rounded border border-[#e4d6b2] bg-white p-2 text-xs"><div class="font-semibold">記事証拠: ${escapeHTML(ev.article_title || ev.article_id || '不明')} · ${escapeHTML(ev.relation_type || '区分不明')}</div><div class="mt-1 whitespace-pre-wrap">${escapeHTML(ev.condition || '')}</div><div class="mt-1 text-gray-500">抽出: ${escapeHTML(ev.extract_method || '不明')} · 信頼度: ${escapeHTML(ev.confidence || '未設定')}</div></div>`).join('')}</div>`).join('') : '<div class="text-sm text-gray-600">移動条件の記載はありません。</div>';
+          <div class="mt-1 whitespace-pre-wrap break-words text-base font-semibold leading-relaxed">${escapeHTML(info.condition_display !== undefined ? info.condition_display : (info.condition || '条件の記載なし'))}</div>
+          ${(info.evidence || []).map(ev => `<div class="mt-2 rounded border border-[#e4d6b2] bg-white p-2 text-xs"><div class="font-semibold">記事証拠: ${escapeHTML(ev.article_title || ev.article_id || '不明')} · ${escapeHTML(ev.relation_type || '区分不明')}</div><div class="mt-1 whitespace-pre-wrap">${escapeHTML(ev.condition_display !== undefined ? ev.condition_display : (ev.condition || ''))}</div><div class="mt-1 text-gray-500">抽出: ${escapeHTML(ev.extract_method || '不明')} · 信頼度: ${escapeHTML(ev.confidence || '未設定')}</div></div>`).join('')}</div>`).join('') : '<div class="text-sm text-gray-600">移動条件の記載はありません。</div>';
         timeline += `<div class="ml-6 border-l-2 border-[#c68a2b] py-3 pl-5"><div class="mb-2 text-xs font-bold text-[#91520f]">↓ ${escapeHTML(source.id)} から ${escapeHTML(target.id)} へ</div><div class="space-y-2">${details}</div></div>${levelBlock(target)}`;
       }
       const content = document.getElementById('route-detail-content');

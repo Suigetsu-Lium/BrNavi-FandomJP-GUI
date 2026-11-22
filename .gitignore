@@ -166,6 +166,7 @@ venv.bak/
 # User data: downloaded Wiki pages/images, extracted content, indexes and generated route/catalog files
 /downloaded_fandom_html/
 /extracted_fandom_levels/
+/extracted_fandom_levels_all.txt
 /downloaded_images/
 /parsed_index/
 /index_html/
@@ -175,6 +176,7 @@ venv.bak/
 /extracted_fandom_levels_summary.csv
 /backrooms_nodes.csv
 /backrooms_edges.csv
+/backrooms_evidence.csv
 
 # Local credentials and secret material
 /.secrets/

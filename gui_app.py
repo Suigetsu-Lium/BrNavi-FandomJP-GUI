@@ -33,7 +33,6 @@ from modules.database import (
     sanitize_filename,
 )
 from modules.extractor import (
-    extract_article_attribution,
     extract_article_text,
     extract_danger,
     extract_understanding,
@@ -1202,14 +1201,6 @@ class BackroomsAPI:
         cleaned_text = re.sub(r'\[危険度\]\s*\n\s*[^\n\[]+\n?', '', cleaned_text)
         cleaned_text = cleaned_text.strip()
 
-        article_attribution = ""
-        if html_file and html_file.is_file():
-            try:
-                source_html = html_file.read_text(encoding="utf-8", errors="ignore")
-                article_attribution = extract_article_attribution(source_html)
-            except OSError:
-                article_attribution = ""
-
         # URLを持つ記事は、そのURLから生成したキーの画像だけを表示する。
         # タイトル・階層IDによる画像検索は別記事混入の原因になるため行わない。
         page_url_value = str(
@@ -1280,7 +1271,6 @@ class BackroomsAPI:
                                 if image_key and image_key == article_dom.get("main_image_key")
                                 else ""
                             )
-                            or ("記録写真" if image_key else "")
                         ),
                     })
             except Exception:
@@ -1342,7 +1332,6 @@ class BackroomsAPI:
             "section_number": section_number,
             "danger": danger,
             "comprehension": comprehension,
-            "attribution": article_attribution,
             "html_saved": html_saved,
             "text_saved": text_saved,
             "saved": html_saved or text_saved,
@@ -1356,6 +1345,8 @@ class BackroomsAPI:
             "image_captions": article_dom.get("image_captions", {}),
             "main_image_key": article_dom.get("main_image_key", ""),
             "main_image_caption": article_dom.get("main_image_caption", ""),
+            "source_infobox_fields": article_dom.get("source_infobox_fields", []),
+            "article_credits": article_dom.get("article_credits", []),
             "has_source_infobox": has_source_infobox,
             "show_infobox": show_infobox,
             "is_level_article": is_level_article,
@@ -1906,12 +1897,39 @@ HTML_TEMPLATE = r"""
       border: 1px solid var(--border-fandom);
     }
 
-    /* Wiki Infobox（情報カード） */
+    /* Wiki Infobox：本文内の右フロート。カード終了後は本文が全幅へ戻る */
+    .wiki-article-flow {
+      display: flow-root;
+      width: 100%;
+      min-width: 0;
+      max-width: 100%;
+    }
     .wiki-infobox {
+      float: right;
+      box-sizing: border-box;
       width: 320px;
+      max-width: min(320px, calc(100% - 280px));
+      flex: none;
+      position: static;
+      margin: 0 0 16px 24px;
       background: var(--surface-raised);
       border: 1px solid var(--border-fandom);
       box-shadow: 0 2px 6px rgba(58, 43, 20, 0.1);
+    }
+    .wiki-article-body {
+      display: block;
+      width: auto;
+      min-width: 0;
+      max-width: 100%;
+      overflow-wrap: anywhere;
+    }
+    @media (max-width: 680px) {
+      .wiki-infobox {
+        float: none;
+        width: min(100%, 360px);
+        max-width: 100%;
+        margin: 0 auto 1rem;
+      }
     }
     .wiki-infobox-header {
       background-color: var(--header-amber);
@@ -1938,6 +1956,48 @@ HTML_TEMPLATE = r"""
       border-top: 1px solid var(--border-fandom);
       border-bottom: 1px solid var(--border-fandom);
       padding: 6px 10px;
+    }
+    .wiki-infobox-data-row {
+      display: grid;
+      grid-template-columns: minmax(0, 38%) minmax(0, 1fr);
+      border-bottom: 1px solid var(--border-fandom);
+      font-size: 12px;
+      line-height: 1.55;
+    }
+    .wiki-infobox-data-label {
+      min-width: 0;
+      padding: 7px 8px;
+      background: var(--surface-fandom);
+      font-weight: 600;
+      overflow-wrap: anywhere;
+    }
+    .wiki-infobox-data-value {
+      min-width: 0;
+      padding: 7px 9px;
+      overflow-wrap: anywhere;
+      word-break: normal;
+      white-space: pre-line;
+    }
+    .wiki-infobox-data-value p { margin: 0.15rem 0; }
+    .wiki-infobox-data-value ul,
+    .wiki-infobox-data-value ol {
+      margin: 0.15rem 0;
+      padding-left: 1.25rem;
+      list-style-position: outside;
+    }
+    .wiki-infobox-data-value ul { list-style-type: disc; }
+    .wiki-infobox-data-value ol { list-style-type: decimal; }
+    .wiki-infobox-data-value li { margin: 0.12rem 0; }
+    .wiki-infobox-data-value a {
+      color: #9b3d06;
+      text-decoration: underline;
+      overflow-wrap: anywhere;
+    }
+    .wiki-infobox-data-value img {
+      max-width: 100%;
+      max-height: 64px;
+      vertical-align: middle;
+      object-fit: contain;
     }
 
     /* 本文のWiki小見出し */
@@ -2213,29 +2273,42 @@ HTML_TEMPLATE = r"""
         position: static !important;
       }
 
-      /* Infoboxを右上に固定し、本文を下側で全幅に回り込ませる */
-      #wiki-page-container > .flex.space-x-6 {
-        display: block !important;
+      /* 通常表示と同じ右フロート回り込みを印刷にも適用 */
+      #wiki-page-container > .wiki-article-flow {
+        display: flow-root !important;
+        width: 100% !important;
+        min-width: 0 !important;
       }
 
       #wiki-page-container .wiki-infobox {
         float: right !important;
         position: static !important;
+        box-sizing: border-box !important;
         width: 320px !important;
-        max-width: 48% !important;
+        max-width: 42% !important;
         margin: 0 0 12px 24px !important;
         break-inside: avoid;
       }
 
-      #wiki-page-container > .flex.space-x-6 > .flex-1 {
+      #wiki-page-container .wiki-article-body {
         display: block !important;
         width: auto !important;
         min-width: 0 !important;
+        max-width: 100% !important;
       }
 
       #wiki-page-container img {
         max-width: 100% !important;
         break-inside: avoid;
+      }
+
+      .term-article figure,
+      .term-article .thumb,
+      .term-article .portable-infobox,
+      .term-article .gallerybox,
+      .term-article .wikia-gallery-item {
+        break-inside: avoid !important;
+        page-break-inside: avoid !important;
       }
 
       #print-attribution {
@@ -2275,6 +2348,80 @@ HTML_TEMPLATE = r"""
     .term-toc .term-toc-level-4, .term-toc .term-toc-level-5, .term-toc .term-toc-level-6 { margin-left: 1rem; }
     .term-toc a, .term-article a { color: #9b3d06; text-decoration: underline; text-underline-offset: 2px; }
     .term-article { min-width: 0; line-height: 1.85; overflow-wrap: anywhere; }
+    .term-article .portable-infobox {
+      display: flow-root;
+      box-sizing: border-box;
+      width: min(100%, 360px);
+      max-width: 100%;
+      margin: 1rem auto;
+      padding: 0.75rem;
+      border: 1px solid #cfc5aa;
+      border-radius: 0.55rem;
+      background: #faf8f1;
+      color: #39352d;
+      line-height: 1.6;
+      overflow-wrap: anywhere;
+    }
+    .term-article .portable-infobox .pi-title,
+    .term-article .portable-infobox .pi-header {
+      display: block;
+      margin: -0.1rem -0.1rem 0.6rem;
+      padding: 0.35rem 0.5rem;
+      background: #eee8d9;
+      font-weight: 700;
+      text-align: center;
+    }
+    .term-article .portable-infobox .pi-data {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.25rem 0.6rem;
+      padding: 0.35rem 0;
+      border-top: 1px solid #e4ddcd;
+    }
+    .term-article .portable-infobox .pi-data-label { font-weight: 700; }
+    .term-article .portable-infobox .pi-data-value { min-width: 0; }
+    .term-article .wds-tabs,
+    .term-article .tabbernav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem;
+      margin: 0.8rem 0;
+      padding: 0;
+      list-style: none;
+    }
+    .term-article .wds-tab__content,
+    .term-article .tabbertab {
+      display: block;
+      margin: 0.65rem 0 1rem;
+      padding: 0.65rem;
+      border: 1px solid #e2d8c5;
+      border-radius: 0.35rem;
+    }
+    .term-article .gallery,
+    .term-article .wikia-gallery {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-start;
+      justify-content: center;
+      gap: 0.75rem;
+      margin: 1rem 0;
+      padding: 0;
+      list-style: none;
+    }
+    .term-article .gallerybox,
+    .term-article .wikia-gallery-item {
+      box-sizing: border-box;
+      max-width: 100%;
+      text-align: center;
+    }
+    .term-article .gallerytext,
+    .term-article .gallerycaption,
+    .term-article .wikia-gallery-caption {
+      margin-top: 0.35rem;
+      font-size: 0.85rem;
+      line-height: 1.5;
+      color: #665b45;
+    }
     .term-article h2, .term-article h3, .term-article h4, .term-article h5, .term-article h6 {
       margin: 1.5rem 0 0.65rem;
       padding-bottom: 0.3rem;
@@ -2290,8 +2437,25 @@ HTML_TEMPLATE = r"""
     .term-article ol { list-style: decimal; padding-left: 1.6rem; margin: 0.8rem 0; }
     .term-article ul { list-style: disc; padding-left: 1.6rem; margin: 0.8rem 0; }
     .term-article li { margin: 0.25rem 0; }
-    .term-table-wrap { max-width: 100%; overflow-x: auto; margin: 1rem 0; }
-    .term-article table.term-table { display: table; width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+    .term-table-wrap {
+      display: block;
+      box-sizing: border-box;
+      width: auto;
+      min-width: 0;
+      max-width: 100%;
+      overflow-x: auto;
+      overscroll-behavior-x: contain;
+      -webkit-overflow-scrolling: touch;
+      margin: 1rem 0;
+    }
+    .term-article table.term-table {
+      display: table;
+      width: max-content;
+      min-width: 100%;
+      max-width: none;
+      border-collapse: collapse;
+      font-size: 0.84rem;
+    }
     .term-article .term-table th, .term-article .term-table td { border: 1px solid #d8cfb8; padding: 0.45rem 0.6rem; vertical-align: top; }
     .term-article .term-table th { background: #f4eedf; font-weight: 700; white-space: nowrap; }
     .term-article .references, .term-article ol.references { margin-top: 1rem; padding-left: 1.5rem; font-size: 0.82rem; }
@@ -2342,21 +2506,29 @@ HTML_TEMPLATE = r"""
     .term-article figure.pi-image img,
     .term-article img.article-infobox-main-image {
       display: block;
-      width: auto;
+      width: 100%;
       max-width: 100% !important;
-      max-height: 240px;
+      max-height: none;
+      height: auto;
       margin: 0 auto;
       object-fit: contain;
     }
     .wiki-infobox img {
-      max-width: 88px;
-      max-height: 88px;
+      max-width: 100%;
+      max-height: none;
+      height: auto;
       object-fit: contain;
     }
+    .wiki-infobox .article-inline-icon {
+      max-width: 88px;
+      max-height: 88px;
+    }
     #infobox-main-img {
+      display: block;
       width: 100%;
       max-width: 100%;
-      max-height: 220px;
+      max-height: none;
+      height: auto;
       object-fit: contain;
     }
     #image-lightbox { overflow: auto; }
@@ -2591,7 +2763,7 @@ HTML_TEMPLATE = r"""
         </div>
 
         <div id="wiki-page-container" class="hidden max-w-4xl mx-auto bg-white border border-[#e2d8b5] p-8 rounded shadow-sm relative">
-          <button type="button" onclick="showExplorerIndexHome()" class="print-exclude mb-4 rounded px-2 py-1 text-xs font-semibold text-[#91520f] hover:bg-[#fff7dd]">‹ 階層の一覧へ戻る</button>
+          <button type="button" onclick="goExplorerTabBack()" class="print-exclude mb-4 rounded px-2 py-1 text-xs font-semibold text-[#91520f] hover:bg-[#fff7dd]">‹ 前の一覧・ページへ戻る</button>
 
           <div class="text-xs text-[#8c6b12] mb-1 font-medium">
             分類: <span id="view-category">階層</span><span id="view-danger-label">、危険度: <span id="view-danger-tag">-</span></span>
@@ -2636,10 +2808,10 @@ HTML_TEMPLATE = r"""
 
           <!-- 本文 ＆ Infobox -->
           <div id="print-staple-markers" aria-hidden="true"><span class="staple-mark"></span><span class="staple-mark"></span></div>
-          <div class="flex space-x-6 items-start">
+          <div class="wiki-article-flow">
 
-            <!-- 🌟 Wiki Infobox (右側情報カード) -->
-            <aside class="wiki-infobox order-2 rounded overflow-hidden select-none sticky top-0">
+            <!-- 🌟 Wiki Infobox (本文内右フロート情報カード) -->
+            <aside class="wiki-infobox rounded overflow-hidden select-none">
               <div id="infobox-title" class="wiki-infobox-header">Level 0 η</div>
               
               <!-- 写真 -->
@@ -2648,23 +2820,16 @@ HTML_TEMPLATE = r"""
                 <div id="infobox-no-img" class="h-40 flex items-center justify-center text-xs text-gray-400 border border-dashed border-gray-300 rounded">
                   ※ 写真データなし
                 </div>
-                <p id="infobox-caption" class="text-[11px] text-gray-500 mt-2 italic truncate"></p>
+                <p id="infobox-caption" class="hidden text-[11px] text-gray-600 mt-2 italic whitespace-normal break-words leading-relaxed"></p>
               </div>
 
-              <!-- パラメータ表 -->
-              <table>
-                <tr id="infobox-danger-row"><th>危険度</th><td id="infobox-danger" class="font-bold text-[#b45309]">-</td></tr>
-                <tr id="infobox-comprehension-row"><th>理解度</th><td id="infobox-comprehension">-</td></tr>
-                <tr><th>カテゴリ</th><td id="infobox-category">-</td></tr>
-                <tr><th>言語</th><td id="infobox-lang">-</td></tr>
-              </table>
-              <div id="infobox-special-fields" class="hidden border-t border-[#e5dcbe]"></div>
+              <!-- 元Wiki .pi-data とシステムメタ情報を掲載順で描画 -->
+              <div id="infobox-special-fields" class="hidden"></div>
             </aside>
 
             <!-- 本文エリア (左) -->
-            <div class="flex-1 order-1 text-sm leading-relaxed text-gray-800">
+            <div class="wiki-article-body text-sm leading-relaxed text-gray-800">
               <div id="translation-article-banner" class="hidden mb-4 rounded border border-[#d9c58c] bg-[#fff8df] p-3 text-sm text-[#654b20]"></div>
-              <div id="article-attribution" class="hidden mb-4 border-b border-[#ded5bd] pb-3 text-xs leading-relaxed text-gray-500"></div>
               <div id="view-article-content" class="space-y-3">
                 読み込み中...
               </div>
@@ -2680,9 +2845,10 @@ HTML_TEMPLATE = r"""
 
           </div>
           <footer id="print-attribution" class="text-xs text-gray-600">
-            <p class="font-semibold mb-1">出典・ライセンス情報</p>
+            <div class="wiki-heading"><span>&#x51FA;&#x5178;&#x30FB;&#x30E9;&#x30A4;&#x30BB;&#x30F3;&#x30B9;&#x60C5;&#x5831;</span></div>
             <p>出典記事：<span id="print-source-title"></span></p>
             <p>元記事URL：<a id="print-source-link" class="break-all underline" target="_blank" rel="noopener noreferrer"></a></p>
+            <p id="print-author-credit" class="hidden">&#x57F7;&#x7B46;&#x30FB;&#x7FFB;&#x8A33;&#x30FB;&#x6539;&#x5909;&#xFF1A;<span id="print-author-credit-text"></span></p>
             <p>記事本文のライセンス（原則）：<a href="https://creativecommons.org/licenses/by-sa/3.0/deed.ja">クリエイティブ・コモンズ 表示-継承 3.0（CC BY-SA 3.0）</a></p>
             <p>個別ページ・画像・第三者素材には異なるライセンス条件が適用される場合があります。各素材の権利表示も確認してください。</p>
             <p class="mt-1">BrNavi Fandom JP は個人開発の非公式ツールです。Fandom, Inc.およびBackrooms Wiki運営とは関係ありません。</p>
@@ -3329,12 +3495,13 @@ HTML_TEMPLATE = r"""
         currentExplorerPage = null;
         explorerTabs.forEach(tab => {
           tab.page = null;
-          tab.title = 'New tab';
-          tab.history = [];
-          tab.historyIndex = -1;
+          tab.view = {type: 'home'};
+          tab.title = 'Backrooms Wiki';
+          tab.history = [{type: 'home'}];
+          tab.historyIndex = 0;
         });
+        showExplorerIndexHome({record: false});
         renderExplorerTabs();
-        showExplorerIndexHome();
       }
       await Promise.all([
         onSearchInput(),
@@ -3937,7 +4104,10 @@ HTML_TEMPLATE = r"""
       host.appendChild(localCard);
     }
 
-    function openLocalSavedLevels() {
+    function openLocalSavedLevels(options = {}) {
+      if (options.record !== false) {
+        recordExplorerHistory({type: 'local-saved', searchQuery: document.getElementById('search-input')?.value || ''});
+      }
       switchExplorerSubtab('article');
       explorerIndexCategory = null;
       document.getElementById('explorer-index-home').classList.add('hidden');
@@ -3994,7 +4164,14 @@ HTML_TEMPLATE = r"""
       });
     }
 
-    function openExplorerCategory(categoryId) {
+    function openExplorerCategory(categoryId, options = {}) {
+      if (options.record !== false) {
+        recordExplorerHistory({
+          type: 'category',
+          categoryId,
+          searchQuery: document.getElementById('search-input')?.value || '',
+        });
+      }
       explorerIndexCategory = categoryId;
       document.getElementById('explorer-index-home').classList.add('hidden');
       document.getElementById('explorer-index-local-saved').classList.add('hidden');
@@ -4009,7 +4186,13 @@ HTML_TEMPLATE = r"""
       renderExplorerCategorySections(categoryId);
     }
 
-    function showExplorerIndexHome() {
+    function showExplorerIndexHome(options = {}) {
+      if (options.record !== false) {
+        recordExplorerHistory({
+          type: 'home',
+          searchQuery: document.getElementById('search-input')?.value || '',
+        });
+      }
       explorerIndexCategory = null;
       document.getElementById('wiki-page-container').classList.add('hidden');
       document.getElementById('explorer-index-category').classList.add('hidden');
@@ -4333,7 +4516,7 @@ HTML_TEMPLATE = r"""
       });
     }
 
-    let explorerTabs = [{id: 1, title: 'New tab', page: null, history: [], historyIndex: -1}];
+    let explorerTabs = [{id: 1, title: 'Backrooms Wiki', page: null, view: {type: 'home'}, history: [{type: 'home'}], historyIndex: 0}];
     let activeExplorerTabId = 1;
     let nextExplorerTabId = 2;
     let currentExplorerPage = null;
@@ -4343,6 +4526,38 @@ HTML_TEMPLATE = r"""
       return explorerTabs.find(tab => tab.id === activeExplorerTabId) || explorerTabs[0];
     }
 
+    function normalizeExplorerHistoryEntry(entry) {
+      if (entry && ['home', 'category', 'local-saved', 'article'].includes(entry.type)) return entry;
+      if (entry && typeof entry === 'object' && (entry.title || entry.url)) {
+        return {type: 'article', page: entry};
+      }
+      return {type: 'home'};
+    }
+
+    function recordExplorerHistory(entry) {
+      const tab = activeExplorerTab();
+      if (!tab) return;
+      const searchQuery = document.getElementById('search-input')?.value || '';
+      if (tab.historyIndex >= 0 && tab.history[tab.historyIndex]) {
+        const previous = normalizeExplorerHistoryEntry(tab.history[tab.historyIndex]);
+        tab.history[tab.historyIndex] = {...previous, searchQuery};
+      }
+      const normalized = normalizeExplorerHistoryEntry(entry);
+      const snapshot = {...normalized, searchQuery: normalized.searchQuery ?? searchQuery};
+      tab.history = tab.history.slice(0, tab.historyIndex + 1);
+      tab.history.push(snapshot);
+      tab.historyIndex = tab.history.length - 1;
+      tab.view = snapshot;
+      tab.page = snapshot.type === 'article' ? snapshot.page : null;
+      if (snapshot.type === 'article') tab.title = snapshot.page.title || 'Untitled';
+      else if (snapshot.type === 'category') {
+        const category = getLevelListCategories(explorerIndexPages.length ? explorerIndexPages : levelSearchResults)
+          .find(item => item.id === snapshot.categoryId);
+        tab.title = category?.title || '階層の一覧';
+      } else if (snapshot.type === 'local-saved') tab.title = 'ローカル保存済み';
+      else tab.title = 'Backrooms Wiki';
+      renderExplorerTabs();
+    }
     function renderExplorerTabs() {
       const host = document.getElementById('explorer-tab-strip');
       if (!host) return;
@@ -4383,24 +4598,30 @@ HTML_TEMPLATE = r"""
       const forward = document.getElementById('explorer-history-forward');
       if (forward) forward.disabled = active.historyIndex >= active.history.length - 1;
       const address = document.getElementById('explorer-address');
-      if (address) address.textContent = active.page && active.page.title ? active.page.title : 'Backrooms Wiki';
+      const currentEntry = active ? normalizeExplorerHistoryEntry(active.history[active.historyIndex]) : {type: 'home'};
+      if (address) {
+        address.textContent = currentEntry.type === 'article' ? (currentEntry.page.title || 'Wiki記事')
+          : currentEntry.type === 'category' ? (active.title || '階層の一覧')
+          : currentEntry.type === 'local-saved' ? 'ローカル保存済み階層の一覧'
+          : 'Backrooms Wiki';
+      }
     }
 
     function createExplorerTab(item = null) {
-      const tab = {id: nextExplorerTabId++, title: item ? item.title : 'New tab', page: null, history: [], historyIndex: -1};
+      const tab = {id: nextExplorerTabId++, title: item ? item.title : 'Backrooms Wiki', page: null, view: {type: 'home'}, history: [{type: 'home'}], historyIndex: 0};
       explorerTabs.push(tab);
       activeExplorerTabId = tab.id;
       renderExplorerTabs();
       if (item) openExplorerCandidate(item);
-      else showExplorerIndexHome();
+      else showExplorerIndexHome({record: false});
     }
 
     function closeExplorerTab(id) {
       if (explorerTabs.length === 1) {
-        explorerTabs[0] = {id: 1, title: 'New tab', page: null, history: [], historyIndex: -1};
+        explorerTabs[0] = {id: 1, title: 'Backrooms Wiki', page: null, view: {type: 'home'}, history: [{type: 'home'}], historyIndex: 0};
         activeExplorerTabId = 1;
         currentExplorerPage = null;
-        showExplorerIndexHome();
+        showExplorerIndexHome({record: false});
         renderExplorerTabs();
         return;
       }
@@ -4413,38 +4634,77 @@ HTML_TEMPLATE = r"""
       } else renderExplorerTabs();
     }
 
+    async function restoreExplorerHistoryEntry(entry) {
+      const tab = activeExplorerTab();
+      const snapshot = normalizeExplorerHistoryEntry(entry);
+      if (!tab) return;
+      tab.view = snapshot;
+      tab.page = snapshot.type === 'article' ? snapshot.page : null;
+      if (snapshot.type !== 'article') explorerNavigationToken++;
+      if (snapshot.type === 'article') tab.title = snapshot.page.title || 'Untitled';
+      else if (snapshot.type === 'category') {
+        const category = getLevelListCategories(explorerIndexPages.length ? explorerIndexPages : levelSearchResults)
+          .find(item => item.id === snapshot.categoryId);
+        tab.title = category?.title || '階層の一覧';
+      } else if (snapshot.type === 'local-saved') tab.title = 'ローカル保存済み';
+      else tab.title = 'Backrooms Wiki';
+      const search = document.getElementById('search-input');
+      if (search && typeof snapshot.searchQuery === 'string') search.value = snapshot.searchQuery;
+      if (snapshot.type === 'article') {
+        await displayExplorerPage(snapshot.page);
+      } else if (snapshot.type === 'category') {
+        currentExplorerPage = null;
+        openExplorerCategory(snapshot.categoryId, {record: false});
+      } else if (snapshot.type === 'local-saved') {
+        currentExplorerPage = null;
+        openLocalSavedLevels({record: false});
+      } else {
+        currentExplorerPage = null;
+        showExplorerIndexHome({record: false});
+      }
+      renderExplorerTabs();
+    }
+
     async function activateExplorerTab(id) {
       activeExplorerTabId = id;
       const tab = activeExplorerTab();
-      renderExplorerTabs();
-      if (tab.page) await displayExplorerPage(tab.page);
-      else { currentExplorerPage = null; showExplorerIndexHome(); }
+      if (!tab) return;
+      await restoreExplorerHistoryEntry(tab.history[tab.historyIndex] || {type: 'home'});
     }
 
     async function goExplorerTabBack() {
       const tab = activeExplorerTab();
       if (!tab || tab.historyIndex <= 0) return;
       tab.historyIndex--;
-      tab.page = tab.history[tab.historyIndex];
-      await displayExplorerPage(tab.page);
-      renderExplorerTabs();
+      await restoreExplorerHistoryEntry(tab.history[tab.historyIndex]);
     }
 
     async function goExplorerTabForward() {
       const tab = activeExplorerTab();
       if (!tab || tab.historyIndex >= tab.history.length - 1) return;
       tab.historyIndex++;
-      tab.page = tab.history[tab.historyIndex];
-      await displayExplorerPage(tab.page);
-      renderExplorerTabs();
+      await restoreExplorerHistoryEntry(tab.history[tab.historyIndex]);
     }
 
     async function reloadExplorerTab() {
       const tab = activeExplorerTab();
-      if (!tab || !tab.page) return;
-      await displayExplorerPage(tab.page);
-      renderExplorerTabs();
+      if (!tab) return;
+      await restoreExplorerHistoryEntry(tab.history[tab.historyIndex] || {type: 'home'});
     }
+
+    // Browser mouse side buttons: 3 = Back, 4 = Forward.
+    document.addEventListener('auxclick', event => {
+      if (!event.target.closest('#explorer-article-view, #explorer-article-tabs')) return;
+      if (event.button === 3) {
+        event.preventDefault();
+        event.stopPropagation();
+        goExplorerTabBack();
+      } else if (event.button === 4) {
+        event.preventDefault();
+        event.stopPropagation();
+        goExplorerTabForward();
+      }
+    });
 
     async function openExplorerCandidate(item) {
       const tab = activeExplorerTab();
@@ -4458,12 +4718,7 @@ HTML_TEMPLATE = r"""
         saved_state: item.saved_state || '',
         saved: Boolean(item.saved)
       };
-      tab.history = tab.history.slice(0, tab.historyIndex + 1);
-      tab.history.push(page);
-      tab.historyIndex = tab.history.length - 1;
-      tab.page = page;
-      tab.title = item.title || 'Untitled';
-      renderExplorerTabs();
+      recordExplorerHistory({type: 'article', page});
       await displayExplorerPage(page);
     }
 
@@ -4479,9 +4734,6 @@ HTML_TEMPLATE = r"""
         const article = document.getElementById('view-article-content');
         document.getElementById('view-level-id').textContent = page.title || 'Wiki記事';
         document.getElementById('view-meta-title').textContent = '';
-        const attribution = document.getElementById('article-attribution');
-        attribution.textContent = '';
-        attribution.classList.add('hidden');
         document.getElementById('translation-article-banner').classList.add('hidden');
         const isTermCandidate = page.category === 'terms' || page.indexes?.split('|').includes('terms');
         article.dataset.articleKind = isTermCandidate ? 'term-unsaved' : 'unsaved';
@@ -4493,6 +4745,8 @@ HTML_TEMPLATE = r"""
         // This also prevents the previous page's image/license metadata lingering.
         explorerImages = [];
         document.getElementById('print-source-title').textContent = page.title || '';
+        document.getElementById('print-author-credit-text').textContent = '';
+        document.getElementById('print-author-credit').classList.add('hidden');
         const printSourceLink = document.getElementById('print-source-link');
         printSourceLink.removeAttribute('href');
         printSourceLink.textContent = '';
@@ -4501,19 +4755,14 @@ HTML_TEMPLATE = r"""
         document.getElementById('view-danger-label').classList.toggle('hidden', isTermCandidate);
         document.getElementById('view-danger-tag').textContent = '情報なし';
         document.getElementById('infobox-title').textContent = page.title || '';
-        document.getElementById('infobox-danger').textContent = '情報なし';
-        document.getElementById('infobox-comprehension').textContent = '情報なし';
-        document.getElementById('infobox-category').textContent = '未保存';
-        document.getElementById('infobox-lang').textContent = '-';
         document.getElementById('infobox-special-fields').replaceChildren();
         document.getElementById('infobox-special-fields').classList.add('hidden');
-        document.getElementById('infobox-danger-row').classList.remove('hidden');
-        document.getElementById('infobox-comprehension-row').classList.remove('hidden');
         const mainImg = document.getElementById('infobox-main-img');
         mainImg.removeAttribute('src');
         mainImg.classList.add('hidden');
         document.getElementById('infobox-no-img').classList.remove('hidden');
         document.getElementById('infobox-caption').textContent = '';
+        document.getElementById('infobox-caption').classList.add('hidden');
         document.getElementById('view-image-gallery').replaceChildren();
         document.getElementById('gallery-container').classList.add('hidden');
         renderExplorerGallery();
@@ -4523,7 +4772,8 @@ HTML_TEMPLATE = r"""
         const article = document.getElementById('view-article-content');
         document.getElementById('view-level-id').textContent = page.title || 'Wiki記事';
         document.getElementById('view-meta-title').textContent = '';
-        document.getElementById('article-attribution').classList.add('hidden');
+        document.getElementById('print-author-credit-text').textContent = '';
+        document.getElementById('print-author-credit').classList.add('hidden');
         document.getElementById('translation-article-banner').classList.add('hidden');
         const isRemoteTerm = page.category === 'terms' || page.indexes?.split('|').includes('terms');
         article.dataset.articleKind = isRemoteTerm ? 'term-remote' : 'remote';
@@ -5016,8 +5266,6 @@ HTML_TEMPLATE = r"""
       document.getElementById('view-category').innerText = categoryNames[d.category] || d.category || '未分類';
       document.getElementById('view-danger-label').classList.toggle('hidden', !showLevelParameters && !isItemArticle);
       document.getElementById('view-danger-tag').classList.toggle('hidden', !showLevelParameters && !isItemArticle);
-      document.getElementById('infobox-danger-row').classList.toggle('hidden', !showLevelParameters);
-      document.getElementById('infobox-comprehension-row').classList.toggle('hidden', !showLevelParameters);
       const articleInfobox = document.querySelector('#wiki-page-container .wiki-infobox');
       if (articleInfobox) articleInfobox.classList.toggle('hidden', !showInfobox);
       const translationBanner = document.getElementById('translation-article-banner');
@@ -5027,17 +5275,47 @@ HTML_TEMPLATE = r"""
         : '';
       const specialFields = document.getElementById('infobox-special-fields');
       const rows = [];
-      if (isItemArticle) rows.push(['記事種別', 'アイテム']);
-      if (isTranslation) {
-        rows.push(['記事種別', '翻訳記事']);
-        if (d.translation_section) rows.push(['翻訳元分類', d.translation_section]);
-        if (d.section_number) rows.push(['一覧番号', d.section_number]);
-        if (d.language) rows.push(['原文言語', d.language]);
+      const sourceFields = Array.isArray(d.source_infobox_fields) ? d.source_infobox_fields : [];
+      if (sourceFields.length) {
+        sourceFields.forEach(field => {
+          if (!field || !String(field.label || '').trim()) return;
+          rows.push({
+            label: String(field.label),
+            valueHtml: String(field.value_html || ''),
+            valueText: String(field.value_text || ''),
+          });
+        });
+      } else if (showLevelParameters && !d.has_source_infobox) {
+        // HTML未保存の旧記事など、元Wikiのpi-dataがない場合だけ従来メタ情報へフォールバック。
+        rows.push({label: '危険度', valueText: d.danger || '情報なし'});
+        rows.push({label: '理解度', valueText: d.comprehension || '情報なし'});
       }
-      specialFields.innerHTML = rows.map(([label, value]) =>
-        '<div class="grid grid-cols-[38%_1fr] border-b border-[#e5dcbe] text-xs last:border-b-0"><div class="bg-[#f0e7cf] px-2.5 py-1.5 font-semibold">' + escapeHTML(label) + '</div><div class="px-2.5 py-1.5">' + escapeHTML(value) + '</div></div>'
+      if (isItemArticle) rows.push({label: '記事種別', valueText: 'アイテム'});
+      if (isTranslation) {
+        rows.push({label: '記事種別', valueText: '翻訳記事'});
+        if (d.translation_section) rows.push({label: '翻訳元分類', valueText: d.translation_section});
+        if (d.section_number) rows.push({label: '一覧番号', valueText: d.section_number});
+        if (d.language) rows.push({label: '原文言語', valueText: d.language});
+      }
+      const sourceFieldLabels = new Set(sourceFields.map(field =>
+        String(field && field.label || '').trim().toLocaleLowerCase()
+      ));
+      if (!sourceFieldLabels.has('カテゴリ')) {
+        rows.push({label: 'カテゴリ', valueText: categoryNames[d.category] || d.category || '未分類'});
+      }
+      if (!sourceFieldLabels.has('言語')) {
+        rows.push({label: '言語', valueText: d.language || '不明'});
+      }
+      specialFields.innerHTML = rows.map(row =>
+        '<div class="wiki-infobox-data-row">' +
+          '<div class="wiki-infobox-data-label">' + escapeHTML(row.label) + '</div>' +
+          '<div class="wiki-infobox-data-value">' +
+            (row.valueHtml || escapeHTML(row.valueText)) +
+          '</div>' +
+        '</div>'
       ).join('');
       specialFields.classList.toggle('hidden', rows.length === 0);
+      bindExplorerArticleLinks(specialFields);
       document.getElementById('view-danger-tag').innerText = isItemArticle ? 'アイテム' : d.danger;
       document.getElementById('view-danger-tag').className = isItemArticle
         ? 'rounded-full bg-[#f3ead2] px-2 py-0.5 text-xs font-semibold text-[#72552d]'
@@ -5045,9 +5323,11 @@ HTML_TEMPLATE = r"""
       document.getElementById('view-danger-tag').classList.toggle('hidden', !showLevelParameters && !isItemArticle);
 
       // 本文の整形描画
-      const attribution = document.getElementById('article-attribution');
-      attribution.textContent = d.attribution || '';
-      attribution.classList.toggle('hidden', !d.attribution);
+      const articleCredits = Array.isArray(d.article_credits)
+        ? d.article_credits.map(value => String(value || '').trim()).filter(Boolean)
+        : [];
+      document.getElementById('print-author-credit-text').textContent = articleCredits.join(' / ');
+      document.getElementById('print-author-credit').classList.toggle('hidden', articleCredits.length === 0);
       articleContent.innerHTML = d.article_html
         ? d.article_html
         : formatWikiContent(d.text);
@@ -5055,12 +5335,6 @@ HTML_TEMPLATE = r"""
 
       // Infobox
       document.getElementById('infobox-title').innerText = isItemArticle ? 'アイテム · ' + d.level_id : d.level_id;
-      document.getElementById('infobox-danger').innerText = d.danger;
-      document.getElementById('infobox-danger').className = dangerBadgeClass(d.danger);
-      document.getElementById('infobox-comprehension').innerText = d.comprehension;
-      document.getElementById('infobox-category').innerText = categoryNames[d.category] || d.category || '未分類';
-      document.getElementById('infobox-lang').innerText = d.language;
-
       // メイン画像
       const mainImg = document.getElementById('infobox-main-img');
       const noImg = document.getElementById('infobox-no-img');
@@ -5074,11 +5348,14 @@ HTML_TEMPLATE = r"""
         mainImg.classList.add('cursor-zoom-in');
         mainImg.onclick = () => openImageLightbox(explorerImages, 0, d.level_id);
         noImg.classList.add('hidden');
-        caption.innerText = d.main_image_caption || d.images[0].caption || d.images[0].name;
+        const mainCaptionText = String(d.main_image_caption || '').trim();
+        caption.textContent = mainCaptionText;
+        caption.classList.toggle('hidden', !mainCaptionText);
       } else {
         mainImg.classList.add('hidden');
         noImg.classList.remove('hidden');
-        caption.innerText = "";
+        caption.textContent = '';
+        caption.classList.add('hidden');
       }
 
       // 下部写真ギャラリー

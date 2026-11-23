@@ -15,7 +15,8 @@ from bs4 import BeautifulSoup, Comment, NavigableString, Tag
 
 
 _ALLOWED_TAGS = {
-    "p", "div", "span", "h1", "h2", "h3", "h4", "h5", "h6",
+    "p", "div", "span", "section", "article", "aside", "nav",
+    "h1", "h2", "h3", "h4", "h5", "h6",
     "table", "caption", "thead", "tbody", "tfoot", "tr", "th", "td",
     "ol", "ul", "li", "a", "sup", "sub", "br", "hr", "blockquote",
     "dl", "dt", "dd", "strong", "b", "em", "i", "small", "code",
@@ -24,9 +25,10 @@ _ALLOWED_TAGS = {
 }
 _DROP_SELECTORS = (
     ".toc", ".mw-editsection", ".page-header", ".page-header__title",
-    ".portable-infobox", ".navbox", ".navigation-not-searchable",
-    ".wds-tabs", ".page-footer", ".ad-slot", "script", "style",
-    "noscript", "iframe",
+    ".navbox", ".navigation-not-searchable",
+    ".page-footer", ".ad-slot", ".ratebox", ".page-rating-widget",
+    ".article-vote", ".article-voting", ".mw-customtoggle-voting",
+    "script", "style", "noscript", "iframe",
 )
 _ID_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,100}$")
 _ALLOWED_CLASSES = {
@@ -36,9 +38,19 @@ _ALLOWED_CLASSES = {
     "small", "plainlinks", "mw-collapsible", "mw-collapsed",
     "mw-collapsible-content", "mw-form-frame", "mw-form-button",
     "mw-form-control", "mw-frame-dashed", "mw-frame-dotted",
-    "mw-frame-solid", "mw-frame-panel", "pi-data", "pi-data-value",
-    "pi-data-label", "pi-item", "pi-image", "pi-image-thumbnail",
-    "pi-image-caption", "pi-header", "pi-title", "pi-media",
+    "mw-frame-solid", "mw-frame-panel", "portable-infobox",
+    "pi-data", "pi-data-value", "pi-data-label", "pi-item",
+    "pi-image", "pi-image-thumbnail", "pi-image-caption",
+    "pi-header", "pi-title", "pi-media",
+    "gallery", "gallerybox", "gallerytext", "gallerycaption",
+    "wikia-gallery", "wikia-gallery-item", "wikia-gallery-caption",
+    "wds-tabber", "wds-tabs",
+    "wds-tab", "wds-tab__title", "wds-tab__content",
+    "wds-tab__content-inner", "wds-is-current",
+    "tabber", "tabbernav", "tabbertab", "tabber__header",
+    "tabber__tabs", "tabber__tab", "tabber__panel",
+    "tabber__content", "tabber__section", "tabber__tab--active",
+    "tabber__panel--active",
     "image-lightbox-link", "article-inline-icon",
     "article-infobox-main-image",
 }
@@ -47,6 +59,53 @@ _ALLOWED_CLASSES = {
 def _safe_id(value):
     value = str(value or "").strip()
     return value if _ID_PATTERN.fullmatch(value) else ""
+
+
+def _is_article_credit_text(value):
+    text = re.sub(r"\s+", " ", unicodedata.normalize("NFKC", str(value or ""))).strip()
+    return (
+        text.startswith("\u3053\u306e\u8a18\u4e8b\u306f")
+        and any(word in text for word in (
+            "\u4f5c\u6210", "\u57f7\u7b46", "\u7ffb\u8a33", "\u6539\u5909", "\u7de8\u96c6"
+        ))
+    )
+
+
+def _extract_article_credits(root):
+    """Collect author/translator credits and remove their original DOM nodes."""
+    credits = []
+    for node in list(root.find_all(["p", "small", "div", "span"])):
+        if node.parent is None:
+            continue
+        # Prefer the smallest block carrying the credit; do not remove an
+        # enclosing article wrapper when a nested paragraph contains it.
+        if node.find(["p", "div", "section", "article"]) is not None:
+            continue
+        text = re.sub(
+            r"\s+", " ", unicodedata.normalize("NFKC", node.get_text(" ", strip=True))
+        ).strip()
+        if not _is_article_credit_text(text):
+            continue
+        if text not in credits:
+            credits.append(text)
+        node.decompose()
+    return credits
+
+
+def _is_fandom_widget_residue(value):
+    text = re.sub(r"\s+", " ", unicodedata.normalize("NFKC", str(value or ""))).casefold()
+    if "(+/-) vote" in text:
+        return True
+    if "\u8aad\u307f\u8fbc\u307f\u4e2d" in text and "\u0070\u0063\u7248\u3067\u8868\u793a" in text and (
+        "\u30c7\u30b9\u30af\u30c8\u30c3\u30d7\u8868\u793a" in text
+        or "\u30da\u30fc\u30b8\u306e\u4e00\u756a\u4e0b" in text
+        or "\u3044\u3064\u307e\u3067\u7d4c\u3063\u3066\u3082" in text
+    ):
+        return True
+    return (
+        "\u0070\u0063\u7248\u3067\u8868\u793a" in text
+        and "\u30c7\u30b9\u30af\u30c8\u30c3\u30d7\u8868\u793a\u3078\u5207\u308a\u66ff\u3048" in text
+    )
 
 
 def _safe_url(value, base_url):
@@ -111,6 +170,35 @@ def _canonical_image_key(raw_url, base_url=""):
     return absolute_url.split("#", 1)[0].casefold()
 
 
+def _article_image_caption_node(image):
+    """Find a semantic caption attached to a figure, thumbnail, or gallery item."""
+    figure = image.find_parent("figure")
+    if figure is not None:
+        caption = figure.find("figcaption")
+        if caption is not None:
+            return caption
+
+    thumb = image.find_parent(class_="thumbinner")
+    if thumb is not None:
+        caption = thumb.select_one(".thumbcaption")
+        if caption is not None:
+            return caption
+
+    caption_selectors = (
+        ".gallerytext, .gallerycaption, .wikia-gallery-caption, "
+        ".pi-image-caption, .thumbcaption, figcaption"
+    )
+    for ancestor in image.parents:
+        if not isinstance(ancestor, Tag):
+            continue
+        classes = set(str(value) for value in ancestor.get("class", []))
+        if classes.intersection({"gallerybox", "wikia-gallery-item", "pi-image"}):
+            caption = ancestor.select_one(caption_selectors)
+            if caption is not None:
+                return caption
+    return None
+
+
 def _deduplicate_article_images(root, base_url="", local_image_map=None):
     """Keep one representative per local/source image, preferring its captioned figure."""
     groups = {}
@@ -119,14 +207,10 @@ def _deduplicate_article_images(root, base_url="", local_image_map=None):
         key = _canonical_image_key(raw_url, base_url)
         if not key:
             continue
+        caption_node = _article_image_caption_node(image)
+        has_caption = bool(caption_node and caption_node.get_text(" ", strip=True))
         figure = image.find_parent("figure")
-        figure_caption = figure.find("figcaption") if figure else None
         thumb_container = image.find_parent(class_="thumbinner")
-        thumb_caption = thumb_container.select_one(".thumbcaption") if thumb_container else None
-        has_caption = bool(
-            (figure_caption and figure_caption.get_text(" ", strip=True))
-            or (thumb_caption and thumb_caption.get_text(" ", strip=True))
-        )
         score = 4 if has_caption else 0
         score += 2 if figure or thumb_container else 0
         score += 1 if str(image.get("alt") or "").strip() else 0
@@ -168,6 +252,7 @@ def get_article_image_roles(html_text, base_url=""):
     photo_indices = []
     image_keys = {}
     main_image_index = None
+    main_infobox = soup.select_one(".portable-infobox")
     for image in soup.select(".portable-infobox img, .mw-parser-output img"):
         raw_url = str(image.get("data-src") or image.get("src") or "").strip()
         download_url, _filename = parse_image_info(raw_url)
@@ -202,7 +287,15 @@ def get_article_image_roles(html_text, base_url=""):
         small_scaled_asset = bool(re.search(
             r"/scale-to-width-down/(?:[1-9]\d?)\b", raw_url, re.IGNORECASE
         ))
-        if in_pi_image and main_image_index is None:
+        image_infobox = next(
+            (
+                ancestor for ancestor in ancestors
+                if isinstance(ancestor, Tag)
+                and "portable-infobox" in ancestor.get("class", [])
+            ),
+            None,
+        )
+        if in_pi_image and image_infobox is main_infobox and main_image_index is None:
             main_image_index = image_index
         if (in_pi_data or icon_class or small_dimension or small_scaled_asset) and not in_pi_image:
             continue
@@ -210,7 +303,7 @@ def get_article_image_roles(html_text, base_url=""):
 
     if main_image_index is not None and main_image_index not in photo_indices:
         photo_indices.insert(0, main_image_index)
-    if main_image_index is None and photo_indices:
+    if main_image_index is None and photo_indices and main_infobox is None:
         main_image_index = photo_indices[0]
     return {
         "main_image_index": main_image_index,
@@ -543,40 +636,75 @@ def render_article_html(html_text, base_url="", source_path=None, image_dir=None
             "has_source_infobox": has_source_infobox,
             "inline_image_keys": [], "image_captions": {},
             "main_image_key": "", "main_image_caption": "",
+            "source_infobox_fields": [],
+            "article_credits": [],
         }
 
     local_image_map = _build_local_image_map(
         soup, base_url, source_path, image_dir, article_title
     )
+    main_source_infobox = soup.select_one(".portable-infobox") if has_source_infobox else None
     main_image_key = (
         get_article_image_roles(html_text, base_url).get("main_image_key", "")
-        if has_source_infobox else ""
+        if main_source_infobox is not None else ""
     )
     main_image_keys = {main_image_key} if main_image_key else set()
-    main_image_node = next(
-        (
-            image for image in soup.select(".portable-infobox img, .mw-parser-output img")
-            if _canonical_image_key(
-                image.get("data-src") or image.get("src") or "", base_url
-            ) == main_image_key
-        ),
-        None,
-    ) if main_image_key else None
-    main_image_caption_node = soup.select_one(
-        ".portable-infobox .pi-image-caption, .portable-infobox .pi-image figcaption"
+    main_image_container = (
+        main_source_infobox.select_one("figure.pi-image, .pi-image")
+        if main_source_infobox is not None else None
     )
-    if main_image_caption_node is None and main_image_node is not None:
-        main_figure = main_image_node.find_parent("figure")
-        main_thumb = main_image_node.find_parent(class_="thumbinner")
-        main_image_caption_node = (
-            main_figure.find("figcaption") if main_figure else
-            main_thumb.select_one(".thumbcaption") if main_thumb else None
+    caption_root = main_image_container or main_source_infobox
+    main_image_caption_node = None
+    if caption_root is not None:
+        # Fandom's portable infobox commonly stores the visible image caption
+        # as a pi-data-value in a data-source="caption" row, not a figcaption.
+        # Prefer that semantic value and never substitute image title/alt text.
+        for selector in (
+            '[data-source="caption"] .pi-data-value',
+            "figcaption.pi-caption",
+            ".pi-item.pi-caption",
+            ".pi-image-caption",
+            "figcaption",
+        ):
+            main_image_caption_node = caption_root.select_one(selector)
+            if main_image_caption_node is not None:
+                break
+    if main_image_caption_node is None and main_source_infobox is not None:
+        main_image_caption_node = main_source_infobox.select_one(
+            '[data-source="caption"] .pi-data-value'
         )
     main_image_caption = (
         main_image_caption_node.get_text(" ", strip=True)
-        if main_image_caption_node else
-        str(main_image_node.get("alt") or "").strip() if main_image_node else ""
+        if main_image_caption_node else ""
     )
+    source_infobox_fields = []
+    if main_source_infobox is not None:
+        for data_node in main_source_infobox.select(".pi-data"):
+            label_node = data_node.select_one("h3.pi-data-label, .pi-data-label")
+            value_node = data_node.select_one(".pi-data-value")
+            label_text = label_node.get_text(" ", strip=True) if label_node else ""
+            value_html = (
+                "".join(
+                    _serialize(child, base_url, local_image_map, source_path)
+                    for child in value_node.children
+                )
+                if value_node is not None else ""
+            )
+            value_text = value_node.get_text(" ", strip=True) if value_node else ""
+            if label_text and (value_html.strip() or value_text):
+                source_infobox_fields.append({
+                    "label": label_text,
+                    "value_html": value_html,
+                    "value_text": value_text,
+                })
+
+    # The first source infobox is represented by the GUI's status card.
+    # Later infoboxes are article content and must remain at their DOM position.
+    if main_source_infobox is not None and (
+        main_source_infobox is root or main_source_infobox in root.descendants
+    ):
+        main_source_infobox.decompose()
+
     for image in list(root.find_all("img")):
         image_key = _canonical_image_key(
             image.get("data-src") or image.get("src") or "", base_url
@@ -588,6 +716,34 @@ def render_article_html(html_text, base_url="", source_path=None, image_dir=None
             wrapper.decompose()
         else:
             image.decompose()
+    article_credits = _extract_article_credits(root)
+
+    # Remove Fandom-only rating controls and lazy-comment/mobile fallback UI.
+    for element in list(root.select(
+        ".ratebox, .page-rating-widget, .article-vote, .article-voting, "
+        ".mw-customtoggle-voting"
+    )):
+        element.decompose()
+
+    # Lazy-comment placeholders often live inside a details/mw-collapsible
+    # wrapper. Remove that outer widget as a unit rather than leaving an empty
+    # "▶ 詳細を表示" shell after deleting only its placeholder paragraph.
+    residue_candidates = list(root.find_all(
+        ["p", "small", "span", "div", "section", "aside", "details"]
+    ))
+    for element in residue_candidates:
+        if element.parent is None:
+            continue
+        if not _is_fandom_widget_residue(element.get_text(" ", strip=True)):
+            continue
+        wrapper = element if (
+            element.name == "details"
+            or "mw-collapsible" in element.get("class", [])
+        ) else element.find_parent("details")
+        if wrapper is None:
+            wrapper = element.find_parent(class_="mw-collapsible")
+        (wrapper or element).decompose()
+
     for noscript in root.select("noscript"):
         noscript.decompose()
     _deduplicate_article_images(root, base_url, local_image_map)
@@ -597,6 +753,26 @@ def render_article_html(html_text, base_url="", source_path=None, image_dir=None
     for selector in _DROP_SELECTORS:
         for element in root.select(selector):
             element.decompose()
+
+    # A converted details block is useful only when its body contains visible
+    # text or an image. Ignore the summary label itself ("詳細を表示").
+    for details in reversed(list(root.find_all("details"))):
+        if details.parent is None:
+            continue
+        body_nodes = [
+            child for child in details.contents
+            if not (
+                isinstance(child, Comment)
+                or isinstance(child, Tag) and child.name == "summary"
+            )
+        ]
+        body_text = " ".join(
+            child.get_text(" ", strip=True) if isinstance(child, Tag)
+            else str(child).strip()
+            for child in body_nodes
+        ).strip()
+        if not body_text and not details.find("img"):
+            details.decompose()
 
     title = ""
     heading_nodes = root.select("h2, h3, h4, h5, h6")
@@ -630,12 +806,7 @@ def render_article_html(html_text, base_url="", source_path=None, image_dir=None
         if not image_key:
             continue
         inline_image_keys.append(image_key)
-        figure = image.find_parent("figure")
-        thumb = image.find_parent(class_="thumbinner")
-        caption_node = (
-            figure.find("figcaption") if figure else
-            thumb.select_one(".thumbcaption") if thumb else None
-        )
+        caption_node = _article_image_caption_node(image)
         caption_text = caption_node.get_text(" ", strip=True) if caption_node else ""
         if not caption_text:
             caption_text = str(image.get("alt") or "").strip()
@@ -667,6 +838,8 @@ def render_article_html(html_text, base_url="", source_path=None, image_dir=None
         "image_captions": image_captions,
         "main_image_key": next(iter(main_image_keys), ""),
         "main_image_caption": main_image_caption,
+        "source_infobox_fields": source_infobox_fields,
+        "article_credits": article_credits,
     }
 
 
@@ -681,6 +854,8 @@ def render_article_file(path, base_url="", image_dir=None, article_title=""):
             "has_source_infobox": False,
             "inline_image_keys": [], "image_captions": {},
             "main_image_key": "", "main_image_caption": "",
+            "source_infobox_fields": [],
+            "article_credits": [],
         }
     return render_article_html(
         source,

@@ -472,6 +472,59 @@ def _visual_classes(node):
     return classes
 
 
+def _is_compact_table_candidate(table):
+    """Identify long, narrow, regular tables suitable for timetable-style layout."""
+    if table.find("table") is not None or table.find("tfoot", recursive=False) is not None:
+        return False
+
+    rows = [
+        row for row in table.find_all("tr")
+        if row.find_parent("table") is table
+    ]
+    if not rows:
+        return False
+
+    header_rows = []
+    thead = table.find("thead", recursive=False)
+    if thead is not None:
+        header_rows = list(thead.find_all("tr", recursive=False))
+    elif rows[0].find(["th"], recursive=False) is not None:
+        header_rows = [rows[0]]
+    if not header_rows:
+        return False
+
+    data_rows = [row for row in rows if row not in header_rows]
+    if len(data_rows) < 14:
+        return False
+
+    first_cells = header_rows[-1].find_all(["th", "td"], recursive=False)
+    column_count = len(first_cells)
+    if not 2 <= column_count <= 5:
+        return False
+
+    for row in rows:
+        cells = row.find_all(["th", "td"], recursive=False)
+        if len(cells) != column_count:
+            return False
+        for cell in cells:
+            if cell.has_attr("rowspan") or cell.has_attr("colspan"):
+                try:
+                    if int(cell.get("rowspan", 1)) != 1 or int(cell.get("colspan", 1)) != 1:
+                        return False
+                except (TypeError, ValueError):
+                    return False
+            if cell.find(["p", "ul", "ol", "div", "table", "img", "figure"]) is not None:
+                return False
+            text = re.sub(r"\\s+", " ", cell.get_text(" ", strip=True)).strip()
+            if len(text) > 42:
+                return False
+        row_text = " ".join(cell.get_text(" ", strip=True) for cell in cells)
+        if len(row_text) > 100:
+            return False
+
+    return True
+
+
 def _serialize(node, base_url, local_image_map=None, source_path=None):
     if isinstance(node, Comment):
         return ""
@@ -516,6 +569,8 @@ def _serialize(node, base_url, local_image_map=None, source_path=None):
     classes.extend(_visual_classes(node))
     if name == "table":
         classes.append("term-table")
+        if _is_compact_table_candidate(node):
+            attrs.append('data-compact-table="true"')
     elif name in {"ol", "ul"}:
         classes.append("term-list")
     elif name in {"h1", "h2", "h3", "h4", "h5", "h6"}:

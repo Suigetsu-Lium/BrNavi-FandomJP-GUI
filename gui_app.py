@@ -2311,6 +2311,45 @@ HTML_TEMPLATE = r"""
         page-break-inside: avoid !important;
       }
 
+      /* 縦長コンパクトテーブルは印刷時に必ず全幅2列へ統一する */
+      .term-table-compact-controls {
+        display: none !important;
+      }
+      .term-table-wrap[data-compact-table-wrap="true"] {
+        display: block !important;
+        clear: both !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        overflow: visible !important;
+        break-inside: auto !important;
+        page-break-inside: auto !important;
+      }
+      .term-table-wrap[data-compact-table-wrap="true"] .term-table-normal-view {
+        display: none !important;
+      }
+      .term-table-wrap[data-compact-table-wrap="true"] .term-table-compact-grid {
+        display: grid !important;
+        grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+        gap: 3mm !important;
+        width: 100% !important;
+      }
+      .term-table-wrap[data-compact-table-wrap="true"] .term-table-compact-grid table {
+        display: table !important;
+        width: 100% !important;
+        min-width: 0 !important;
+        max-width: 100% !important;
+        table-layout: fixed !important;
+        font-size: 7.5pt !important;
+        break-inside: auto !important;
+      }
+      .term-table-wrap[data-compact-table-wrap="true"] .term-table-compact-grid th,
+      .term-table-wrap[data-compact-table-wrap="true"] .term-table-compact-grid td {
+        padding: 1mm 1.2mm !important;
+        white-space: normal !important;
+        overflow-wrap: anywhere !important;
+        word-break: normal !important;
+      }
+
       #print-attribution {
         display: block !important;
         visibility: visible !important;
@@ -2458,6 +2497,73 @@ HTML_TEMPLATE = r"""
     }
     .term-article .term-table th, .term-article .term-table td { border: 1px solid #d8cfb8; padding: 0.45rem 0.6rem; vertical-align: top; }
     .term-article .term-table th { background: #f4eedf; font-weight: 700; white-space: nowrap; }
+    .term-table-compact-controls {
+      display: flex;
+      justify-content: flex-end;
+      margin: 0 0 0.35rem;
+    }
+    .term-table-compact-toggle {
+      border: 1px solid #d6c79a;
+      border-radius: 0.3rem;
+      padding: 0.18rem 0.55rem;
+      background: #f8f1df;
+      color: #72552d;
+      font-size: 0.72rem;
+      line-height: 1.4;
+      cursor: pointer;
+    }
+    .term-table-compact-toggle:hover {
+      background: #efe3c4;
+    }
+    .term-table-wrap[data-compact-table-wrap="true"] {
+      overflow: visible;
+    }
+    .term-table-wrap[data-compact-table-wrap="true"][data-compact-mode="compact"] {
+      clear: both;
+    }
+    .term-table-normal-view {
+      display: none;
+      width: 100%;
+      min-width: 0;
+      overflow-x: auto;
+    }
+    .term-table-compact-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.65rem;
+      width: 100%;
+      min-width: 0;
+    }
+    .term-article .term-table-compact-grid table.term-table {
+      display: table;
+      width: 100%;
+      min-width: 0;
+      max-width: 100%;
+      table-layout: fixed;
+      font-size: 0.76rem;
+    }
+    .term-article .term-table-compact-grid .term-table th,
+    .term-article .term-table-compact-grid .term-table td {
+      padding: 0.28rem 0.35rem;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      word-break: normal;
+    }
+    .term-table-wrap[data-compact-mode="normal"] .term-table-normal-view {
+      display: block;
+    }
+    .term-table-wrap[data-compact-mode="normal"] .term-table-compact-grid {
+      display: none;
+    }
+    .term-table-wrap[data-compact-mode="normal"] {
+      overflow-x: auto;
+    }
+    @media (max-width: 680px) {
+      .term-table-compact-grid { gap: 0.35rem; }
+      .term-article .term-table-compact-grid table.term-table { font-size: 0.68rem; }
+      .term-article .term-table-compact-grid .term-table th,
+      .term-article .term-table-compact-grid .term-table td { padding: 0.2rem 0.25rem; }
+    }
     .term-article .references, .term-article ol.references { margin-top: 1rem; padding-left: 1.5rem; font-size: 0.82rem; }
     .term-article .reference { font-size: 0.72em; vertical-align: super; }
     .term-article blockquote { margin: 1rem 0; padding: 0.5rem 1rem; border-left: 3px solid #d8c99e; background: #faf7ef; }
@@ -5137,6 +5243,88 @@ HTML_TEMPLATE = r"""
       panel.classList.toggle('hidden', !shouldShow);
     }
 
+    // 長く細い単純一覧表を、ヘッダーを左右へ複製した時刻表形式に変換する。
+    function initializeCompactArticleTables(root) {
+      if (!root) return;
+      root.querySelectorAll('table.term-table[data-compact-table="true"]').forEach(table => {
+        const wrapper = table.closest('.term-table-wrap');
+        if (!wrapper || wrapper.dataset.compactTableWrap === 'true') return;
+
+        const header = table.tHead;
+        let headerRows = header ? Array.from(header.rows) : [];
+        const allRows = Array.from(table.rows);
+        if (!headerRows.length && allRows.length && allRows[0].querySelector('th')) {
+          headerRows = [allRows[0]];
+        }
+        const headerSet = new Set(headerRows);
+        const dataRows = allRows.filter(row =>
+          !headerSet.has(row) && row.parentElement?.tagName !== 'TFOOT'
+        );
+        if (!headerRows.length || dataRows.length < 14) return;
+
+        const cloneWithoutIds = node => {
+          const clone = node.cloneNode(true);
+          if (clone.nodeType === Node.ELEMENT_NODE) {
+            clone.removeAttribute('id');
+            clone.querySelectorAll('[id]').forEach(element => element.removeAttribute('id'));
+          }
+          return clone;
+        };
+        const buildHalf = (rows, includeCaption) => {
+          const half = table.cloneNode(false);
+          half.removeAttribute('id');
+          half.removeAttribute('data-compact-table');
+          half.classList.add('term-table-compact-half');
+          if (includeCaption && table.caption) {
+            half.appendChild(cloneWithoutIds(table.caption));
+          }
+          const halfHead = document.createElement('thead');
+          headerRows.forEach(row => halfHead.appendChild(cloneWithoutIds(row)));
+          half.appendChild(halfHead);
+          const halfBody = document.createElement('tbody');
+          rows.forEach(row => halfBody.appendChild(cloneWithoutIds(row)));
+          half.appendChild(halfBody);
+          return half;
+        };
+
+        const splitAt = Math.ceil(dataRows.length / 2);
+        const normalView = document.createElement('div');
+        normalView.className = 'term-table-normal-view';
+        normalView.appendChild(table);
+
+        const compactGrid = document.createElement('div');
+        compactGrid.className = 'term-table-compact-grid';
+        compactGrid.setAttribute('aria-label', '左右2列に分割したコンパクトテーブル');
+        compactGrid.append(
+          buildHalf(dataRows.slice(0, splitAt), true),
+          buildHalf(dataRows.slice(splitAt), false)
+        );
+
+        const controls = document.createElement('div');
+        controls.className = 'term-table-compact-controls';
+        const toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.className = 'term-table-compact-toggle';
+        toggle.setAttribute('aria-pressed', 'true');
+        const setMode = compact => {
+          wrapper.dataset.compactMode = compact ? 'compact' : 'normal';
+          toggle.textContent = compact ? '通常1列表示' : '2列コンパクト表示';
+          toggle.setAttribute('aria-pressed', compact ? 'true' : 'false');
+          toggle.setAttribute('aria-label', compact
+            ? '通常1列表示へ切り替え'
+            : '2列コンパクト表示へ切り替え');
+        };
+        toggle.addEventListener('click', () => {
+          setMode(wrapper.dataset.compactMode !== 'compact');
+        });
+        controls.appendChild(toggle);
+
+        wrapper.dataset.compactTableWrap = 'true';
+        wrapper.replaceChildren(controls, normalView, compactGrid);
+        setMode(true);
+      });
+    }
+
     // レベル詳細の印刷
     function printLevelArticle() {
       const article = document.getElementById('wiki-page-container');
@@ -5331,6 +5519,7 @@ HTML_TEMPLATE = r"""
       articleContent.innerHTML = d.article_html
         ? d.article_html
         : formatWikiContent(d.text);
+      initializeCompactArticleTables(articleContent);
       bindExplorerArticleLinks(articleContent);
 
       // Infobox

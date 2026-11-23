@@ -82,6 +82,21 @@ CSV_HEADERS = [
     "インデックス",
 ]
 
+LEVEL_ARTICLE_CATEGORIES = frozenset({
+    "normal", "normal_eta", "sublevel", "sublevel_eta",
+    "enigmatic", "enigmatic_eta", "enigmatic_sublevel_eta",
+    "foreign", "joke_level", "contest_level",
+})
+
+
+def is_level_article_category(category, source_type="original"):
+    """Classify Level-like articles from canonical category metadata, not titles."""
+    category = str(category or "").strip().casefold()
+    source_type = str(source_type or "").strip().casefold()
+    if source_type == "translation" or category == "terms":
+        return False
+    return category in LEVEL_ARTICLE_CATEGORIES if category else True
+
 
 # ============================================================
 # 共通
@@ -1886,11 +1901,29 @@ def make_summary_row(
         filename
     )
 
+    # Translation articles have a canonical page title, not a Level code.
+    # Keep the title identical to the saved TXT filename contract.
+    source_type = str(html_meta.get("source_type") or "").strip().casefold()
+    page_url = (
+        html_meta.get("url", "")
+        or extract_url_from_html(html_text)
+    )
+    page_path = unquote(urlsplit(page_url).path).casefold() if page_url else ""
+    is_translation = (
+        source_type == "translation"
+        or page_path.startswith("/ja/wiki/翻訳/")
+        or page_title.casefold().startswith("翻訳/")
+    )
+    if is_translation:
+        level_code = str(html_meta.get("title") or page_title).strip()
+        level_title = level_code
+        meta_title = ""
+
     # --------------------------------------------------------
     # メタタイトル fallback
     # --------------------------------------------------------
 
-    if not meta_title:
+    if not meta_title and not is_translation:
 
         # 管理情報に明示的タイトルがある場合
         meta_from_downloader = (
@@ -1954,7 +1987,7 @@ def make_summary_row(
         )
     )
 
-    if not url:
+    if not url and not is_translation:
 
         url = build_fandom_url(
             level_code
@@ -2287,8 +2320,8 @@ def process_html_file(
     page_path = unquote(urlsplit(page_url).path).casefold() if page_url else ""
     is_translation_article = (
         str(html_meta.get("source_type") or "").casefold() == "translation"
-        or page_path.startswith("/ja/wiki/??/")
-        or page_title.casefold().startswith("??/")
+        or page_path.startswith("/ja/wiki/\u7ffb\u8a33/")
+        or page_title.casefold().startswith("\u7ffb\u8a33/")
     )
     if is_translation_article:
         article_title = str(html_meta.get("title") or page_title).strip()
@@ -2301,10 +2334,18 @@ def process_html_file(
         if txt_path is None:
             return None
         row = make_summary_row(html_text, article_text, html_path.name, index)
-        row["?????"] = article_title
-        row["??????"] = ""
-        row["???"] = "translation"
+        row["URL"] = page_url
+        row["\u968e\u5c64\u30b3\u30fc\u30c9"] = article_title
+        row["\u30e1\u30bf\u30bf\u30a4\u30c8\u30eb"] = ""
+        row["\u30bd\u30fc\u30b9"] = "translation"
         return row
+
+    if not is_level_article_category(
+        html_meta.get("category"),
+        html_meta.get("source_type"),
+    ):
+        log("  → 非Level記事のためLevel用Summary/TXT抽出をスキップ")
+        return None
 
     (
         level_title,
@@ -2528,6 +2569,7 @@ def extract_levels(
     term_article_urls = _load_terms_article_urls()
     level_html_files = []
     skipped_term_html = 0
+    skipped_non_level_html = 0
     for html_path in html_files:
         try:
             with html_path.open("r", encoding="utf-8-sig", errors="replace") as stream:
@@ -2543,12 +2585,23 @@ def extract_levels(
         ):
             skipped_term_html += 1
             continue
+        if (
+            str(metadata.get("source_type") or "").strip().casefold() != "translation"
+            and not is_level_article_category(
+                metadata.get("category") or "normal",
+                metadata.get("source_type"),
+            )
+        ):
+            skipped_non_level_html += 1
+            continue
         level_html_files.append(html_path)
     html_files = level_html_files
     if skipped_term_html:
         log(f"用語記事HTMLをLevel抽出対象から除外: {skipped_term_html} 件")
+    if skipped_non_level_html:
+        log(f"非Level記事HTMLをLevel抽出対象から除外: {skipped_non_level_html} 件")
     if original_html_count and not html_files:
-        log("処理対象は用語記事のみです。Level用Summary・TXTは変更しません。")
+        log("処理対象は用語・非Level記事のみです。Level用Summary・TXTは変更しません。")
         return []
 
     total = len(

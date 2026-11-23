@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 from dataclasses import dataclass
 
 from modules.downloader import download_page, find_existing_html
-from modules.extractor import extract_levels
+from modules.extractor import extract_levels, is_level_article_category
 from modules.image_downloader import download_images, rename_legacy_images
 from modules.network import process_backrooms_data
 from modules.operation_context import OperationContext
@@ -551,6 +551,24 @@ def run_maintenance_operation(task_name, options=None, context=None):
                 details={"extraction_completed": False, "network_updated": False, "term_article": True},
             )
 
+        saved_metadata = _saved_html_metadata(html_path)
+        saved_category = str(saved_metadata.get("category") or "normal").strip().casefold()
+        saved_source_type = str(saved_metadata.get("source_type") or "").strip().casefold()
+        if saved_source_type != "translation" and not is_level_article_category(
+            saved_category,
+            saved_source_type,
+        ):
+            context.log("非Level記事を保存しました。Level用Summary/TXT・経路CSVの再構築は対象外としてスキップします。")
+            return OperationResult(
+                success=True,
+                message="非Level記事を保存しました。Level用Summary/TXT・経路CSVの再構築は行っていません。",
+                details={
+                    "extraction_completed": False,
+                    "network_updated": False,
+                    "non_level_article": True,
+                },
+            )
+
         context.log(f"保存した記事から本文・メタデータを抽出します: {html_path.name}")
         extracted_rows = extract_levels(
             html_files=[html_path],
@@ -563,6 +581,18 @@ def run_maintenance_operation(task_name, options=None, context=None):
                 success=False,
                 message="HTMLは保存されましたが、本文・メタデータを抽出できませんでした。",
                 details={"extraction_completed": False, "network_updated": False},
+            )
+
+        if saved_source_type == "translation":
+            context.log("翻訳記事のTXT・Summaryを更新しました。Level経路CSVの再構築は対象外としてスキップします。")
+            return OperationResult(
+                success=True,
+                message="翻訳記事を保存し、正規URLに対応するTXT・Summaryを更新しました。経路CSVは変更していません。",
+                details={
+                    "extraction_completed": True,
+                    "network_updated": False,
+                    "translation_article": True,
+                },
             )
 
         context.check_cancelled()

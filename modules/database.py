@@ -23,6 +23,7 @@ Master Databaseを優先して検索し、
 import csv
 import json
 import re
+import unicodedata
 import webbrowser
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -599,6 +600,14 @@ def normalize_page_url(value):
     return f"{scheme}://{host}{path}"
 
 
+def normalize_local_article_key(value):
+    """Normalize canonical article titles and Windows-safe local filenames identically."""
+    text = unicodedata.normalize("NFKC", str(value or "")).strip()
+    text = re.sub(r"\.[^.\\/]+$", "", text)
+    text = text.replace("\\", "/").replace("/", " ").replace("_", " ")
+    return " ".join(text.split()).casefold()
+
+
 def load_summary_by_url():
     """Load unambiguous Summary rows indexed by their canonical article URL."""
     rows_by_url = {}
@@ -613,7 +622,8 @@ def load_summary_by_url():
                 if not key or not code:
                     continue
                 previous = rows_by_url.get(key)
-                if previous and str(previous.get("階層コード") or "").strip() != code:
+                previous_code = str(previous.get("階層コード") or "").strip() if previous else ""
+                if previous and normalize_local_article_key(previous_code) != normalize_local_article_key(code):
                     ambiguous_urls.add(key)
                 else:
                     rows_by_url.setdefault(key, row)
@@ -625,7 +635,7 @@ def load_summary_by_url():
 
 
 def find_text_database_by_url(url, summary_by_url=None):
-    """Resolve the extracted TXT through Summary's URL -> canonical code mapping."""
+    """Resolve TXT by canonical URL and Summary, with an exact normalized legacy-name fallback."""
     key = normalize_page_url(url)
     if not key:
         return None
@@ -636,10 +646,24 @@ def find_text_database_by_url(url, summary_by_url=None):
     code = str(row.get("階層コード") or "").strip()
     if not code:
         return None
-    # Keep the filename contract identical to extractor.save_individual_txt().
+
+    # Keep the primary filename contract identical to extractor.save_individual_txt().
     from modules.extractor import safe_filename
     path = TEXT_DB_DIR / f"{safe_filename(code)}.txt"
-    return path if path.is_file() else None
+    if path.is_file():
+        return path
+
+    # Older translation exports may have a slash-preserving Summary code while
+    # their Windows filename contains the slash replacement. Resolve only an
+    # unambiguous exact normalized stem; never use prefix matching.
+    target_key = normalize_local_article_key(code)
+    if not target_key or not TEXT_DB_DIR.is_dir():
+        return None
+    matches = [
+        candidate for candidate in TEXT_DB_DIR.glob("*.txt")
+        if normalize_local_article_key(candidate.stem) == target_key
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 def index_html_database_by_url():

@@ -28,6 +28,7 @@ from modules.database import (
     load_master_database,
     load_summary_by_url,
     normalize_page_url,
+    normalize_local_article_key,
     open_local_html,
     sanitize_filename,
 )
@@ -37,8 +38,9 @@ from modules.extractor import (
     extract_danger,
     extract_understanding,
     extract_meta_info_from_html,
+    is_level_article_category,
 )
-from modules.term_articles import render_term_article_file
+from modules.term_articles import has_portable_infobox, render_article_file
 
 # 保守・更新サービス
 from modules.operation_context import OperationCancelled, OperationContext
@@ -724,6 +726,11 @@ class BackroomsAPI:
                 local_files_by_key.setdefault(key, []).append(path)
 
         pages = load_master_database() or {}
+        canonical_title_keys = {
+            normalize_local_article_key(page.get("title"))
+            for page in pages.values()
+            if str(page.get("title") or "").strip()
+        }
         redirect_alias_titles = set()
         redirect_alias_urls = set()
         independently_listed_titles = set()
@@ -807,6 +814,18 @@ class BackroomsAPI:
                 if candidate_text is not None:
                     matched_files.append(candidate_text)
                     saved_text_by_url[url_key] = candidate_text
+                elif candidate_html is not None:
+                    # A URL-matched saved HTML is authoritative. When an old
+                    # Summary row is missing or uses a legacy title spelling,
+                    # attach only one exact normalized TXT sibling candidate.
+                    title_text_matches = [
+                        path for path in local_files_by_key.get(title_key, ())
+                        if path.suffix.casefold() == ".txt"
+                    ]
+                    if len(title_text_matches) == 1:
+                        candidate_text = title_text_matches[0]
+                        matched_files.append(candidate_text)
+                        saved_text_by_url[url_key] = candidate_text
 
             # Legacy title-only matching is a last resort and only safe when
             # the title is unique in Master DB. Prefix/token matching is forbidden.
@@ -829,7 +848,14 @@ class BackroomsAPI:
             if local_file in matched_local_files:
                 continue
             level_id = self._extract_level_id_from_filename(local_file)
-            if not level_id or normalized_identity(level_id) in redirect_alias_titles:
+            local_title_key = normalize_local_article_key(level_id)
+            if (
+                not level_id
+                or local_title_key in redirect_alias_titles
+                or local_title_key in canonical_title_keys
+            ):
+                # A filename that normalizes to an existing canonical title
+                # is a local representation of that record, never a new article.
                 continue
             if local_file.suffix.casefold() in {".html", ".htm"} and redirect_alias_urls:
                 try:
@@ -1039,17 +1065,52 @@ class BackroomsAPI:
             html_source_for_type = ""
         page_indexes = str((page_info or {}).get("indexes") or "").casefold().split("|")
         html_indexes = str(html_metadata.get("indexes") or "").casefold().split("|")
+        category = str(
+            (page_info or {}).get("category")
+            or html_metadata.get("category")
+            or "normal"
+        ).strip().casefold()
+        source_type = str(
+            (page_info or {}).get("source_type")
+            or html_metadata.get("source_type")
+            or "original"
+        ).strip().casefold()
         is_term_article = (
-            str((page_info or {}).get("category") or "").casefold() == "terms"
+            category == "terms"
             or "terms" in page_indexes
-            or str(html_metadata.get("category") or "").casefold() == "terms"
             or "terms" in html_indexes
         )
-        term_article = (
-            render_term_article_file(html_file, (page_info or {}).get("url") or html_metadata.get("url") or "")
-            if is_term_article and html_file and html_file.is_file()
-            else {"html": "", "toc": [], "title": ""}
+        is_level_article = (
+            is_level_article_category(category, source_type)
+            and not is_term_article
         )
+        has_source_infobox = has_portable_infobox(html_source_for_type) if html_source_for_type else False
+        needs_dom_article = bool(html_source_for_type) and (
+            is_term_article
+            or not has_source_infobox
+            or not is_level_article
+        )
+        article_dom = (
+            render_article_file(
+                html_file,
+                (page_info or {}).get("url") or html_metadata.get("url") or page_url or "",
+                image_dir=IMAGE_DIR,
+                article_title=canonical_title,
+            )
+            if needs_dom_article and html_file and html_file.is_file()
+            else {
+                "html": "", "toc": [], "title": "",
+                "has_source_infobox": has_source_infobox,
+            }
+        )
+        show_infobox = (
+            False
+            if is_term_article
+            else has_source_infobox
+            if html_source_for_type
+            else is_level_article
+        )
+        article_html = article_dom.get("html", "")
 
         # Resolve TXT by canonical URL through Summary first. The filename is
         # generated from Summary's 階層コード using extractor.safe_filename().
@@ -1113,13 +1174,13 @@ class BackroomsAPI:
         has_strikethrough = bool(page_info.get("has_strikethrough")) if page_info else False
         strikethrough_spans = page_info.get("strikethrough_spans", "[]") if page_info else "[]"
 
-        parsed_danger, _ = ("", "") if is_term_article else extract_danger(raw_text)
-        parsed_comprehension, _ = ("", "") if is_term_article else extract_understanding(raw_text)
+        parsed_danger, _ = ("", "") if not is_level_article else extract_danger(raw_text)
+        parsed_comprehension, _ = ("", "") if not is_level_article else extract_understanding(raw_text)
         if parsed_danger:
             danger = parsed_danger
         if parsed_comprehension:
             comprehension = parsed_comprehension
-        if not is_term_article and (danger == "情報なし" or comprehension == "情報なし"):
+        if is_level_article and (danger == "情報なし" or comprehension == "情報なし"):
             if danger == "情報なし" and summary_row.get("危険度"):
                 danger = str(summary_row["危険度"]).strip()
             if comprehension == "情報なし" and summary_row.get("理解度"):
@@ -1148,14 +1209,21 @@ class BackroomsAPI:
 
         # URLを持つ記事は、そのURLから生成したキーの画像だけを表示する。
         # タイトル・階層IDによる画像検索は別記事混入の原因になるため行わない。
-        page_url_value = str(page_info.get("url", "") if page_info else "").strip()
-        if page_url_value:
+        page_url_value = str(
+            (page_info or {}).get("url")
+            or html_metadata.get("url")
+            or page_url
+            or ""
+        ).strip()
+        if show_infobox and page_url_value:
             page_key = hashlib.sha256(
                 page_url_value.rstrip("/").encode("utf-8")
             ).hexdigest()[:16]
             image_paths = sorted(IMAGE_DIR.glob(f"page_{page_key}_image*")) if IMAGE_DIR.exists() else []
-        else:
+        elif show_infobox:
             image_paths = self._find_images_flexible(level_id)
+        else:
+            image_paths = []
         images_base64 = []
         for img_path in image_paths:
             try:
@@ -1176,18 +1244,22 @@ class BackroomsAPI:
             "html_file": html_file,
         }
 
-        category = "terms" if is_term_article else (page_info.get("category", "normal") if page_info else "normal")
-        if is_term_article:
+        category = "terms" if is_term_article else category
+        if not is_level_article:
             danger = ""
             comprehension = ""
-        language = page_info.get("language", "JP") if page_info else "JP"
-        source_type = page_info.get("source_type", "original") if page_info else "original"
+        language = (
+            (page_info or {}).get("language")
+            or html_metadata.get("language")
+            or "JP"
+        )
+        source_type = source_type or "original"
         translation_section = page_info.get("translation_section", "") if page_info else ""
         section_number = page_info.get("section_number", "") if page_info else ""
 
         html_saved = bool(html_file and html_file.is_file())
         text_saved = bool(text_file and text_file.is_file())
-        body_available = bool(cleaned_text.strip()) or bool(term_article.get("html"))
+        body_available = bool(cleaned_text.strip()) or bool(article_html)
         if body_source == "html_fallback" and body_available:
             saved_state = "html_fallback"
         elif html_saved and text_saved:
@@ -1227,10 +1299,14 @@ class BackroomsAPI:
             "text_saved": text_saved,
             "saved": html_saved or text_saved,
             "saved_state": saved_state,
-            "body_source": body_source or ("term_html" if term_article.get("html") else ""),
+            "body_source": body_source or ("article_html" if article_html else ""),
             "text": cleaned_text or missing_body_message,
-            "term_html": term_article.get("html", ""),
-            "term_toc": term_article.get("toc", []),
+            "article_html": article_html,
+            "term_html": article_html,
+            "term_toc": article_dom.get("toc", []),
+            "has_source_infobox": has_source_infobox,
+            "show_infobox": show_infobox,
+            "is_level_article": is_level_article,
             "images": images_base64
         }
 
@@ -2170,6 +2246,54 @@ HTML_TEMPLATE = r"""
     .term-article .reference { font-size: 0.72em; vertical-align: super; }
     .term-article blockquote { margin: 1rem 0; padding: 0.5rem 1rem; border-left: 3px solid #d8c99e; background: #faf7ef; }
     .term-article img { max-width: 100%; height: auto; }
+    .term-article details.mw-collapsible {
+      margin: 0.85rem 0;
+      border: 1px solid #d8cfb8;
+      border-radius: 0.35rem;
+      background: rgba(244, 238, 223, 0.35);
+      overflow: hidden;
+    }
+    .term-article details.mw-collapsible > summary {
+      cursor: pointer;
+      padding: 0.55rem 0.75rem;
+      font-weight: 700;
+      background: rgba(226, 216, 181, 0.35);
+      user-select: none;
+    }
+    .term-article details.mw-collapsible > .mw-collapsible-content {
+      padding: 0.65rem 0.8rem;
+    }
+    .term-article .mw-form-frame {
+      margin: 0.85rem 0;
+      padding: 0.85rem;
+      border: 1px dashed #a99a75;
+      border-radius: 0.35rem;
+      background: rgba(244, 238, 223, 0.35);
+    }
+    .term-article .mw-form-control {
+      display: inline-block;
+      min-width: 8rem;
+      min-height: 1.5rem;
+      margin: 0.2rem;
+      padding: 0.15rem 0.4rem;
+      border: 1px solid #b8ad91;
+      border-radius: 0.2rem;
+      background: #fffdf7;
+    }
+    .term-article .mw-form-button {
+      display: inline-block;
+      margin: 0.2rem;
+      padding: 0.25rem 0.65rem;
+      border: 1px solid #a99a75;
+      border-radius: 0.25rem;
+      background: #eee5cf;
+      font-weight: 600;
+    }
+    .term-article .mw-frame-dashed { border: 1px dashed #a99a75; padding: 0.75rem; }
+    .term-article .mw-frame-dotted { border: 1px dotted #a99a75; padding: 0.75rem; }
+    .term-article .mw-frame-solid { border: 1px solid #c9bea0; padding: 0.75rem; }
+    .term-article .mw-frame-panel { background: rgba(244, 238, 223, 0.35); }
+    .article-kind-nonlevel p { line-height: 1.85; }
     #wiki-page-container .wiki-infobox.hidden { display: none !important; }
     @media print {
       #wiki-page-container .wiki-infobox.hidden,
@@ -4677,16 +4801,22 @@ HTML_TEMPLATE = r"""
       const isItemArticle = d.category === 'item';
       const isTermArticle = d.category === 'terms';
       const isTranslation = d.source_type === 'translation';
+      const isLevelArticle = Boolean(d.is_level_article);
+      const showInfobox = Boolean(d.show_infobox);
+      const showLevelParameters = isLevelArticle && showInfobox;
       const articleContent = document.getElementById('view-article-content');
-      articleContent.dataset.articleKind = isTermArticle ? 'term' : (isItemArticle ? 'item' : (isTranslation ? 'translation' : 'level'));
+      const articleKind = isTermArticle ? 'term' : (isItemArticle ? 'item' : (isTranslation ? 'translation' : (isLevelArticle ? 'level' : 'non-level')));
+      articleContent.dataset.articleKind = articleKind;
       articleContent.classList.toggle('article-kind-item', isItemArticle);
       articleContent.classList.toggle('article-kind-term', isTermArticle);
+      articleContent.classList.toggle('article-kind-nonlevel', !isLevelArticle && !isTermArticle);
       document.getElementById('view-category').innerText = categoryNames[d.category] || d.category || '未分類';
-      document.getElementById('view-danger-label').classList.toggle('hidden', isTermArticle);
-      document.getElementById('infobox-danger-row').classList.toggle('hidden', isItemArticle || isTermArticle);
-      document.getElementById('infobox-comprehension-row').classList.toggle('hidden', isItemArticle || isTermArticle);
+      document.getElementById('view-danger-label').classList.toggle('hidden', !showLevelParameters && !isItemArticle);
+      document.getElementById('view-danger-tag').classList.toggle('hidden', !showLevelParameters && !isItemArticle);
+      document.getElementById('infobox-danger-row').classList.toggle('hidden', !showLevelParameters);
+      document.getElementById('infobox-comprehension-row').classList.toggle('hidden', !showLevelParameters);
       const articleInfobox = document.querySelector('#wiki-page-container .wiki-infobox');
-      if (articleInfobox) articleInfobox.classList.toggle('hidden', isTermArticle);
+      if (articleInfobox) articleInfobox.classList.toggle('hidden', !showInfobox);
       const translationBanner = document.getElementById('translation-article-banner');
       translationBanner.classList.toggle('hidden', !isTranslation);
       translationBanner.textContent = isTranslation
@@ -4709,13 +4839,14 @@ HTML_TEMPLATE = r"""
       document.getElementById('view-danger-tag').className = isItemArticle
         ? 'rounded-full bg-[#f3ead2] px-2 py-0.5 text-xs font-semibold text-[#72552d]'
         : dangerBadgeClass(d.danger);
+      document.getElementById('view-danger-tag').classList.toggle('hidden', !showLevelParameters && !isItemArticle);
 
       // 本文の整形描画
       const attribution = document.getElementById('article-attribution');
       attribution.textContent = d.attribution || '';
       attribution.classList.toggle('hidden', !d.attribution);
-      articleContent.innerHTML = isTermArticle && d.term_html
-        ? d.term_html
+      articleContent.innerHTML = d.article_html
+        ? d.article_html
         : formatWikiContent(d.text);
       bindExplorerArticleLinks(articleContent);
 
@@ -4752,7 +4883,7 @@ HTML_TEMPLATE = r"""
       const gallery = document.getElementById('view-image-gallery');
       gallery.innerHTML = '';
 
-      if (d.images && d.images.length > 1) {
+      if (!d.article_html && d.images && d.images.length > 1) {
         galleryContainer.classList.remove('hidden');
         d.images.slice(1).forEach((img, index) => {
           const card = document.createElement('div');

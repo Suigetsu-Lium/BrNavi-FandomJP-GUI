@@ -30,7 +30,7 @@ _DROP_SELECTORS = (
     ".article-vote", ".article-voting", ".mw-customtoggle-voting",
     "script", "style", "noscript", "iframe",
 )
-_ID_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,100}$")
+_ID_PATTERN = re.compile(r"^[^\s\x00-\x1f\x7f]{1,200}$")
 _ALLOWED_DATA_ATTRIBUTES = {
     "data-compact-table",
     "data-lightbox-src",
@@ -513,18 +513,35 @@ def _is_compact_table_candidate(table):
         return False
 
     first_cells = header_rows[-1].find_all(["th", "td"], recursive=False)
-    column_count = len(first_cells)
-    if not 2 <= column_count <= 8:
+    try:
+        # Header groups may span multiple logical columns (e.g. a grouped
+        # timetable heading). Count their represented columns, not DOM cells.
+        column_count = sum(int(cell.get("colspan", 1)) for cell in first_cells)
+    except (TypeError, ValueError):
+        return False
+    if not 2 <= column_count <= 11:
         return False
 
     for row in rows:
         cells = row.find_all(["th", "td"], recursive=False)
-        if len(cells) != column_count:
-            return False
+        is_header_row = row in header_rows
+        if is_header_row:
+            try:
+                row_column_count = sum(int(cell.get("colspan", 1)) for cell in cells)
+            except (TypeError, ValueError):
+                return False
+            if row_column_count != column_count:
+                return False
+        else:
+            # Data rows must remain a regular one-cell-per-column grid.
+            if len(cells) != column_count:
+                return False
+            if any(cell.has_attr("rowspan") or cell.has_attr("colspan") for cell in cells):
+                return False
         for cell in cells:
-            if cell.has_attr("rowspan") or cell.has_attr("colspan"):
+            if is_header_row:
                 try:
-                    if int(cell.get("rowspan", 1)) != 1 or int(cell.get("colspan", 1)) != 1:
+                    if int(cell.get("colspan", 1)) < 1:
                         return False
                 except (TypeError, ValueError):
                     return False
@@ -845,7 +862,14 @@ def render_article_html(html_text, base_url="", source_path=None, image_dir=None
     title = ""
     heading_nodes = root.select("h2, h3, h4, h5, h6")
     toc = []
-    used_ids = set()
+    heading_node_ids = {id(node) for node in heading_nodes}
+    used_ids = {
+        element_id for element_id in (
+            _safe_id(node.get("id"))
+            for node in root.find_all(attrs={"id": True})
+            if id(node) not in heading_node_ids
+        ) if element_id
+    }
     for index, heading in enumerate(heading_nodes, 1):
         heading_text = heading.get_text(" ", strip=True)
         if not title and heading.name == "h2":
@@ -856,7 +880,7 @@ def render_article_html(html_text, base_url="", source_path=None, image_dir=None
         base_id = element_id
         suffix = 2
         while element_id in used_ids:
-            element_id = f"{base_id}-{suffix}"
+            element_id = f"{base_id}_{suffix}"
             suffix += 1
         used_ids.add(element_id)
         heading["id"] = element_id

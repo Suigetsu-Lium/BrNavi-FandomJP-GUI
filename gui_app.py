@@ -2673,6 +2673,19 @@ HTML_TEMPLATE = r"""
       .term-article .term-table-compact-grid .term-table th:first-child,
       .term-article .term-table-compact-grid .term-table td:first-child { min-width: 4.8rem; }
     }
+    .term-table-expand-toolbar { display: flex; justify-content: flex-end; margin: 0.2rem 0 0.35rem; }
+    .term-table-expand-button { border: 1px solid var(--border-fandom); border-radius: 0.35rem; padding: 0.2rem 0.55rem; background: var(--surface-soft); color: var(--text-secondary); font-size: 0.68rem; line-height: 1.4; cursor: pointer; }
+    .term-table-expand-button:hover { border-color: var(--accent-amber); color: var(--text-primary); }
+    .table-lightbox-panel { background: var(--surface-fandom, #fffaf0); color: var(--text-primary, #29251e); border-color: var(--border-fandom, #cfc5aa); }
+    .table-lightbox-control { border: 1px solid var(--border-fandom, #cfc5aa); border-radius: 0.3rem; padding: 0.25rem 0.45rem; font-size: 0.7rem; font-weight: 600; background: var(--surface-soft, #eee8d9); color: var(--text-primary, #29251e); }
+    .table-lightbox-control:hover { border-color: var(--accent-amber, #b45309); }
+    .table-lightbox-content { width: max-content; min-width: 100%; transform-origin: top left; }
+    .table-lightbox-content .term-table { width: max-content !important; min-width: 100% !important; max-width: none !important; }
+    .table-lightbox-content .term-table thead th { position: sticky; top: 0; z-index: 2; }
+    .table-lightbox-scroll { overscroll-behavior: contain; }
+    @media print { .term-table-expand-toolbar, #table-lightbox { display: none !important; } }
+    body[data-theme="dark"] .table-lightbox-panel { background: #211e18; color: #edeae2; border-color: #4d4637; }
+    body[data-theme="dark"] .table-lightbox-control { background: #332e24; color: #edeae2; border-color: #4d4637; }
     .term-article .references, .term-article ol.references { margin-top: 1rem; padding-left: 1.5rem; font-size: 0.82rem; }
     .term-article .reference { font-size: 0.72em; vertical-align: super; }
     .term-article blockquote { margin: 1rem 0; padding: 0.5rem 1rem; border-left: 3px solid #d8c99e; background: #faf7ef; }
@@ -2897,6 +2910,27 @@ HTML_TEMPLATE = r"""
     <button onclick="stepImageLightbox(1)" aria-label="次の画像" class="absolute right-3 rounded bg-black/50 px-4 py-3 text-2xl text-white">→</button>
   </div>
 
+  <div id="table-lightbox" class="hidden fixed inset-0 z-[125] flex items-center justify-center bg-black/90 p-3 sm:p-5" onclick="if(event.target===this) closeTableLightbox()" role="dialog" aria-modal="true" aria-label="テーブル拡大表示">
+    <section class="table-lightbox-panel flex max-h-full w-full max-w-[96vw] flex-col overflow-hidden rounded-lg border shadow-2xl">
+      <header class="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b px-3 py-2 sm:px-4">
+        <strong class="text-sm">表を拡大表示</strong>
+        <div class="flex flex-wrap items-center gap-1.5">
+          <button type="button" onclick="setTableLightboxZoom(0.75)" class="table-lightbox-control">75%</button>
+          <button type="button" onclick="setTableLightboxZoom(0.85)" class="table-lightbox-control">85%</button>
+          <button type="button" onclick="setTableLightboxZoom(1)" class="table-lightbox-control">100%</button>
+          <button type="button" onclick="setTableLightboxZoom(1.25)" class="table-lightbox-control">125%</button>
+          <button type="button" onclick="setTableLightboxZoom(1.5)" class="table-lightbox-control">150%</button>
+          <span id="table-lightbox-zoom-label" class="px-1 text-xs tabular-nums">100%</span>
+          <button type="button" onclick="closeTableLightbox()" aria-label="閉じる" class="ml-1 rounded bg-black/10 px-3 py-1 text-xl leading-none hover:bg-black/20">×</button>
+        </div>
+      </header>
+      <div id="table-lightbox-scroll" class="table-lightbox-scroll min-h-0 flex-1 overflow-auto p-3 sm:p-4">
+        <div id="table-lightbox-content" class="table-lightbox-content"></div>
+      </div>
+      <footer class="shrink-0 border-t px-3 py-1.5 text-[11px] opacity-70">縦横にスクロールできます · Ctrl + ホイールで拡大・縮小 · Escで閉じる</footer>
+    </section>
+  </div>
+
   <main class="flex-1 flex overflow-hidden">
 
     <!-- 1. 📖 Level 図鑑 ＆ 検索タブ -->
@@ -2920,11 +2954,11 @@ HTML_TEMPLATE = r"""
 
       <!-- 右ペイン：本家Wiki風の一覧ハブ・番号一覧・記事詳細 -->
       <section class="flex-1 overflow-y-auto p-8 bg-[#fbf6de]">
-        <div class="mx-auto mb-4 flex max-w-6xl gap-2 border-b border-[#e2d8b5] pb-2">
+        <div class="mx-auto mb-4 flex max-w-7xl gap-2 border-b border-[#e2d8b5] pb-2">
           <button id="explorer-subtab-article" onclick="switchExplorerSubtab('article')" class="rounded px-3 py-1.5 text-sm font-semibold bg-[#b45309] text-white">記事・図鑑ビュー</button>
           <button id="explorer-subtab-gallery" onclick="switchExplorerSubtab('gallery')" class="rounded px-3 py-1.5 text-sm font-semibold bg-[#eee3bc]">画像ギャラリー</button>
         </div>
-        <div id="explorer-article-tabs" class="mx-auto mb-3 max-w-6xl overflow-hidden rounded-t-xl border border-[#d4c39b] bg-[#e9ddb9] shadow-sm" aria-label="Article browser">
+        <div id="explorer-article-tabs" class="mx-auto mb-3 max-w-7xl overflow-hidden rounded-t-xl border border-[#d4c39b] bg-[#e9ddb9] shadow-sm" aria-label="Article browser">
           <div class="flex min-w-0 items-end gap-1 px-2 pt-2">
             <div id="explorer-tab-strip" class="flex min-w-0 flex-1 items-end gap-1 overflow-x-auto" role="tablist" aria-label="Article tabs"></div>
             <button type="button" onclick="createExplorerTab()" title="New tab" aria-label="New tab" class="mb-0.5 h-8 w-8 shrink-0 rounded-lg text-lg text-[#48515d] hover:bg-white">+</button>
@@ -2940,7 +2974,7 @@ HTML_TEMPLATE = r"""
           </div>
         </div>
         <div id="explorer-article-view">
-        <div id="explorer-index-home" class="mx-auto max-w-5xl">
+        <div id="explorer-index-home" class="mx-auto max-w-7xl">
           <div class="mb-5 text-center">
             <div class="text-xs text-[#8c6b12]">Backrooms Wiki — 一覧</div>
             <h2 class="mt-1 text-3xl font-semibold text-[#3f3828]">階層の一覧</h2>
@@ -2949,7 +2983,7 @@ HTML_TEMPLATE = r"""
           <div id="explorer-category-tiles" class="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-4" aria-label="階層カテゴリ一覧"></div>
         </div>
 
-        <div id="explorer-index-local-saved" class="hidden mx-auto max-w-6xl">
+        <div id="explorer-index-local-saved" class="hidden mx-auto max-w-7xl">
           <div class="mb-4 flex items-center gap-3 border-b border-[#d8c99e] pb-3">
             <button type="button" onclick="showExplorerIndexHome()" class="shrink-0 rounded px-3 py-1.5 text-sm font-semibold text-[#91520f] hover:bg-[#fff7dd]">‹ 一覧へ戻る</button>
             <div class="min-w-0 flex-1"><div class="text-xs text-[#8c6b12]">ローカルアーカイブ</div><h2 class="text-2xl font-semibold text-[#3f3828]">ローカル保存済み階層の一覧</h2></div>
@@ -2958,7 +2992,7 @@ HTML_TEMPLATE = r"""
           <div id="local-saved-level-list" class="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3"></div>
         </div>
 
-        <div id="explorer-index-category" class="hidden mx-auto max-w-6xl">
+        <div id="explorer-index-category" class="hidden mx-auto max-w-7xl">
           <div class="mb-4 flex items-center gap-3 border-b border-[#d8c99e] pb-3">
             <button type="button" onclick="showExplorerIndexHome()" class="shrink-0 rounded px-3 py-1.5 text-sm font-semibold text-[#91520f] hover:bg-[#fff7dd]">‹ 一覧へ戻る</button>
             <div class="min-w-0 flex-1">
@@ -2977,7 +3011,7 @@ HTML_TEMPLATE = r"""
           </div>
         </div>
 
-        <div id="wiki-page-container" class="hidden max-w-4xl mx-auto bg-white border border-[#e2d8b5] p-8 rounded shadow-sm relative">
+        <div id="wiki-page-container" class="hidden w-full max-w-7xl mx-auto bg-white border border-[#e2d8b5] p-8 rounded shadow-sm relative">
           <button type="button" onclick="goExplorerTabBack()" class="print-exclude mb-4 rounded px-2 py-1 text-xs font-semibold text-[#91520f] hover:bg-[#fff7dd]">‹ 前の一覧・ページへ戻る</button>
 
           <div class="text-xs text-[#8c6b12] mb-1 font-medium">
@@ -3070,7 +3104,7 @@ HTML_TEMPLATE = r"""
           </footer>
         </div>
         </div>
-        <section id="explorer-gallery-view" class="hidden mx-auto max-w-6xl">
+        <section id="explorer-gallery-view" class="hidden mx-auto max-w-7xl">
           <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
             <div><h2 class="text-2xl font-semibold">画像ギャラリー</h2><p class="text-xs text-gray-600">保存済み画像からLevelを逆引きできます。</p></div>
             <div class="flex flex-wrap items-center gap-2">
@@ -3507,6 +3541,9 @@ HTML_TEMPLATE = r"""
     let lightboxImages = [];
     let lightboxIndex = 0;
     let lightboxLevel = '';
+    const articleTableSources = new WeakMap();
+    let activeTableZoom = 1;
+    let tableLightboxReturnFocus = null;
 
     function applyTheme(theme) {
       activeTheme = theme === 'dark' ? 'dark' : 'light';
@@ -5212,6 +5249,148 @@ HTML_TEMPLATE = r"""
       return 'https://backrooms.fandom.com/ja/wiki/' + slug;
     }
 
+    function ensureArticleTableControls(root) {
+      if (!root) return;
+      root.querySelectorAll('table').forEach(table => {
+        table.classList.add('term-table');
+        let wrapper = table.closest('.term-table-wrap');
+        if (!wrapper) {
+          wrapper = document.createElement('div');
+          wrapper.className = 'term-table-wrap';
+          table.parentNode.insertBefore(wrapper, table);
+          wrapper.appendChild(table);
+        }
+        if (!articleTableSources.has(wrapper)) {
+          articleTableSources.set(wrapper, table.cloneNode(true));
+        }
+        if (wrapper.querySelector(':scope > .term-table-expand-toolbar')) return;
+        const toolbar = document.createElement('div');
+        toolbar.className = 'term-table-expand-toolbar';
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'term-table-expand-button';
+        button.textContent = '表を拡大表示';
+        button.setAttribute('aria-label', '表を拡大表示');
+        button.addEventListener('click', () => openTableLightbox(wrapper, button));
+        toolbar.appendChild(button);
+        wrapper.insertBefore(toolbar, wrapper.firstChild);
+      });
+    }
+
+    function openTableLightbox(wrapper, trigger) {
+      const modal = document.getElementById('table-lightbox');
+      const content = document.getElementById('table-lightbox-content');
+      const source = articleTableSources.get(wrapper)
+        || wrapper.querySelector('table')?.cloneNode(true);
+      if (!source) return;
+      const table = source.cloneNode(true);
+      table.classList.add('term-table');
+      table.removeAttribute('id');
+      table.querySelectorAll('[id]').forEach(element => element.removeAttribute('id'));
+      const article = document.createElement('div');
+      article.className = 'term-article';
+      article.appendChild(table);
+      content.replaceChildren(article);
+      tableLightboxReturnFocus = trigger || document.activeElement;
+      setTableLightboxZoom(1);
+      modal.classList.remove('hidden');
+      document.getElementById('table-lightbox-scroll').scrollTo(0, 0);
+      modal.querySelector('button[aria-label="閉じる"]')?.focus();
+    }
+
+    function setTableLightboxZoom(zoom) {
+      activeTableZoom = Math.max(0.5, Math.min(2, Number(zoom) || 1));
+      const content = document.getElementById('table-lightbox-content');
+      if (content) content.style.zoom = String(activeTableZoom);
+      const label = document.getElementById('table-lightbox-zoom-label');
+      if (label) label.textContent = Math.round(activeTableZoom * 100) + '%';
+    }
+
+    function closeTableLightbox() {
+      const modal = document.getElementById('table-lightbox');
+      if (!modal || modal.classList.contains('hidden')) return;
+      modal.classList.add('hidden');
+      document.getElementById('table-lightbox-content').replaceChildren();
+      if (tableLightboxReturnFocus?.isConnected) tableLightboxReturnFocus.focus();
+      tableLightboxReturnFocus = null;
+    }
+
+    document.getElementById('table-lightbox-scroll')?.addEventListener('wheel', event => {
+      if (!event.ctrlKey) return;
+      event.preventDefault();
+      setTableLightboxZoom(activeTableZoom + (event.deltaY < 0 ? 0.1 : -0.1));
+    }, {passive: false});
+
+    document.addEventListener('keydown', event => {
+      const modal = document.getElementById('table-lightbox');
+      if (!modal || modal.classList.contains('hidden')) return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeTableLightbox();
+      }
+      if (event.ctrlKey && (event.key === '+' || event.key === '=' || event.key === '-')) {
+        event.preventDefault();
+        setTableLightboxZoom(activeTableZoom + (event.key === '-' ? -0.1 : 0.1));
+      }
+    });
+
+    function prepareArticleAnchors(root) {
+      if (!root) return;
+      const headings = Array.from(root.querySelectorAll('h2, h3, h4, h5, h6, .wiki-heading'));
+      const used = new Set();
+      root.querySelectorAll('[id]').forEach(element => used.add(element.id));
+      headings.forEach((heading, index) => {
+        if (heading.id) return;
+        const text = heading.textContent.trim();
+        const slug = text.normalize('NFKD').toLowerCase()
+          .replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+        const base = slug || 'article-section-' + (index + 1);
+        let id = base;
+        let suffix = 2;
+        while (used.has(id)) id = base + '_' + suffix++;
+        heading.id = id;
+        used.add(id);
+      });
+      if (!root.querySelector('.term-toc') && headings.some(item => item.classList.contains('wiki-heading'))) {
+        const nav = document.createElement('nav');
+        nav.className = 'term-toc';
+        nav.setAttribute('aria-label', '記事目次');
+        const title = document.createElement('strong');
+        title.textContent = '目次';
+        const list = document.createElement('ol');
+        headings.forEach(heading => {
+          const item = document.createElement('li');
+          const link = document.createElement('a');
+          link.href = '#' + encodeURIComponent(heading.id);
+          link.textContent = heading.textContent.trim();
+          item.appendChild(link);
+          list.appendChild(item);
+        });
+        nav.append(title, list);
+        root.insertBefore(nav, root.firstChild);
+      }
+    }
+
+    function handleArticleAnchorClick(event) {
+      const target = event.target instanceof Element ? event.target : null;
+      const link = target?.closest('a[href]');
+      if (!link || !this.contains(link)) return;
+      const rawHref = link.getAttribute('href') || '';
+      let destination;
+      try { destination = new URL(rawHref, window.location.href); } catch (_) { return; }
+      if (destination.origin !== window.location.origin || !destination.hash) return;
+      let id = destination.hash.slice(1);
+      try { id = decodeURIComponent(id); } catch (_) {}
+      const candidates = Array.from(this.querySelectorAll('[id]'));
+      const heading = candidates.find(element => element.id === id)
+        || candidates.find(element => element.id === destination.hash.slice(1));
+      if (!heading) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      heading.scrollIntoView({behavior: 'smooth', block: 'start'});
+    }
+
     function bindExplorerArticleLinks(root) {
       if (!root) return;
       if (!root.dataset.imageLightboxBound) {
@@ -5250,6 +5429,12 @@ HTML_TEMPLATE = r"""
           if (event.button === 1) handleArticleImageClick(event);
         }, true);
         root.dataset.imageLightboxBound = 'true';
+      }
+      prepareArticleAnchors(root);
+      ensureArticleTableControls(root);
+      if (!root.dataset.articleAnchorsBound) {
+        root.addEventListener('click', handleArticleAnchorClick, true);
+        root.dataset.articleAnchorsBound = 'true';
       }
       root.querySelectorAll('a[href]').forEach(link => {
         if (!link.dataset.wikiTarget) {
@@ -5412,6 +5597,9 @@ HTML_TEMPLATE = r"""
           table.parentNode.insertBefore(wrapper, table);
           wrapper.appendChild(table);
         }
+        if (!articleTableSources.has(wrapper)) {
+          articleTableSources.set(wrapper, table.cloneNode(true));
+        }
         if (wrapper.dataset.compactTableWrap === 'true') return;
 
         const header = table.tHead;
@@ -5462,8 +5650,9 @@ HTML_TEMPLATE = r"""
           return half;
         };
 
-        const columnCount = headerRows[headerRows.length - 1]
-          .querySelectorAll(':scope > th, :scope > td').length;
+        const columnCount = Array.from(
+          headerRows[headerRows.length - 1].querySelectorAll(':scope > th, :scope > td')
+        ).reduce((total, cell) => total + Math.max(1, Number(cell.colSpan) || 1), 0);
         const splitAt = Math.ceil(dataRows.length / 2);
         const compactGrid = document.createElement('div');
         compactGrid.className = 'term-table-compact-grid';

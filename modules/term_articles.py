@@ -116,9 +116,7 @@ def _deduplicate_article_images(root, base_url="", local_image_map=None):
     groups = {}
     for image in root.find_all("img"):
         raw_url = image.get("data-src") or image.get("src") or ""
-        absolute_url = urljoin(base_url, raw_url)
-        local_src = (local_image_map or {}).get(raw_url) or (local_image_map or {}).get(absolute_url)
-        key = _canonical_image_key(local_src or raw_url, base_url)
+        key = _canonical_image_key(raw_url, base_url)
         if not key:
             continue
         figure = image.find_parent("figure")
@@ -168,6 +166,7 @@ def get_article_image_roles(html_text, base_url=""):
 
     seen = set()
     photo_indices = []
+    image_keys = {}
     main_image_index = None
     for image in soup.select(".portable-infobox img, .mw-parser-output img"):
         raw_url = str(image.get("data-src") or image.get("src") or "").strip()
@@ -179,6 +178,7 @@ def get_article_image_roles(html_text, base_url=""):
             continue
         seen.add(key)
         image_index = len(seen)
+        image_keys[image_index] = _canonical_image_key(raw_url, base_url)
 
         ancestors = list(image.parents)
         in_pi_image = any(
@@ -214,7 +214,9 @@ def get_article_image_roles(html_text, base_url=""):
         main_image_index = photo_indices[0]
     return {
         "main_image_index": main_image_index,
+        "main_image_key": image_keys.get(main_image_index, ""),
         "photo_indices": photo_indices,
+        "image_keys": image_keys,
     }
 
 
@@ -539,11 +541,53 @@ def render_article_html(html_text, base_url="", source_path=None, image_dir=None
         return {
             "html": "", "toc": [], "title": "",
             "has_source_infobox": has_source_infobox,
+            "inline_image_keys": [], "image_captions": {},
+            "main_image_key": "", "main_image_caption": "",
         }
 
     local_image_map = _build_local_image_map(
         soup, base_url, source_path, image_dir, article_title
     )
+    main_image_key = (
+        get_article_image_roles(html_text, base_url).get("main_image_key", "")
+        if has_source_infobox else ""
+    )
+    main_image_keys = {main_image_key} if main_image_key else set()
+    main_image_node = next(
+        (
+            image for image in soup.select(".portable-infobox img, .mw-parser-output img")
+            if _canonical_image_key(
+                image.get("data-src") or image.get("src") or "", base_url
+            ) == main_image_key
+        ),
+        None,
+    ) if main_image_key else None
+    main_image_caption_node = soup.select_one(
+        ".portable-infobox .pi-image-caption, .portable-infobox .pi-image figcaption"
+    )
+    if main_image_caption_node is None and main_image_node is not None:
+        main_figure = main_image_node.find_parent("figure")
+        main_thumb = main_image_node.find_parent(class_="thumbinner")
+        main_image_caption_node = (
+            main_figure.find("figcaption") if main_figure else
+            main_thumb.select_one(".thumbcaption") if main_thumb else None
+        )
+    main_image_caption = (
+        main_image_caption_node.get_text(" ", strip=True)
+        if main_image_caption_node else
+        str(main_image_node.get("alt") or "").strip() if main_image_node else ""
+    )
+    for image in list(root.find_all("img")):
+        image_key = _canonical_image_key(
+            image.get("data-src") or image.get("src") or "", base_url
+        )
+        if image_key not in main_image_keys:
+            continue
+        wrapper = image.find_parent("figure") or image.find_parent(class_="thumbinner")
+        if wrapper:
+            wrapper.decompose()
+        else:
+            image.decompose()
     for noscript in root.select("noscript"):
         noscript.decompose()
     _deduplicate_article_images(root, base_url, local_image_map)
@@ -578,6 +622,26 @@ def render_article_html(html_text, base_url="", source_path=None, image_dir=None
             "level": int(heading.name[1]),
         })
 
+    inline_image_keys = []
+    image_captions = {}
+    for image in root.find_all("img"):
+        raw_image_url = str(image.get("data-src") or image.get("src") or "").strip()
+        image_key = _canonical_image_key(raw_image_url, base_url)
+        if not image_key:
+            continue
+        inline_image_keys.append(image_key)
+        figure = image.find_parent("figure")
+        thumb = image.find_parent(class_="thumbinner")
+        caption_node = (
+            figure.find("figcaption") if figure else
+            thumb.select_one(".thumbcaption") if thumb else None
+        )
+        caption_text = caption_node.get_text(" ", strip=True) if caption_node else ""
+        if not caption_text:
+            caption_text = str(image.get("alt") or "").strip()
+        if caption_text:
+            image_captions.setdefault(image_key, caption_text)
+
     body = "".join(
         _serialize(child, base_url, local_image_map, source_path)
         for child in root.children
@@ -599,6 +663,10 @@ def render_article_html(html_text, base_url="", source_path=None, image_dir=None
         "toc": toc,
         "title": title,
         "has_source_infobox": has_source_infobox,
+        "inline_image_keys": list(dict.fromkeys(inline_image_keys)),
+        "image_captions": image_captions,
+        "main_image_key": next(iter(main_image_keys), ""),
+        "main_image_caption": main_image_caption,
     }
 
 
@@ -611,6 +679,8 @@ def render_article_file(path, base_url="", image_dir=None, article_title=""):
         return {
             "html": "", "toc": [], "title": "",
             "has_source_infobox": False,
+            "inline_image_keys": [], "image_captions": {},
+            "main_image_key": "", "main_image_caption": "",
         }
     return render_article_html(
         source,

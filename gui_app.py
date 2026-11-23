@@ -1089,11 +1089,10 @@ class BackroomsAPI:
             and not is_term_article
         )
         has_source_infobox = has_portable_infobox(html_source_for_type) if html_source_for_type else False
-        needs_dom_article = bool(html_source_for_type) and (
-            is_term_article
-            or not has_source_infobox
-            or not is_level_article
-        )
+        # Saved HTML is the canonical body source for every article kind.
+        # The independently computed show_infobox flag preserves each category's
+        # existing infobox visibility contract.
+        needs_dom_article = bool(html_source_for_type)
         article_dom = (
             render_article_file(
                 html_file,
@@ -1234,8 +1233,10 @@ class BackroomsAPI:
             return int(match.group(1)) if match else 10**9
 
         image_paths.sort(key=image_file_number)
-        if image_paths and html_source_for_type:
+        image_roles = {}
+        if html_source_for_type:
             image_roles = get_article_image_roles(html_source_for_type, page_url_value)
+        if image_paths and html_source_for_type:
             indexed_image_paths = {
                 image_file_number(path): path
                 for path in image_paths
@@ -1266,9 +1267,21 @@ class BackroomsAPI:
                 mime = "image/jpeg" if ext in ["jpg", "jpeg"] else f"image/{ext}"
                 with open(img_path, "rb") as f:
                     b64_data = base64.b64encode(f.read()).decode("utf-8")
+                    image_index = image_file_number(img_path)
+                    image_key = image_roles.get("image_keys", {}).get(image_index, "")
                     images_base64.append({
                         "name": img_path.name,
-                        "src": f"data:{mime};base64,{b64_data}"
+                        "src": f"data:{mime};base64,{b64_data}",
+                        "key": image_key,
+                        "caption": (
+                            article_dom.get("image_captions", {}).get(image_key, "")
+                            or (
+                                article_dom.get("main_image_caption", "")
+                                if image_key and image_key == article_dom.get("main_image_key")
+                                else ""
+                            )
+                            or ("記録写真" if image_key else "")
+                        ),
                     })
             except Exception:
                 pass
@@ -1339,6 +1352,10 @@ class BackroomsAPI:
             "article_html": article_html,
             "term_html": article_html,
             "term_toc": article_dom.get("toc", []),
+            "inline_image_keys": article_dom.get("inline_image_keys", []),
+            "image_captions": article_dom.get("image_captions", {}),
+            "main_image_key": article_dom.get("main_image_key", ""),
+            "main_image_caption": article_dom.get("main_image_caption", ""),
             "has_source_infobox": has_source_infobox,
             "show_infobox": show_infobox,
             "is_level_article": is_level_article,
@@ -2292,6 +2309,31 @@ HTML_TEMPLATE = r"""
       object-fit: contain;
       vertical-align: middle;
     }
+    .term-article figure,
+    .term-article .thumb {
+      max-width: 100%;
+      margin: 1rem auto;
+      text-align: center;
+    }
+    .term-article figure img,
+    .term-article .thumbinner img {
+      display: block;
+      width: auto;
+      max-width: 100% !important;
+      height: auto;
+      margin: 0 auto;
+      object-fit: contain;
+      cursor: zoom-in;
+    }
+    .term-article figcaption,
+    .term-article .thumbcaption {
+      margin-top: 0.4rem;
+      text-align: center;
+      font-size: 0.85rem;
+      line-height: 1.5;
+      color: #665b45;
+      cursor: zoom-in;
+    }
     .term-article figure.pi-image {
       max-width: 100%;
       margin: 0.75rem auto;
@@ -2373,6 +2415,25 @@ HTML_TEMPLATE = r"""
       #wiki-page-container .wiki-infobox.hidden,
       #view-article-content.article-kind-term ~ #gallery-container { display: none !important; }
       .term-toc { break-inside: avoid; }
+      .term-article figure,
+      .term-article .thumb,
+      .term-article .thumbinner {
+        max-width: 100% !important;
+        break-inside: avoid !important;
+        page-break-inside: avoid !important;
+      }
+      .term-article figcaption,
+      .term-article .thumbcaption {
+        break-before: avoid !important;
+        page-break-before: avoid !important;
+      }
+      .term-article figure img,
+      .term-article .thumbinner img {
+        max-width: 100% !important;
+        height: auto !important;
+        break-inside: avoid !important;
+        page-break-inside: avoid !important;
+      }
       .term-article table { break-inside: auto; }
       .term-article tr { break-inside: avoid; }
     }
@@ -3387,7 +3448,10 @@ HTML_TEMPLATE = r"""
     }
     function openArticleImageLightbox(image, preferredSource = '') {
       const figure = image?.closest('figure');
+      const thumbnail = image?.closest('.thumbinner');
       const caption = figure?.querySelector('figcaption')?.textContent?.trim()
+        || thumbnail?.querySelector('.thumbcaption')?.textContent?.trim()
+        || image?.closest('.pi-image')?.querySelector('.pi-image-caption')?.textContent?.trim()
         || image?.getAttribute('alt') || image?.getAttribute('title') || '';
       const currentSource = image ? (image.currentSrc || image.src || '') : '';
       const source = currentSource.startsWith('data:image/')
@@ -3408,10 +3472,10 @@ HTML_TEMPLATE = r"""
       }
       const image = document.getElementById('lightbox-image');
       image.src = item.src || '';
-      image.alt = item.name || '';
+      image.alt = item.caption || item.name || '';
       image.classList.remove('lightbox-zoomed');
       document.getElementById('lightbox-zoom-toggle').textContent = '拡大';
-      const captionParts = [lightboxLevel || item.level_id || '', item.name || ''].filter(Boolean);
+      const captionParts = [lightboxLevel || item.level_id || '', item.caption || item.name || ''].filter(Boolean);
       captionParts.push(`(${lightboxIndex + 1}/${lightboxImages.length})`);
       document.getElementById('lightbox-caption').textContent = captionParts.join(' · ');
       document.getElementById('lightbox-open-level').classList.toggle('hidden', !(lightboxLevel || item.level_id));
@@ -4689,7 +4753,11 @@ HTML_TEMPLATE = r"""
         const handleArticleImageClick = event => {
           const target = event.target instanceof Element ? event.target : null;
           if (!target) return;
-          const image = target.closest('img');
+          const imageContainer = target.closest('figure, .thumbinner, .thumbcaption');
+          const image = target.closest('img')
+            || imageContainer?.querySelector('img')
+            || imageContainer?.closest('.thumbinner')?.querySelector('img')
+            || null;
           const link = target.closest('a');
           const rawHref = link?.getAttribute('href') || '';
           let parsedHref = null;
@@ -5006,7 +5074,7 @@ HTML_TEMPLATE = r"""
         mainImg.classList.add('cursor-zoom-in');
         mainImg.onclick = () => openImageLightbox(explorerImages, 0, d.level_id);
         noImg.classList.add('hidden');
-        caption.innerText = d.images[0].name;
+        caption.innerText = d.main_image_caption || d.images[0].caption || d.images[0].name;
       } else {
         mainImg.classList.add('hidden');
         noImg.classList.remove('hidden');
@@ -5018,16 +5086,26 @@ HTML_TEMPLATE = r"""
       const gallery = document.getElementById('view-image-gallery');
       gallery.innerHTML = '';
 
-      if (!d.article_html && d.images && d.images.length > 1) {
+      const inlineImageKeys = new Set(d.inline_image_keys || []);
+      const galleryImages = (d.images || [])
+        .map((img, imageIndex) => ({img, imageIndex}))
+        .filter(({img, imageIndex}) => imageIndex > 0 && (
+          !d.article_html || !img.key || !inlineImageKeys.has(img.key)
+        ));
+      if (galleryImages.length) {
         galleryContainer.classList.remove('hidden');
-        d.images.slice(1).forEach((img, index) => {
+        galleryImages.forEach(({img, imageIndex}) => {
           const card = document.createElement('div');
           card.className = "bg-[#fdfaf0] border border-[#d6c99c] rounded p-2 text-center shadow-sm";
-          card.innerHTML = `
-            <img src="${img.src}" class="w-full h-32 object-cover rounded border border-[#dfd3a8] mb-1 cursor-zoom-in" alt="${img.name}">
-            <span class="text-[10px] text-gray-500 truncate block" title="${img.name}">${img.name}</span>
-          `;
-          card.querySelector('img').onclick = () => openImageLightbox(explorerImages, index + 1, d.level_id);
+          const image = document.createElement('img');
+          image.src = img.src;
+          image.alt = img.caption || img.name || '';
+          image.className = "w-full h-32 object-cover rounded border border-[#dfd3a8] mb-1 cursor-zoom-in";
+          image.onclick = () => openImageLightbox(explorerImages, imageIndex, d.level_id);
+          const imageCaption = document.createElement('span');
+          imageCaption.className = "text-[10px] text-gray-500 block";
+          imageCaption.textContent = img.caption || img.alt || '記録写真';
+          card.append(image, imageCaption);
           gallery.appendChild(card);
         });
       } else {

@@ -2316,8 +2316,7 @@ HTML_TEMPLATE = r"""
        * 全テーブルを印刷可能幅へ縮小し、長いセル内容も折り返して
        * 用紙右端でのクリップとスクロールバー描画を防止する。
        */
-      #wiki-page-container .term-table-wrap,
-      #wiki-page-container .term-table-normal-view {
+      #wiki-page-container .term-table-wrap {
         display: block !important;
         box-sizing: border-box !important;
         width: 100% !important;
@@ -2342,9 +2341,16 @@ HTML_TEMPLATE = r"""
         word-break: break-word !important;
       }
 
-      /* 縦長コンパクトテーブルは印刷時に必ず全幅2列へ統一する */
-      .term-table-compact-controls {
-        display: none !important;
+      /* 縦長コンパクトテーブルは画面と同じ単一DOMの2列構造で印刷する */
+      /* 表の直前で不自然な改ページを避け、直前見出しと表の開始をまとめる */
+      #wiki-page-container .term-article h2,
+      #wiki-page-container .term-article h3,
+      #wiki-page-container .term-article h4,
+      #wiki-page-container .term-article h5,
+      #wiki-page-container .term-article h6,
+      #wiki-page-container .wiki-heading {
+        break-after: avoid-page !important;
+        page-break-after: avoid !important;
       }
       .term-table-wrap[data-compact-table-wrap="true"] {
         display: block !important;
@@ -2352,11 +2358,10 @@ HTML_TEMPLATE = r"""
         width: 100% !important;
         max-width: 100% !important;
         overflow: visible !important;
+        break-before: avoid-page !important;
+        page-break-before: avoid !important;
         break-inside: auto !important;
         page-break-inside: auto !important;
-      }
-      .term-table-wrap[data-compact-table-wrap="true"] .term-table-normal-view {
-        display: none !important;
       }
       .term-table-wrap[data-compact-table-wrap="true"] .term-table-compact-grid {
         display: grid !important;
@@ -2379,6 +2384,12 @@ HTML_TEMPLATE = r"""
         white-space: normal !important;
         overflow-wrap: anywhere !important;
         word-break: normal !important;
+      }
+      .term-table-wrap[data-compact-table-wrap="true"] .term-table-compact-grid th:first-child,
+      .term-table-wrap[data-compact-table-wrap="true"] .term-table-compact-grid td:first-child {
+        min-width: 5.4rem !important;
+        word-break: keep-all !important;
+        overflow-wrap: normal !important;
       }
 
       #print-attribution {
@@ -2526,44 +2537,53 @@ HTML_TEMPLATE = r"""
       border-collapse: collapse;
       font-size: 0.84rem;
     }
-    .term-article .term-table th, .term-article .term-table td { border: 1px solid #d8cfb8; padding: 0.45rem 0.6rem; vertical-align: top; }
-    .term-article .term-table th { background: #f4eedf; font-weight: 700; white-space: nowrap; }
-    .term-table-compact-controls {
-      display: flex;
-      justify-content: flex-end;
-      margin: 0 0 0.35rem;
+    .term-article .term-table th, .term-article .term-table td {
+      border: 1px solid var(--border-fandom);
+      padding: 0.45rem 0.6rem;
+      vertical-align: top;
+      color: var(--text-primary);
+      background: var(--surface-raised);
     }
-    .term-table-compact-toggle {
-      border: 1px solid #d6c79a;
-      border-radius: 0.3rem;
-      padding: 0.18rem 0.55rem;
-      background: #f8f1df;
-      color: #72552d;
-      font-size: 0.72rem;
-      line-height: 1.4;
-      cursor: pointer;
+    .term-article .term-table th {
+      background: var(--surface-soft);
+      font-weight: 700;
+      white-space: normal;
     }
-    .term-table-compact-toggle:hover {
-      background: #efe3c4;
+    .term-article .term-table a {
+      color: var(--table-link-color, var(--accent-amber));
+      text-decoration: underline;
+      text-underline-offset: 0.12em;
+    }
+    body[data-theme="dark"] {
+      --table-link-color: #ffd166;
+      --table-row-alt: #29261f;
+    }
+    :root {
+      --table-link-color: #874707;
+      --table-row-alt: #f0e8d3;
     }
     .term-table-wrap[data-compact-table-wrap="true"] {
-      overflow: visible;
-    }
-    .term-table-wrap[data-compact-table-wrap="true"][data-compact-mode="compact"] {
+      display: block;
       clear: both;
-    }
-    .term-table-normal-view {
-      display: none;
       width: 100%;
       min-width: 0;
-      overflow-x: auto;
+      max-width: 100%;
+      overflow: visible;
+      box-sizing: border-box;
     }
     .term-table-compact-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 0.65rem;
+      align-items: start;
+      gap: 0.55rem;
       width: 100%;
       min-width: 0;
+      max-width: 100%;
+      padding: 0.35rem;
+      box-sizing: border-box;
+      border: 1px solid var(--border-fandom);
+      border-radius: 0.35rem;
+      background: var(--surface-fandom);
     }
     .term-article .term-table-compact-grid table.term-table {
       display: table;
@@ -2571,29 +2591,75 @@ HTML_TEMPLATE = r"""
       min-width: 0;
       max-width: 100%;
       table-layout: fixed;
+      border-collapse: collapse;
       font-size: 0.76rem;
+      background: var(--surface-raised);
+    }
+    .term-article .term-table-compact-grid table.term-table caption {
+      caption-side: top;
+      padding: 0.3rem 0.4rem;
+      border: 1px solid var(--border-fandom);
+      border-bottom: 0;
+      background: var(--surface-soft);
+      color: var(--text-primary);
+      font-weight: 700;
+      text-align: left;
     }
     .term-article .term-table-compact-grid .term-table th,
     .term-article .term-table-compact-grid .term-table td {
-      padding: 0.28rem 0.35rem;
+      padding: 0.24rem 0.3rem;
+      border: 1px solid var(--border-fandom);
+      color: var(--text-primary);
+      background: var(--surface-raised);
       white-space: normal;
       overflow-wrap: anywhere;
       word-break: normal;
     }
-    .term-table-wrap[data-compact-mode="normal"] .term-table-normal-view {
-      display: block;
+    .term-article .term-table-compact-grid .term-table thead th {
+      background: var(--surface-soft);
+      color: var(--text-primary);
+      font-weight: 700;
+      text-align: center;
     }
-    .term-table-wrap[data-compact-mode="normal"] .term-table-compact-grid {
-      display: none;
+    .term-article .term-table-compact-grid .term-table tbody tr:nth-child(even) td {
+      background: var(--table-row-alt);
     }
-    .term-table-wrap[data-compact-mode="normal"] {
-      overflow-x: auto;
+    .term-article .term-table-compact-grid .term-table th:first-child,
+    .term-article .term-table-compact-grid .term-table td:first-child {
+      min-width: 5.4rem;
+      white-space: normal;
+      word-break: keep-all;
+      overflow-wrap: normal;
+      text-align: left;
+      font-weight: 600;
+    }
+    .term-article .term-table-compact-grid .term-table th:not(:first-child),
+    .term-article .term-table-compact-grid .term-table td:not(:first-child) {
+      padding-left: 0.12rem;
+      padding-right: 0.12rem;
+      text-align: center;
+      white-space: nowrap;
+    }
+    /* 列ヘッダーは記号データセルと異なり、セル幅内で必ず折り返す */
+    .term-article .term-table-compact-grid .term-table thead th {
+      white-space: normal !important;
+      overflow-wrap: anywhere !important;
+      word-break: break-word !important;
+      line-height: 1.25;
+    }
+    .term-article .term-table-compact-grid .term-table a {
+      color: var(--table-link-color);
+      font-weight: 600;
+      text-decoration: underline;
+      text-underline-offset: 0.12em;
     }
     @media (max-width: 680px) {
-      .term-table-compact-grid { gap: 0.35rem; }
+      .term-table-compact-grid { gap: 0.3rem; padding: 0.2rem; }
       .term-article .term-table-compact-grid table.term-table { font-size: 0.68rem; }
       .term-article .term-table-compact-grid .term-table th,
-      .term-article .term-table-compact-grid .term-table td { padding: 0.2rem 0.25rem; }
+      .term-article .term-table-compact-grid .term-table td { padding: 0.2rem 0.22rem; }
+      .term-article .term-table-compact-grid .term-table th:first-child,
+      .term-article .term-table-compact-grid .term-table td:first-child { min-width: 4.8rem; }
     }
     .term-article .references, .term-article ol.references { margin-top: 1rem; padding-left: 1.5rem; font-size: 0.82rem; }
     .term-article .reference { font-size: 0.72em; vertical-align: super; }
@@ -5278,8 +5344,14 @@ HTML_TEMPLATE = r"""
     function initializeCompactArticleTables(root) {
       if (!root) return;
       root.querySelectorAll('table.term-table[data-compact-table="true"]').forEach(table => {
-        const wrapper = table.closest('.term-table-wrap');
-        if (!wrapper || wrapper.dataset.compactTableWrap === 'true') return;
+        let wrapper = table.closest('.term-table-wrap');
+        if (!wrapper) {
+          wrapper = document.createElement('div');
+          wrapper.className = 'term-table-wrap';
+          table.parentNode.insertBefore(wrapper, table);
+          wrapper.appendChild(table);
+        }
+        if (wrapper.dataset.compactTableWrap === 'true') return;
 
         const header = table.tHead;
         let headerRows = header ? Array.from(header.rows) : [];
@@ -5301,7 +5373,7 @@ HTML_TEMPLATE = r"""
           }
           return clone;
         };
-        const buildHalf = (rows, includeCaption) => {
+        const buildHalf = (rows, includeCaption, columnCount) => {
           const half = table.cloneNode(false);
           half.removeAttribute('id');
           half.removeAttribute('data-compact-table');
@@ -5309,6 +5381,17 @@ HTML_TEMPLATE = r"""
           if (includeCaption && table.caption) {
             half.appendChild(cloneWithoutIds(table.caption));
           }
+          const colgroup = document.createElement('colgroup');
+          const firstColumn = document.createElement('col');
+          firstColumn.style.width = columnCount >= 8 ? '29%' : '32%';
+          colgroup.appendChild(firstColumn);
+          const remainingWidth = 100 - parseFloat(firstColumn.style.width);
+          for (let index = 1; index < columnCount; index += 1) {
+            const column = document.createElement('col');
+            column.style.width = (remainingWidth / (columnCount - 1)) + '%';
+            colgroup.appendChild(column);
+          }
+          half.appendChild(colgroup);
           const halfHead = document.createElement('thead');
           headerRows.forEach(row => halfHead.appendChild(cloneWithoutIds(row)));
           half.appendChild(halfHead);
@@ -5318,41 +5401,19 @@ HTML_TEMPLATE = r"""
           return half;
         };
 
+        const columnCount = headerRows[headerRows.length - 1]
+          .querySelectorAll(':scope > th, :scope > td').length;
         const splitAt = Math.ceil(dataRows.length / 2);
-        const normalView = document.createElement('div');
-        normalView.className = 'term-table-normal-view';
-        normalView.appendChild(table);
-
         const compactGrid = document.createElement('div');
         compactGrid.className = 'term-table-compact-grid';
         compactGrid.setAttribute('aria-label', '左右2列に分割したコンパクトテーブル');
         compactGrid.append(
-          buildHalf(dataRows.slice(0, splitAt), true),
-          buildHalf(dataRows.slice(splitAt), false)
+          buildHalf(dataRows.slice(0, splitAt), true, columnCount),
+          buildHalf(dataRows.slice(splitAt), false, columnCount)
         );
 
-        const controls = document.createElement('div');
-        controls.className = 'term-table-compact-controls';
-        const toggle = document.createElement('button');
-        toggle.type = 'button';
-        toggle.className = 'term-table-compact-toggle';
-        toggle.setAttribute('aria-pressed', 'true');
-        const setMode = compact => {
-          wrapper.dataset.compactMode = compact ? 'compact' : 'normal';
-          toggle.textContent = compact ? '通常1列表示' : '2列コンパクト表示';
-          toggle.setAttribute('aria-pressed', compact ? 'true' : 'false');
-          toggle.setAttribute('aria-label', compact
-            ? '通常1列表示へ切り替え'
-            : '2列コンパクト表示へ切り替え');
-        };
-        toggle.addEventListener('click', () => {
-          setMode(wrapper.dataset.compactMode !== 'compact');
-        });
-        controls.appendChild(toggle);
-
         wrapper.dataset.compactTableWrap = 'true';
-        wrapper.replaceChildren(controls, normalView, compactGrid);
-        setMode(true);
+        wrapper.replaceChildren(compactGrid);
       });
     }
 

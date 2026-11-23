@@ -36,7 +36,11 @@ _ALLOWED_CLASSES = {
     "small", "plainlinks", "mw-collapsible", "mw-collapsed",
     "mw-collapsible-content", "mw-form-frame", "mw-form-button",
     "mw-form-control", "mw-frame-dashed", "mw-frame-dotted",
-    "mw-frame-solid", "mw-frame-panel",
+    "mw-frame-solid", "mw-frame-panel", "pi-data", "pi-data-value",
+    "pi-data-label", "pi-item", "pi-image", "pi-image-thumbnail",
+    "pi-image-caption", "pi-header", "pi-title", "pi-media",
+    "image-lightbox-link", "article-inline-icon",
+    "article-infobox-main-image",
 }
 
 
@@ -84,6 +88,134 @@ def _normalize_image_title(value):
     text = unicodedata.normalize("NFKC", str(value or "")).strip()
     text = text.replace("\\", "/").replace("/", " ").replace("_", " ")
     return " ".join(text.split()).casefold()
+
+
+def _canonical_image_key(raw_url, base_url=""):
+    raw_url = str(raw_url or "").strip()
+    if not raw_url:
+        return ""
+    if raw_url.casefold().startswith("data:image/"):
+        return "data:" + hashlib.sha256(raw_url.encode("utf-8")).hexdigest()
+    absolute_url = urljoin(base_url, raw_url)
+    try:
+        from modules.image_downloader import parse_image_info
+        download_url, _filename = parse_image_info(absolute_url)
+    except Exception:
+        download_url = None
+    if download_url:
+        parsed_download = urlsplit(str(download_url))
+        return f"{parsed_download.scheme.casefold()}://{parsed_download.netloc.casefold()}{parsed_download.path}".casefold()
+    parsed = urlsplit(absolute_url)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return f"{parsed.scheme.casefold()}://{parsed.netloc.casefold()}{parsed.path}".casefold()
+    return absolute_url.split("#", 1)[0].casefold()
+
+
+def _deduplicate_article_images(root, base_url="", local_image_map=None):
+    """Keep one representative per local/source image, preferring its captioned figure."""
+    groups = {}
+    for image in root.find_all("img"):
+        raw_url = image.get("data-src") or image.get("src") or ""
+        absolute_url = urljoin(base_url, raw_url)
+        local_src = (local_image_map or {}).get(raw_url) or (local_image_map or {}).get(absolute_url)
+        key = _canonical_image_key(local_src or raw_url, base_url)
+        if not key:
+            continue
+        figure = image.find_parent("figure")
+        figure_caption = figure.find("figcaption") if figure else None
+        thumb_container = image.find_parent(class_="thumbinner")
+        thumb_caption = thumb_container.select_one(".thumbcaption") if thumb_container else None
+        has_caption = bool(
+            (figure_caption and figure_caption.get_text(" ", strip=True))
+            or (thumb_caption and thumb_caption.get_text(" ", strip=True))
+        )
+        score = 4 if has_caption else 0
+        score += 2 if figure or thumb_container else 0
+        score += 1 if str(image.get("alt") or "").strip() else 0
+        groups.setdefault(key, []).append((score, image))
+
+    removed_wrappers = []
+    for candidates in groups.values():
+        if len(candidates) < 2:
+            continue
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        for _score, duplicate in candidates[1:]:
+            wrapper = duplicate.find_parent("figure") or duplicate.find_parent(class_="thumbinner")
+            duplicate.decompose()
+            if wrapper and not wrapper.find("img"):
+                removed_wrappers.append(wrapper)
+
+    seen_wrapper_ids = set()
+    for wrapper in removed_wrappers:
+        if id(wrapper) in seen_wrapper_ids:
+            continue
+        seen_wrapper_ids.add(id(wrapper))
+        if wrapper.parent is not None:
+            wrapper.decompose()
+
+    for anchor in root.find_all("a"):
+        if anchor.find("img") is None and not anchor.get_text(" ", strip=True):
+            anchor.decompose()
+
+
+def get_article_image_roles(html_text, base_url=""):
+    """Return URL-keyed download image indexes, excluding infobox data icons."""
+    soup = BeautifulSoup(html_text or "", "html.parser")
+    try:
+        from modules.image_downloader import parse_image_info
+    except Exception:
+        parse_image_info = lambda _value: (None, None)
+
+    seen = set()
+    photo_indices = []
+    main_image_index = None
+    for image in soup.select(".portable-infobox img, .mw-parser-output img"):
+        raw_url = str(image.get("data-src") or image.get("src") or "").strip()
+        download_url, _filename = parse_image_info(raw_url)
+        if not download_url:
+            continue
+        key = str(download_url).casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        image_index = len(seen)
+
+        ancestors = list(image.parents)
+        in_pi_image = any(
+            ancestor.name == "figure" and "pi-image" in ancestor.get("class", [])
+            or "pi-image" in ancestor.get("class", [])
+            for ancestor in ancestors if isinstance(ancestor, Tag)
+        )
+        in_pi_data = any(
+            "pi-data" in ancestor.get("class", [])
+            for ancestor in ancestors if isinstance(ancestor, Tag)
+        )
+        icon_class = any(
+            any(token in str(class_name).casefold() for token in ("icon", "badge", "status-symbol"))
+            for class_name in image.get("class", [])
+        )
+        small_dimension = any(
+            str(image.get(dimension) or "").isdigit()
+            and 1 <= int(image.get(dimension)) <= 88
+            for dimension in ("width", "height")
+        )
+        small_scaled_asset = bool(re.search(
+            r"/scale-to-width-down/(?:[1-9]\d?)\b", raw_url, re.IGNORECASE
+        ))
+        if in_pi_image and main_image_index is None:
+            main_image_index = image_index
+        if (in_pi_data or icon_class or small_dimension or small_scaled_asset) and not in_pi_image:
+            continue
+        photo_indices.append(image_index)
+
+    if main_image_index is not None and main_image_index not in photo_indices:
+        photo_indices.insert(0, main_image_index)
+    if main_image_index is None and photo_indices:
+        main_image_index = photo_indices[0]
+    return {
+        "main_image_index": main_image_index,
+        "photo_indices": photo_indices,
+    }
 
 
 def _build_local_image_map(soup, base_url, source_path, image_dir, article_title=""):
@@ -267,6 +399,25 @@ def _serialize(node, base_url, local_image_map=None, source_path=None):
         str(value) for value in node.get("class", [])
         if str(value) in _ALLOWED_CLASSES
     ]
+    if name == "a" and node.find("img") is not None:
+        classes.append("image-lightbox-link")
+    if name == "img":
+        raw_image_url = str(node.get("data-src") or node.get("src") or "").strip()
+        image_ancestors = [parent for parent in node.parents if isinstance(parent, Tag)]
+        in_pi_data = any("pi-data" in parent.get("class", []) for parent in image_ancestors)
+        in_pi_image = any("pi-image" in parent.get("class", []) for parent in image_ancestors)
+        small_dimension = any(
+            str(node.get(dimension) or "").isdigit()
+            and 1 <= int(node.get(dimension)) <= 88
+            for dimension in ("width", "height")
+        )
+        small_scaled_asset = bool(re.search(
+            r"/scale-to-width-down/(?:[1-9]\d?)\b", raw_image_url, re.IGNORECASE
+        ))
+        if in_pi_data or (small_dimension or small_scaled_asset) and not in_pi_image:
+            classes.append("article-inline-icon")
+        if in_pi_image:
+            classes.append("article-infobox-main-image")
     classes.extend(_visual_classes(node))
     if name == "table":
         classes.append("term-table")
@@ -301,13 +452,33 @@ def _serialize(node, base_url, local_image_map=None, source_path=None):
             attrs.append(f'start="{start}"')
 
     if name == "a":
-        href, wiki_target = _safe_url(node.get("href"), base_url)
-        if href:
-            attrs.append(f'href="{html.escape(href, quote=True)}"')
-        if wiki_target:
-            attrs.append(
-                f'data-wiki-target="{html.escape(wiki_target, quote=True)}"'
+        raw_href = str(node.get("href") or "").strip()
+        parsed_href = urlsplit(urljoin(base_url, raw_href)) if raw_href else None
+        path_lower = unquote(parsed_href.path).casefold() if parsed_href else ""
+        namespace_match = re.search(r"/(?:ja/)?wiki/([^/:]+):", path_lower)
+        namespace = namespace_match.group(1) if namespace_match else ""
+        is_file_page = namespace in {"file", "image", "ファイル", "画像"}
+        is_image_target = bool(
+            parsed_href
+            and (
+                parsed_href.scheme.casefold() == "data"
+                or (parsed_href.hostname or "").casefold().endswith("wikia.nocookie.net")
+                and bool(re.search(r"\.(?:png|jpe?g|gif|webp|bmp|avif|svg)(?:/|$)", parsed_href.path, re.IGNORECASE))
             )
+        )
+        contains_image = node.find("img") is not None
+        if contains_image and is_image_target:
+            image_href, _image_wiki_target = _safe_url(raw_href, base_url)
+            if image_href.startswith(("http://", "https://")):
+                attrs.append(f'data-lightbox-src="{html.escape(image_href, quote=True)}"')
+        if not (is_file_page or is_image_target or contains_image):
+            href, wiki_target = _safe_url(raw_href, base_url)
+            if href:
+                attrs.append(f'href="{html.escape(href, quote=True)}"')
+            if wiki_target:
+                attrs.append(
+                    f'data-wiki-target="{html.escape(wiki_target, quote=True)}"'
+                )
         if node.get("title"):
             attrs.append(
                 f'title="{html.escape(str(node.get("title")), quote=True)}"'
@@ -316,6 +487,13 @@ def _serialize(node, base_url, local_image_map=None, source_path=None):
         raw_src = str(node.get("data-src") or node.get("src") or "").strip()
         absolute_src = urljoin(base_url, raw_src)
         src = (local_image_map or {}).get(raw_src) or (local_image_map or {}).get(absolute_src)
+        if not src and raw_src.casefold().startswith("data:image/"):
+            if re.match(
+                r"^data:image/(?:png|jpe?g|gif|webp|avif);base64,[a-z0-9+/=\s]+$",
+                raw_src,
+                re.IGNORECASE,
+            ):
+                src = raw_src
         if not src:
             src, _wiki_target = _safe_url(raw_src, base_url)
         if not src or src.startswith("#"):
@@ -323,6 +501,10 @@ def _serialize(node, base_url, local_image_map=None, source_path=None):
         attrs.append(f'src="{html.escape(src, quote=True)}"')
         if node.get("alt") is not None:
             attrs.append(f'alt="{html.escape(str(node.get("alt")), quote=True)}"')
+        for dimension in ("width", "height"):
+            value = str(node.get(dimension) or "").strip()
+            if value.isdigit() and 1 <= int(value) <= 5000:
+                attrs.append(f'{dimension}="{value}"')
         return "<img " + " ".join(attrs) + ">"
 
     attr_text = (" " + " ".join(attrs)) if attrs else ""
@@ -359,11 +541,14 @@ def render_article_html(html_text, base_url="", source_path=None, image_dir=None
             "has_source_infobox": has_source_infobox,
         }
 
-    _prepare_collapsible_blocks(root, soup)
-    _prepare_static_forms(root, soup)
     local_image_map = _build_local_image_map(
         soup, base_url, source_path, image_dir, article_title
     )
+    for noscript in root.select("noscript"):
+        noscript.decompose()
+    _deduplicate_article_images(root, base_url, local_image_map)
+    _prepare_collapsible_blocks(root, soup)
+    _prepare_static_forms(root, soup)
 
     for selector in _DROP_SELECTORS:
         for element in root.select(selector):

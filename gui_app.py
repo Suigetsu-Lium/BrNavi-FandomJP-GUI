@@ -40,7 +40,11 @@ from modules.extractor import (
     extract_meta_info_from_html,
     is_level_article_category,
 )
-from modules.term_articles import has_portable_infobox, render_article_file
+from modules.term_articles import (
+    get_article_image_roles,
+    has_portable_infobox,
+    render_article_file,
+)
 
 # 保守・更新サービス
 from modules.operation_context import OperationCancelled, OperationContext
@@ -1219,11 +1223,42 @@ class BackroomsAPI:
             page_key = hashlib.sha256(
                 page_url_value.rstrip("/").encode("utf-8")
             ).hexdigest()[:16]
-            image_paths = sorted(IMAGE_DIR.glob(f"page_{page_key}_image*")) if IMAGE_DIR.exists() else []
+            image_paths = list(IMAGE_DIR.glob(f"page_{page_key}_image*")) if IMAGE_DIR.exists() else []
         elif show_infobox:
             image_paths = self._find_images_flexible(level_id)
         else:
             image_paths = []
+
+        def image_file_number(path):
+            match = re.search(r"(?:_image| - image)(\d+)$", path.stem, re.IGNORECASE)
+            return int(match.group(1)) if match else 10**9
+
+        image_paths.sort(key=image_file_number)
+        if image_paths and html_source_for_type:
+            image_roles = get_article_image_roles(html_source_for_type, page_url_value)
+            indexed_image_paths = {
+                image_file_number(path): path
+                for path in image_paths
+                if image_file_number(path) < 10**9
+            }
+            ordered_indices = []
+            main_index = image_roles.get("main_image_index")
+            if main_index:
+                ordered_indices.append(main_index)
+            ordered_indices.extend(
+                index for index in image_roles.get("photo_indices", [])
+                if index not in ordered_indices
+            )
+            role_paths = [
+                indexed_image_paths[index]
+                for index in ordered_indices
+                if index in indexed_image_paths
+            ]
+            if role_paths:
+                image_paths = role_paths
+            elif not image_roles.get("photo_indices") and not image_roles.get("main_image_index"):
+                image_paths = []
+
         images_base64 = []
         for img_path in image_paths:
             try:
@@ -2245,7 +2280,46 @@ HTML_TEMPLATE = r"""
     .term-article .references, .term-article ol.references { margin-top: 1rem; padding-left: 1.5rem; font-size: 0.82rem; }
     .term-article .reference { font-size: 0.72em; vertical-align: super; }
     .term-article blockquote { margin: 1rem 0; padding: 0.5rem 1rem; border-left: 3px solid #d8c99e; background: #faf7ef; }
-    .term-article img { max-width: 100%; height: auto; }
+    .term-article img { max-width: 100%; height: auto; cursor: zoom-in; }
+    .term-article img.article-inline-icon { cursor: default; }
+    .term-article img.article-inline-icon,
+    .term-article .pi-data img,
+    .term-article .pi-item img {
+      display: inline-block;
+      width: auto;
+      max-width: 88px !important;
+      max-height: 88px;
+      object-fit: contain;
+      vertical-align: middle;
+    }
+    .term-article figure.pi-image {
+      max-width: 100%;
+      margin: 0.75rem auto;
+      text-align: center;
+    }
+    .term-article figure.pi-image img,
+    .term-article img.article-infobox-main-image {
+      display: block;
+      width: auto;
+      max-width: 100% !important;
+      max-height: 240px;
+      margin: 0 auto;
+      object-fit: contain;
+    }
+    .wiki-infobox img {
+      max-width: 88px;
+      max-height: 88px;
+      object-fit: contain;
+    }
+    #infobox-main-img {
+      width: 100%;
+      max-width: 100%;
+      max-height: 220px;
+      object-fit: contain;
+    }
+    #image-lightbox { overflow: auto; }
+    #lightbox-image { transition: transform 150ms ease; transform-origin: center center; }
+    #lightbox-image.lightbox-zoomed { transform: scale(1.5); cursor: zoom-out; }
     .term-article details.mw-collapsible {
       margin: 0.85rem 0;
       border: 1px solid #d8cfb8;
@@ -2371,7 +2445,7 @@ HTML_TEMPLATE = r"""
   <div id="image-lightbox" class="hidden fixed inset-0 z-[120] flex items-center justify-center bg-black/90 p-4" onclick="if(event.target===this) closeImageLightbox()" role="dialog" aria-modal="true" aria-label="画像拡大表示">
     <button onclick="closeImageLightbox()" aria-label="閉じる" class="absolute right-5 top-4 rounded bg-black/50 px-3 py-1 text-2xl text-white">×</button>
     <button onclick="stepImageLightbox(-1)" aria-label="前の画像" class="absolute left-3 rounded bg-black/50 px-4 py-3 text-2xl text-white">←</button>
-    <figure class="max-h-full max-w-[88vw] text-center"><img id="lightbox-image" class="mx-auto max-h-[78vh] max-w-full object-contain" alt=""><figcaption id="lightbox-caption" class="mt-3 text-sm text-white"></figcaption><button id="lightbox-open-level" onclick="openLightboxLevel()" class="mt-3 rounded bg-amber-500 px-3 py-1.5 text-xs font-semibold text-black">このLevelの記事を開く</button></figure>
+    <figure class="max-h-full max-w-[88vw] text-center"><img id="lightbox-image" class="mx-auto max-h-[78vh] max-w-full object-contain" alt=""><figcaption id="lightbox-caption" class="mt-3 text-sm text-white"></figcaption><div class="mt-3 flex items-center justify-center gap-2"><button id="lightbox-zoom-toggle" onclick="toggleImageLightboxZoom()" class="rounded border border-white/40 bg-black/50 px-3 py-1.5 text-xs font-semibold text-white">拡大</button><button id="lightbox-open-level" onclick="openLightboxLevel()" class="rounded bg-amber-500 px-3 py-1.5 text-xs font-semibold text-black">このLevelの記事を開く</button></div></figure>
     <button onclick="stepImageLightbox(1)" aria-label="次の画像" class="absolute right-3 rounded bg-black/50 px-4 py-3 text-2xl text-white">→</button>
   </div>
 
@@ -3311,22 +3385,52 @@ HTML_TEMPLATE = r"""
       lightboxImages = images || []; lightboxIndex = Math.max(0, index || 0); lightboxLevel = level || '';
       renderImageLightbox(); document.getElementById('image-lightbox').classList.remove('hidden');
     }
+    function openArticleImageLightbox(image, preferredSource = '') {
+      const figure = image?.closest('figure');
+      const caption = figure?.querySelector('figcaption')?.textContent?.trim()
+        || image?.getAttribute('alt') || image?.getAttribute('title') || '';
+      const currentSource = image ? (image.currentSrc || image.src || '') : '';
+      const source = currentSource.startsWith('data:image/')
+        ? currentSource
+        : (preferredSource || currentSource);
+      if (!source) return;
+      lightboxImages = [{src: source, name: caption}];
+      lightboxIndex = 0;
+      lightboxLevel = '';
+      renderImageLightbox();
+      document.getElementById('image-lightbox').classList.remove('hidden');
+    }
     async function renderImageLightbox() {
       const item = lightboxImages[lightboxIndex]; if (!item) return;
       if (!item.src && item.name) {
         const result = await pywebview.api.get_local_image_data(item.name);
         if (result.src) item.src = result.src;
       }
-      document.getElementById('lightbox-image').src = item.src || '';
-      document.getElementById('lightbox-image').alt = item.name || '';
-      document.getElementById('lightbox-caption').textContent = `${lightboxLevel || item.level_id || ''} · ${item.name || ''} (${lightboxIndex + 1}/${lightboxImages.length})`;
+      const image = document.getElementById('lightbox-image');
+      image.src = item.src || '';
+      image.alt = item.name || '';
+      image.classList.remove('lightbox-zoomed');
+      document.getElementById('lightbox-zoom-toggle').textContent = '拡大';
+      const captionParts = [lightboxLevel || item.level_id || '', item.name || ''].filter(Boolean);
+      captionParts.push(`(${lightboxIndex + 1}/${lightboxImages.length})`);
+      document.getElementById('lightbox-caption').textContent = captionParts.join(' · ');
       document.getElementById('lightbox-open-level').classList.toggle('hidden', !(lightboxLevel || item.level_id));
+      document.getElementById('image-lightbox').querySelector('[aria-label="前の画像"]').classList.toggle('hidden', lightboxImages.length < 2);
+      document.getElementById('image-lightbox').querySelector('[aria-label="次の画像"]').classList.toggle('hidden', lightboxImages.length < 2);
+    }
+    function toggleImageLightboxZoom() {
+      const image = document.getElementById('lightbox-image');
+      const zoomed = image.classList.toggle('lightbox-zoomed');
+      document.getElementById('lightbox-zoom-toggle').textContent = zoomed ? '縮小' : '拡大';
     }
     function stepImageLightbox(offset) {
       if (!lightboxImages.length) return;
       lightboxIndex = (lightboxIndex + offset + lightboxImages.length) % lightboxImages.length; renderImageLightbox();
     }
-    function closeImageLightbox() { document.getElementById('image-lightbox').classList.add('hidden'); }
+    function closeImageLightbox() {
+      document.getElementById('image-lightbox').classList.add('hidden');
+      document.getElementById('lightbox-image').classList.remove('lightbox-zoomed');
+    }
     function openLightboxLevel() { const level = lightboxLevel || (lightboxImages[lightboxIndex] || {}).level_id; closeImageLightbox(); openGalleryLevel(level); }
     document.addEventListener('keydown', event => {
       if (document.getElementById('image-lightbox').classList.contains('hidden')) return;
@@ -4581,6 +4685,37 @@ HTML_TEMPLATE = r"""
 
     function bindExplorerArticleLinks(root) {
       if (!root) return;
+      if (!root.dataset.imageLightboxBound) {
+        const handleArticleImageClick = event => {
+          const target = event.target instanceof Element ? event.target : null;
+          if (!target) return;
+          const image = target.closest('img');
+          const link = target.closest('a');
+          const rawHref = link?.getAttribute('href') || '';
+          let parsedHref = null;
+          try { if (rawHref) parsedHref = new URL(rawHref, window.location.href); } catch (_) {}
+          const path = parsedHref ? decodeURIComponent(parsedHref.pathname).toLocaleLowerCase() : '';
+          const wikiPath = path.match(/\/(?:ja\/)?wiki\/([^/]+)/);
+          const namespace = wikiPath && wikiPath[1].includes(':') ? wikiPath[1].split(':')[0] : '';
+          const isFilePage = ['file', 'image', 'ファイル', '画像'].includes(namespace);
+          const isImageUrl = Boolean(parsedHref && (
+            parsedHref.protocol === 'data:' ||
+            (parsedHref.hostname.toLocaleLowerCase().endsWith('wikia.nocookie.net')) ||
+            /\.(png|jpe?g|gif|webp|bmp|avif|svg)(?:$|\/)/i.test(parsedHref.pathname)
+          ));
+          if (!image && !isFilePage && !isImageUrl) return;
+          event.preventDefault();
+          event.stopPropagation();
+          event.stopImmediatePropagation();
+          if (image) openArticleImageLightbox(image, link?.dataset.lightboxSrc || '');
+          else if (isImageUrl && parsedHref) openArticleImageLightbox(null, parsedHref.href);
+        };
+        root.addEventListener('click', handleArticleImageClick, true);
+        root.addEventListener('auxclick', event => {
+          if (event.button === 1) handleArticleImageClick(event);
+        }, true);
+        root.dataset.imageLightboxBound = 'true';
+      }
       root.querySelectorAll('a[href]').forEach(link => {
         if (!link.dataset.wikiTarget) {
           try {

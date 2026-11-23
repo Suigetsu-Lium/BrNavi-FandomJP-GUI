@@ -1456,14 +1456,9 @@ class BackroomsAPI:
             return {"error": str(error)}
 
     def navigate_online_wiki_frame(self, url):
-        url = str(url or "").strip()
-        if not is_supported_wiki_url(url):
-            return {
-                "status": "error",
-                "message": "日本語版Backrooms WikiのURLを指定してください。",
-            }
-        self._current_online_wiki_url = url
-        return {"status": "ok", "url": url}
+        # The embedded browser accepts safe public HTTP(S) pages. Wiki-only
+        # restrictions remain in the save/search APIs, not in navigation.
+        return self.navigate_ai_answer_link(url)
 
     @staticmethod
     def _is_article_wiki_url(url):
@@ -1533,13 +1528,15 @@ class BackroomsAPI:
             ),
             "",
         )
-        if (
-            not self._is_article_wiki_url(url)
-            or "text/html" not in content_type.lower()
-        ):
+        if "text/html" not in content_type.lower():
             return
-        self._current_online_wiki_url = url
-        self._notify_online_wiki_url(url, self._is_article_wiki_url(url))
+        navigation = self.navigate_ai_answer_link(url)
+        if navigation.get("status") != "ok":
+            return
+        self._notify_online_wiki_url(
+            url,
+            self._is_article_wiki_url(url),
+        )
 
     def _notify_online_wiki_url(self, url, is_wiki_page):
         main_window = getattr(self, "_main_window", None)
@@ -3127,7 +3124,7 @@ HTML_TEMPLATE = r"""
             onkeydown="if(event.key==='Enter') openDirectWikiUrl()"
             class="min-w-0 flex-1 border border-[#d6c79a] rounded px-3 py-1.5 text-xs"
             value="https://backrooms.fandom.com/ja/wiki/Backrooms_Wiki"
-            placeholder="https://backrooms.fandom.com/ja/wiki/...">
+            placeholder="https://example.com/">
           <button onclick="openDirectWikiUrl()"
             class="shrink-0 px-3 py-1.5 text-xs font-semibold bg-[#91520f] text-white rounded">
             移動
@@ -3143,13 +3140,13 @@ HTML_TEMPLATE = r"""
         </div>
         <div class="flex-1 min-h-0 overflow-hidden rounded border border-[#d6c79a] bg-white">
           <iframe id="online-wiki-frame" onload="onOnlineWikiFrameLoaded()"
-            title="日本語版Backrooms Wiki"
+            title="アプリ内Webブラウザー"
             class="w-full h-full border-0 bg-white"
             referrerpolicy="strict-origin-when-cross-origin"></iframe>
         </div>
         <div class="flex items-center justify-between gap-2 text-[10px] text-gray-500">
           <span id="online-wiki-current-url" class="min-w-0 truncate">トップページを読み込みます...</span>
-          <span>表示・閲覧にはFandomの利用規約が適用されます。</span>
+          <span>外部サイトの表示・閲覧には各サイトの利用規約が適用されます。</span>
         </div>
       </div>
     </div>
@@ -5239,6 +5236,8 @@ HTML_TEMPLATE = r"""
             (parsedHref.hostname.toLocaleLowerCase().endsWith('wikia.nocookie.net')) ||
             /\.(png|jpe?g|gif|webp|bmp|avif|svg)(?:$|\/)/i.test(parsedHref.pathname)
           ));
+          const clickedImage = Boolean(target.closest('img') || link?.querySelector('img'));
+          if (link && !clickedImage && !isFilePage && !isImageUrl) return;
           if (!image && !isFilePage && !isImageUrl) return;
           event.preventDefault();
           event.stopPropagation();
@@ -5301,6 +5300,53 @@ HTML_TEMPLATE = r"""
 
     document.addEventListener('click', openExplorerLinkInNewTabFromEvent, true);
     document.addEventListener('auxclick', openExplorerLinkInNewTabFromEvent, true);
+
+    // 図鑑本文の外部HTTP(S)リンクは、通常・中・修飾クリックを問わず
+    // 既定のトップレベル遷移を止め、内蔵Webブラウザータブへ送る。
+    function openExplorerExternalLinkFromEvent(event) {
+      const isPrimaryClick = event.type === 'click' && event.button === 0;
+      const isMiddleClick = event.type === 'auxclick' && event.button === 1;
+      if (!isPrimaryClick && !isMiddleClick) return;
+
+      const target = event.target instanceof Element ? event.target : null;
+      const link = target?.closest('#explorer-article-view a[href]');
+      if (!link) return;
+
+      // 記事画像・ファイルページは既存のライトボックス処理へ渡す。
+      if (target.closest('img') || link.querySelector('img')) {
+        return;
+      }
+
+      let targetUrl;
+      try {
+        targetUrl = new URL(link.getAttribute('href'), window.location.href);
+      } catch (_) {
+        return;
+      }
+      if (!['http:', 'https:'].includes(targetUrl.protocol)) return;
+      if (targetUrl.origin === window.location.origin) return;
+      let targetPath = targetUrl.pathname;
+      try { targetPath = decodeURIComponent(targetPath); } catch (_) {}
+      targetPath = targetPath.toLocaleLowerCase();
+      const wikiTitle = targetPath.match(/\/(?:ja\/)?wiki\/([^/]+)/)?.[1] || '';
+      const namespace = wikiTitle.includes(':') ? wikiTitle.split(':')[0] : '';
+      const isWikiFilePage = ['file', 'image', 'ファイル', '画像'].includes(namespace);
+      const isImageUrl = /\.(png|jpe?g|gif|webp|bmp|avif|svg)(?:$|\/)/i.test(targetUrl.pathname);
+      if (isWikiFilePage || isImageUrl) return;
+
+      const isJapaneseWikiArticle =
+        targetUrl.hostname.toLocaleLowerCase() === 'backrooms.fandom.com' &&
+        targetUrl.pathname.startsWith('/ja/wiki/');
+      if (isJapaneseWikiArticle) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      openAIAnswerLink(targetUrl.href);
+    }
+
+    document.addEventListener('click', openExplorerExternalLinkFromEvent, true);
+    document.addEventListener('auxclick', openExplorerExternalLinkFromEvent, true);
 
     function formatWikiContent(text) {
       if (!text) return "";
@@ -7127,15 +7173,15 @@ HTML_TEMPLATE = r"""
       onlineWikiBrowserBusy = true;
       onlineWikiNavigationPending = true;
       if (onlineWikiNavigationTimeout) clearTimeout(onlineWikiNavigationTimeout);
-      status.textContent = "埋め込みブラウザーでFandomを開いています...";
+      status.textContent = "アプリ内ブラウザーでWebページを開いています...";
       onlineWikiCurrentUrl = "";
       onlineWikiCurrentIsWiki = false;
       document.getElementById('online-wiki-save-current').disabled = true;
       try {
         const result = await pywebview.api.navigate_online_wiki_frame(url);
-        if (result.status !== "ok") throw new Error(result.message || "Fandomを開けませんでした。");
+        if (result.status !== "ok") throw new Error(result.message || "Webページを開けませんでした。");
         onlineWikiDefaultOpened = true;
-        status.textContent = "Wikiページをアプリ内に表示しています。";
+        status.textContent = "Webページをアプリ内に表示しています。";
         document.getElementById('online-wiki-frame').src = result.url;
         onlineWikiNavigationTimeout = setTimeout(() => {
           if (!onlineWikiNavigationPending) return;
@@ -7150,7 +7196,7 @@ HTML_TEMPLATE = r"""
       } catch (error) {
         onlineWikiNavigationPending = false;
         onlineWikiBrowserBusy = false;
-        status.textContent = "Fandomを開けませんでした: " + error;
+        status.textContent = "Webページを開けませんでした: " + error;
         updateOnlineWikiSelectionControls();
       }
     }
@@ -7183,7 +7229,7 @@ HTML_TEMPLATE = r"""
         document.getElementById('online-wiki-url').value = onlineWikiCurrentUrl;
       }
       document.getElementById('online-wiki-current-url').textContent =
-        onlineWikiCurrentUrl || "Fandomページはまだ開かれていません。";
+        onlineWikiCurrentUrl || "ページはまだ開かれていません。";
       document.getElementById('online-wiki-current-url').title = onlineWikiCurrentUrl;
       document.getElementById('online-wiki-save-current').disabled =
         !result.is_wiki_page || onlineWikiBrowserBusy;
@@ -7911,12 +7957,13 @@ HTML_TEMPLATE = r"""
       try {
         const result = await pywebview.api.navigate_ai_answer_link(url);
         if (result.status !== "ok") throw new Error(result.message || "リンクを開けません。");
+        onlineWikiDefaultOpened = true;
         switchTab('wiki');
         onlineWikiBrowserBusy = true;
         onlineWikiNavigationPending = true;
         if (onlineWikiNavigationTimeout) clearTimeout(onlineWikiNavigationTimeout);
         document.getElementById('online-wiki-url').value = result.url;
-        document.getElementById('html-download-status').textContent = "AI回答のリンクを内蔵ブラウザーで開いています...";
+        document.getElementById('html-download-status').textContent = "リンク先をアプリ内ブラウザーで開いています...";
         document.getElementById('online-wiki-current-url').textContent = result.url;
         document.getElementById('online-wiki-save-current').disabled = true;
         document.getElementById('online-wiki-frame').src = result.url;

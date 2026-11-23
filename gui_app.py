@@ -26,7 +26,8 @@ from modules.database import (
     open_local_html,
     sanitize_filename,
 )
-from modules.extractor import extract_article_attribution, extract_danger, extract_understanding
+from modules.extractor import extract_article_attribution, extract_danger, extract_understanding, extract_meta_info_from_html
+from modules.term_articles import render_term_article_file
 
 # 保守・更新サービス
 from modules.operation_context import OperationCancelled, OperationContext
@@ -83,6 +84,9 @@ CATEGORY_PRIORITY = {
     "normal": 5,         # 通常階層
     "sublevel": 6,       # 通常亜階層
     "enigmatic": 7,      # 番外階層
+    "alias": 8,
+    "terms": 9,
+    "contest": 10,
 }
 
 
@@ -929,7 +933,7 @@ class BackroomsAPI:
 
         catalog = list(unique_results.values())
         catalog.sort(key=self._get_sort_key)
-        self._candidate_catalog = catalog[:2000]
+        self._candidate_catalog = catalog
         return self._filter_candidate_catalog(self._candidate_catalog, query, number_query)
 
     @staticmethod
@@ -1015,6 +1019,30 @@ class BackroomsAPI:
             )
         if html_file is None:
             html_file = HTML_DIR / f"{get_html_filename_prefix(level_id)}.html"
+
+        html_metadata = {}
+        if html_file and html_file.is_file():
+            try:
+                html_source_for_type = html_file.read_text(encoding="utf-8-sig", errors="replace")
+                html_metadata = extract_meta_info_from_html(html_source_for_type)
+            except OSError:
+                html_source_for_type = ""
+        else:
+            html_source_for_type = ""
+        page_indexes = str((page_info or {}).get("indexes") or "").casefold().split("|")
+        html_indexes = str(html_metadata.get("indexes") or "").casefold().split("|")
+        is_term_article = (
+            str((page_info or {}).get("category") or "").casefold() == "terms"
+            or "terms" in page_indexes
+            or str(html_metadata.get("category") or "").casefold() == "terms"
+            or "terms" in html_indexes
+        )
+        term_article = (
+            render_term_article_file(html_file, (page_info or {}).get("url") or html_metadata.get("url") or "")
+            if is_term_article and html_file and html_file.is_file()
+            else {"html": "", "toc": [], "title": ""}
+        )
+
         # 本文TXTファイルの探索：ファイル名先頭のLevel IDを完全一致で照合
         text_file = None
         if html_file and html_file.is_file() and TEXT_DIR.exists():
@@ -1070,13 +1098,13 @@ class BackroomsAPI:
         has_strikethrough = bool(page_info.get("has_strikethrough")) if page_info else False
         strikethrough_spans = page_info.get("strikethrough_spans", "[]") if page_info else "[]"
 
-        parsed_danger, _ = extract_danger(raw_text)
-        parsed_comprehension, _ = extract_understanding(raw_text)
+        parsed_danger, _ = ("", "") if is_term_article else extract_danger(raw_text)
+        parsed_comprehension, _ = ("", "") if is_term_article else extract_understanding(raw_text)
         if parsed_danger:
             danger = parsed_danger
         if parsed_comprehension:
             comprehension = parsed_comprehension
-        if danger == "情報なし" or comprehension == "情報なし":
+        if not is_term_article and (danger == "情報なし" or comprehension == "情報なし"):
             summary_file = BASE_DIR / "extracted_fandom_levels_summary.csv"
             try:
                 with summary_file.open("r", encoding="utf-8-sig", newline="") as stream:
@@ -1143,7 +1171,10 @@ class BackroomsAPI:
             "html_file": html_file,
         }
 
-        category = page_info.get("category", "normal") if page_info else "normal"
+        category = "terms" if is_term_article else (page_info.get("category", "normal") if page_info else "normal")
+        if is_term_article:
+            danger = ""
+            comprehension = ""
         language = page_info.get("language", "JP") if page_info else "JP"
         source_type = page_info.get("source_type", "original") if page_info else "original"
         translation_section = page_info.get("translation_section", "") if page_info else ""
@@ -1166,6 +1197,8 @@ class BackroomsAPI:
             "comprehension": comprehension,
             "attribution": article_attribution,
             "text": cleaned_text or "※ 本文データがありません。",
+            "term_html": term_article.get("html", ""),
+            "term_toc": term_article.get("toc", []),
             "images": images_base64
         }
 
@@ -1215,6 +1248,19 @@ class BackroomsAPI:
             return {"pages": load_level_list_pages(language)}
         except (OSError, ValueError) as error:
             return {"error": str(error)}
+
+    def get_terms_index(self):
+        path = BASE_DIR / "parsed_index" / "terms_index.json"
+        if not path.is_file():
+            return {"error": "用語一覧データがありません。一覧データを更新してください。"}
+        try:
+            with path.open("r", encoding="utf-8") as stream:
+                data = json.load(stream)
+            if not isinstance(data, dict) or data.get("index_id") != "terms":
+                return {"error": "用語一覧データの形式が正しくありません。"}
+            return {"index": data}
+        except (OSError, json.JSONDecodeError) as error:
+            return {"error": f"用語一覧データを読み込めません: {error}"}
 
     def start_level_list_offline_save(self, pages, overwrite=False):
         if not isinstance(pages, list) or not pages:
@@ -2047,6 +2093,51 @@ HTML_TEMPLATE = r"""
         print-color-adjust: exact;
       }
     }
+
+    .term-toc {
+      margin: 0 0 1.25rem;
+      padding: 0.85rem 1rem;
+      border: 1px solid #e2d8b5;
+      border-radius: 0.5rem;
+      background: #fffaf0;
+      font-size: 0.82rem;
+    }
+    .term-toc ol { margin: 0.4rem 0 0; padding-left: 1.4rem; list-style: decimal; }
+    .term-toc li { margin: 0.15rem 0; }
+    .term-toc .term-toc-level-4, .term-toc .term-toc-level-5, .term-toc .term-toc-level-6 { margin-left: 1rem; }
+    .term-toc a, .term-article a { color: #9b3d06; text-decoration: underline; text-underline-offset: 2px; }
+    .term-article { min-width: 0; line-height: 1.85; overflow-wrap: anywhere; }
+    .term-article h2, .term-article h3, .term-article h4, .term-article h5, .term-article h6 {
+      margin: 1.5rem 0 0.65rem;
+      padding-bottom: 0.3rem;
+      border-bottom: 1px solid #e5dcc2;
+      color: #3f3828;
+      font-weight: 700;
+      scroll-margin-top: 1rem;
+    }
+    .term-article h2 { font-size: 1.35rem; }
+    .term-article h3 { font-size: 1.15rem; }
+    .term-article h4, .term-article h5, .term-article h6 { font-size: 1rem; }
+    .term-article p { margin: 0.8rem 0; }
+    .term-article ol { list-style: decimal; padding-left: 1.6rem; margin: 0.8rem 0; }
+    .term-article ul { list-style: disc; padding-left: 1.6rem; margin: 0.8rem 0; }
+    .term-article li { margin: 0.25rem 0; }
+    .term-table-wrap { max-width: 100%; overflow-x: auto; margin: 1rem 0; }
+    .term-article table.term-table { display: table; width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+    .term-article .term-table th, .term-article .term-table td { border: 1px solid #d8cfb8; padding: 0.45rem 0.6rem; vertical-align: top; }
+    .term-article .term-table th { background: #f4eedf; font-weight: 700; white-space: nowrap; }
+    .term-article .references, .term-article ol.references { margin-top: 1rem; padding-left: 1.5rem; font-size: 0.82rem; }
+    .term-article .reference { font-size: 0.72em; vertical-align: super; }
+    .term-article blockquote { margin: 1rem 0; padding: 0.5rem 1rem; border-left: 3px solid #d8c99e; background: #faf7ef; }
+    .term-article img { max-width: 100%; height: auto; }
+    #wiki-page-container .wiki-infobox.hidden { display: none !important; }
+    @media print {
+      #wiki-page-container .wiki-infobox.hidden,
+      #view-article-content.article-kind-term ~ #gallery-container { display: none !important; }
+      .term-toc { break-inside: avoid; }
+      .term-article table { break-inside: auto; }
+      .term-article tr { break-inside: avoid; }
+    }
   </style>
 </head>
 <body class="flex flex-col h-screen overflow-hidden select-text">
@@ -2204,7 +2295,7 @@ HTML_TEMPLATE = r"""
           <button type="button" onclick="showExplorerIndexHome()" class="print-exclude mb-4 rounded px-2 py-1 text-xs font-semibold text-[#91520f] hover:bg-[#fff7dd]">‹ 階層の一覧へ戻る</button>
 
           <div class="text-xs text-[#8c6b12] mb-1 font-medium">
-            分類: <span id="view-category">階層</span>、危険度: <span id="view-danger-tag">-</span>
+            分類: <span id="view-category">階層</span><span id="view-danger-label">、危険度: <span id="view-danger-tag">-</span></span>
           </div>
 
           <div class="flex justify-between items-start border-b border-[#e2d8b5] pb-3 mb-6">
@@ -3594,11 +3685,143 @@ HTML_TEMPLATE = r"""
       document.getElementById('explorer-index-home').classList.remove('hidden');
     }
 
+    async function renderTermsIndex() {
+      const host = document.getElementById('explorer-index-sections');
+      const toc = document.getElementById('explorer-index-toc');
+      host.replaceChildren();
+      toc.replaceChildren();
+      const status = document.createElement('p');
+      status.className = 'py-3 text-xs text-gray-500';
+      status.textContent = '用語一覧を読み込んでいます...';
+      host.appendChild(status);
+      try {
+        const result = await pywebview.api.get_terms_index();
+        if (result.error) throw new Error(result.error);
+        const data = result.index || {};
+        host.replaceChildren();
+        const sections = Array.isArray(data.sections) ? data.sections : [];
+        const pages = explorerPagesForCategory('terms');
+        const countItems = items => (items || []).reduce((total, item) =>
+          total + 1 + countItems(item.children), 0);
+        const total = sections.reduce((sum, section) =>
+          sum + (section.blocks || []).reduce((subtotal, block) =>
+            subtotal + (block.items ? countItems(block.items) : 0), 0), 0);
+        document.getElementById('explorer-index-total').textContent = total + '項目';
+        const addTocLink = (label, target, level = 0) => {
+          const link = document.createElement('a');
+          link.href = '#' + target;
+          link.className = 'mb-1 block rounded px-2 py-1 text-gray-700 hover:bg-[#fff7dd] ' + (level ? 'ml-3 text-xs' : 'text-sm');
+          link.textContent = label;
+          link.onclick = event => {
+            event.preventDefault();
+            document.getElementById(target)?.scrollIntoView({block: 'start'});
+          };
+          toc.appendChild(link);
+        };
+        let termItemCounter = 0;
+        const renderItem = (item, list, fallbackOrder) => {
+          const li = document.createElement('li');
+          const itemId = 'terms-entry-' + (++termItemCounter);
+          li.id = itemId;
+          const title = String(item.title || '').trim();
+          if (item.url && title) {
+            const link = document.createElement('a');
+            link.href = item.url;
+            link.className = 'text-[#a3420b] font-medium hover:underline';
+            link.textContent = title;
+            const normalizeTermsUrl = value => String(value || '').replace(/\/$/, '').toLocaleLowerCase();
+            const candidate = pages.find(page => normalizeTermsUrl(page.url) === normalizeTermsUrl(item.url)) || {
+              title, url: item.url, category: 'terms', indexes: 'terms', saved: false
+            };
+            link.onclick = event => {
+              event.preventDefault();
+              openExplorerCandidate(candidate);
+            };
+            link.onauxclick = event => {
+              if (event.button === 1) {
+                event.preventDefault();
+                createExplorerTab(candidate);
+              }
+            };
+            li.appendChild(link);
+            addTocLink(title, itemId, 1);
+          } else if (title) {
+            li.appendChild(document.createTextNode(title));
+            addTocLink(title, itemId, 1);
+          }
+          if (item.reading) {
+            const reading = document.createElement('span');
+            reading.className = 'ml-2 text-xs text-gray-500';
+            reading.textContent = '（' + item.reading + '）';
+            li.appendChild(reading);
+          }
+          if (item.description) {
+            const description = document.createElement('span');
+            description.className = 'ml-2 text-sm text-gray-600';
+            description.textContent = item.description;
+            li.appendChild(description);
+          }
+          if (Array.isArray(item.children) && item.children.length) {
+            const nested = document.createElement(item.children_type === 'ordered_list' ? 'ol' : 'ul');
+            nested.className = item.children_type === 'ordered_list'
+              ? 'mt-1 list-decimal pl-5'
+              : 'mt-1 list-disc pl-5';
+            item.children.forEach((child, index) => renderItem(child, nested, index + 1));
+            li.appendChild(nested);
+          }
+          list.appendChild(li);
+        };
+        sections.forEach((section, sectionIndex) => {
+          if (section.heading) {
+            const headingLevel = Math.max(3, Math.min(6, Number(section.heading_level || 2) + 1));
+            const heading = document.createElement('h' + headingLevel);
+            heading.id = 'terms-section-' + sectionIndex;
+            heading.className = 'mb-3 mt-5 border-b border-[#d8c99e] pb-2 text-lg font-semibold text-[#3f3828]';
+            heading.textContent = section.heading;
+            host.appendChild(heading);
+            addTocLink(section.heading, heading.id, headingLevel - 3);
+          }
+          (section.blocks || []).forEach(block => {
+            if (block.type === 'paragraph') {
+              const paragraph = document.createElement('p');
+              paragraph.className = 'my-3 text-sm leading-relaxed text-gray-700';
+              paragraph.textContent = block.text || '';
+              host.appendChild(paragraph);
+            } else if (block.type === 'ordered_list' || block.type === 'unordered_list') {
+              const list = document.createElement(block.type === 'ordered_list' ? 'ol' : 'ul');
+              list.className = block.type === 'ordered_list'
+                ? 'my-3 list-decimal space-y-2 pl-6'
+                : 'my-3 list-disc space-y-2 pl-6';
+              if (block.type === 'ordered_list' && Number(block.start) > 1) list.start = Number(block.start);
+              (block.items || []).forEach((item, index) => renderItem(item, list, index + 1));
+              host.appendChild(list);
+            }
+          });
+        });
+        if (!total) {
+          const empty = document.createElement('p');
+          empty.className = 'py-5 text-sm text-gray-600';
+          empty.textContent = '用語一覧の掲載項目がありません。一覧HTMLを更新してください。';
+          host.appendChild(empty);
+        }
+      } catch (error) {
+        host.replaceChildren();
+        const message = document.createElement('p');
+        message.className = 'py-5 text-sm text-gray-600';
+        message.textContent = '用語一覧を読み込めません: ' + error.message;
+        host.appendChild(message);
+      }
+    }
+
     function renderExplorerCategorySections(categoryId) {
       const host = document.getElementById('explorer-index-sections');
       const toc = document.getElementById('explorer-index-toc');
       host.replaceChildren();
       toc.replaceChildren();
+      if (categoryId === 'terms') {
+        renderTermsIndex();
+        return;
+      }
       const pages = explorerPagesForCategory(categoryId);
       const sections = getLevelListSections(pages, categoryId);
       document.getElementById('explorer-index-total').textContent = `${pages.length}件`;
@@ -3921,8 +4144,10 @@ HTML_TEMPLATE = r"""
         attribution.textContent = '';
         attribution.classList.add('hidden');
         document.getElementById('translation-article-banner').classList.add('hidden');
-        article.dataset.articleKind = 'unsaved';
+        const isTermCandidate = page.category === 'terms' || page.indexes?.split('|').includes('terms');
+        article.dataset.articleKind = isTermCandidate ? 'term-unsaved' : 'unsaved';
         article.classList.remove('article-kind-item');
+        article.classList.toggle('article-kind-term', isTermCandidate);
         article.textContent = 'ローカルデータなし：この記事はまだ保存されていません。Wiki本文を閲覧するには、HTML取得・データ抽出から保存してください。';
 
         // Clear every article-specific field before showing an unsaved page.
@@ -3933,7 +4158,8 @@ HTML_TEMPLATE = r"""
         printSourceLink.removeAttribute('href');
         printSourceLink.textContent = '';
         printSourceLink.classList.add('hidden');
-        document.getElementById('view-category').textContent = '未保存';
+        document.getElementById('view-category').textContent = isTermCandidate ? '用語' : '未保存';
+        document.getElementById('view-danger-label').classList.toggle('hidden', isTermCandidate);
         document.getElementById('view-danger-tag').textContent = '情報なし';
         document.getElementById('infobox-title').textContent = page.title || '';
         document.getElementById('infobox-danger').textContent = '情報なし';
@@ -3960,8 +4186,12 @@ HTML_TEMPLATE = r"""
         document.getElementById('view-meta-title').textContent = '';
         document.getElementById('article-attribution').classList.add('hidden');
         document.getElementById('translation-article-banner').classList.add('hidden');
-        article.dataset.articleKind = 'remote';
+        const isRemoteTerm = page.category === 'terms' || page.indexes?.split('|').includes('terms');
+        article.dataset.articleKind = isRemoteTerm ? 'term-remote' : 'remote';
         article.classList.remove('article-kind-item');
+        article.classList.toggle('article-kind-term', isRemoteTerm);
+        document.getElementById('view-category').textContent = isRemoteTerm ? '用語' : (page.category_label || '未保存');
+        document.getElementById('view-danger-label').classList.toggle('hidden', isRemoteTerm);
         article.innerHTML = page.remote_html;
         bindExplorerArticleLinks(article);
         const infobox = document.querySelector('#wiki-page-container aside');
@@ -4275,7 +4505,7 @@ HTML_TEMPLATE = r"""
       const article = document.getElementById('wiki-page-container');
 
       if (!article || article.classList.contains('hidden')) {
-        alert('印刷するLevel記事を開いてください。');
+        alert('印刷する記事を開いてください。');
         return;
       }
 
@@ -4379,13 +4609,18 @@ HTML_TEMPLATE = r"""
         joke_article: 'ジョーク記事', foreign_joke: '国外ジョーク記事'
       };
       const isItemArticle = d.category === 'item';
+      const isTermArticle = d.category === 'terms';
       const isTranslation = d.source_type === 'translation';
       const articleContent = document.getElementById('view-article-content');
-      articleContent.dataset.articleKind = isItemArticle ? 'item' : (isTranslation ? 'translation' : 'level');
+      articleContent.dataset.articleKind = isTermArticle ? 'term' : (isItemArticle ? 'item' : (isTranslation ? 'translation' : 'level'));
       articleContent.classList.toggle('article-kind-item', isItemArticle);
+      articleContent.classList.toggle('article-kind-term', isTermArticle);
       document.getElementById('view-category').innerText = categoryNames[d.category] || d.category || '未分類';
-      document.getElementById('infobox-danger-row').classList.toggle('hidden', isItemArticle);
-      document.getElementById('infobox-comprehension-row').classList.toggle('hidden', isItemArticle);
+      document.getElementById('view-danger-label').classList.toggle('hidden', isTermArticle);
+      document.getElementById('infobox-danger-row').classList.toggle('hidden', isItemArticle || isTermArticle);
+      document.getElementById('infobox-comprehension-row').classList.toggle('hidden', isItemArticle || isTermArticle);
+      const articleInfobox = document.querySelector('#wiki-page-container .wiki-infobox');
+      if (articleInfobox) articleInfobox.classList.toggle('hidden', isTermArticle);
       const translationBanner = document.getElementById('translation-article-banner');
       translationBanner.classList.toggle('hidden', !isTranslation);
       translationBanner.textContent = isTranslation
@@ -4413,7 +4648,9 @@ HTML_TEMPLATE = r"""
       const attribution = document.getElementById('article-attribution');
       attribution.textContent = d.attribution || '';
       attribution.classList.toggle('hidden', !d.attribution);
-      articleContent.innerHTML = formatWikiContent(d.text);
+      articleContent.innerHTML = isTermArticle && d.term_html
+        ? d.term_html
+        : formatWikiContent(d.text);
       bindExplorerArticleLinks(articleContent);
 
       // Infobox

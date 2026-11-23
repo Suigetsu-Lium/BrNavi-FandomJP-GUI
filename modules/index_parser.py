@@ -122,6 +122,11 @@ PAGES_DATABASE_CSV = os.path.join(
     "pages_database.csv"
 )
 
+TERMS_INDEX_JSON = os.path.join(
+    OUTPUT_DIR,
+    "terms_index.json"
+)
+
 
 # =============================================================================
 # Fandom基本URL
@@ -786,7 +791,8 @@ def is_excluded_url(url):
 # =============================================================================
 
 def is_excluded_title(
-    title
+    title,
+    index_name="",
 ):
     """
     明らかな一覧・案内・ナビゲーションページを除外する。
@@ -799,7 +805,8 @@ def is_excluded_title(
     title = title.strip()
 
     if title in EXCLUDED_EXACT_TITLES:
-
+        if title == "階層" and index_name == "terms":
+            return False
         return True
 
     if title in EXCLUDED_NAVIGATION_TITLES:
@@ -825,6 +832,8 @@ def is_dedicated_index_link(anchor, url):
         return False
     linked_title = unquote(urlparse(url).path.rsplit("/", 1)[-1]).replace("_", " ").strip()
     anchor_title = clean_text(anchor.get_text(" ", strip=True))
+    if linked_title == "階層" or anchor_title == "階層":
+        return False
     return (
         linked_title in EXCLUDED_EXACT_TITLES
         or anchor_title in EXCLUDED_EXACT_TITLES
@@ -1081,7 +1090,7 @@ def extract_links_from_html(
             context, anchor_title
         )
         parsed_title = parsed_title or anchor_title
-        if is_excluded_title(parsed_title):
+        if is_excluded_title(parsed_title, index_name=index_name):
             continue
 
         strikethrough_spans = get_strikethrough_spans(
@@ -1111,6 +1120,136 @@ def extract_links_from_html(
         })
 
     return results
+
+
+def _terms_list_item(item, order):
+    """Convert one DOM list item into a structure-preserving term entry."""
+    anchor = item.find("a", href=True, recursive=False) or item.find("a", href=True)
+    ruby_readings = [
+        clean_text(rt.get_text(" ", strip=True))
+        for rt in item.find_all("rt")
+        if clean_text(rt.get_text(" ", strip=True))
+    ]
+    anchor_copy = BeautifulSoup(str(anchor), "html.parser").find("a") if anchor else None
+    if anchor_copy:
+        for reading_node in anchor_copy.find_all(["rt", "rp"]):
+            reading_node.decompose()
+    title = clean_text(anchor_copy.get_text(" ", strip=True)) if anchor_copy else ""
+    url = normalize_url(anchor.get("href")) if anchor else None
+    clone = BeautifulSoup(str(item), "html.parser").find("li")
+    if clone:
+        for reading_node in clone.find_all(["rt", "rp"]):
+            reading_node.decompose()
+        for nested in clone.find_all(["ol", "ul"]):
+            nested.decompose()
+        cloned_anchor = clone.find("a", href=True) if anchor else None
+        if cloned_anchor:
+            cloned_anchor.decompose()
+        description = clean_text(clone.get_text(" ", strip=True))
+    else:
+        description = ""
+    reading = "・".join(ruby_readings)
+    reading_match = re.search(r"[（(]([^）)]+)[）)]", description)
+    if not reading and reading_match:
+        reading = reading_match.group(1).strip()
+        description = description.replace(reading_match.group(0), "", 1).strip(" -:：")
+    children = []
+    children_type = ""
+    for nested_list in item.find_all(["ol", "ul"], recursive=False):
+        children_type = "ordered_list" if nested_list.name == "ol" else "unordered_list"
+        for child_order, child in enumerate(nested_list.find_all("li", recursive=False), 1):
+            children.append(_terms_list_item(child, child_order))
+    return {
+        "type": "link_item" if title and url else "text_item",
+        "order": order,
+        "title": title,
+        "url": url or "",
+        "description": description,
+        "reading": reading,
+        "children_type": children_type,
+        "children": children,
+    }
+
+
+def extract_terms_index_from_html(html):
+    """Preserve the terms index DOM order, heading hierarchy and list semantics."""
+    soup = BeautifulSoup(html, "html.parser")
+    roots = find_content_roots(soup)
+    root = (
+        soup.select_one("#mw-content-text .mw-parser-output")
+        or soup.select_one(".mw-parser-output")
+    )
+    if root is None:
+        root = roots[0] if roots else soup
+    sections = []
+    current = {"heading": None, "heading_level": 0, "section_path": [], "order": 0, "blocks": []}
+    heading_stack = []
+    section_order = 0
+    for child in root.children:
+        if not getattr(child, "name", None):
+            continue
+        if child.name in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+            if current["blocks"] or current["heading"] is not None:
+                sections.append(current)
+            level = int(child.name[1])
+            heading = clean_text(child.get_text(" ", strip=True))
+            heading_stack = [item for item in heading_stack if item["level"] < level]
+            if heading:
+                heading_stack.append({"level": level, "heading": heading})
+            section_order += 1
+            current = {
+                "heading": heading or None,
+                "heading_level": level,
+                "section_path": list(heading_stack),
+                "order": section_order,
+                "blocks": [],
+            }
+        elif child.name == "p":
+            text = clean_text(child.get_text(" ", strip=True))
+            if text:
+                current["blocks"].append({"type": "paragraph", "text": text})
+        elif child.name in {"ol", "ul"}:
+            items = [
+                _terms_list_item(item, index)
+                for index, item in enumerate(child.find_all("li", recursive=False), 1)
+            ]
+            current["blocks"].append({
+                "type": "ordered_list" if child.name == "ol" else "unordered_list",
+                "start": int(child.get("start") or 1),
+                "items": items,
+            })
+    if current["blocks"] or current["heading"] is not None:
+        sections.append(current)
+    return {
+        "index_id": "terms",
+        "title": "用語の一覧",
+        "source_url": "https://backrooms.fandom.com/ja/wiki/用語の一覧",
+        "intro_blocks": [
+            block for section in sections if section["heading"] is None
+            for block in section["blocks"] if block.get("type") == "paragraph"
+        ],
+        "sections": sections,
+    }
+
+
+def save_terms_index(html):
+    """Write the runtime-generated terms index JSON atomically."""
+    import tempfile
+    data = extract_terms_index_from_html(html)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".terms-index-", suffix=".json", dir=OUTPUT_DIR)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(data, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+        os.replace(temporary, TERMS_INDEX_JSON)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+    return data
 
 
 # =============================================================================
@@ -1176,6 +1315,9 @@ def process_index(
     # -------------------------------------------------------------------------
     # 抽出
     # -------------------------------------------------------------------------
+
+    if index_name == "terms":
+        save_terms_index(html)
 
     links = extract_links_from_html(
         html,
@@ -1326,9 +1468,6 @@ def merge_link_rows(all_rows):
             continue
 
         title = clean_text(row.get("title", ""))
-        if is_excluded_title(title):
-            continue
-
         index_name = clean_text(row.get("index_name", ""))
         try:
             memberships = json.loads(row.get("index_memberships") or "[]")
@@ -1346,6 +1485,12 @@ def merge_link_rows(all_rows):
                 "section_order": int(row.get("section_order") or 0),
                 "page_order": int(row.get("page_order") or 0),
             }]
+        term_membership = any(
+            isinstance(item, dict) and item.get("index_name") == "terms"
+            for item in memberships
+        )
+        if is_excluded_title(title, index_name="terms" if term_membership else index_name):
+            continue
 
         if url not in merged:
             merged[url] = {
@@ -1476,10 +1621,15 @@ def build_pages_database(
 
             continue
 
-        if is_excluded_title(
-            title
-        ):
-
+        try:
+            memberships = json.loads(row.get("index_memberships") or "[]")
+        except (TypeError, ValueError):
+            memberships = []
+        term_membership = any(
+            isinstance(item, dict) and item.get("index_name") == "terms"
+            for item in memberships
+        )
+        if is_excluded_title(title, index_name="terms" if term_membership else ""):
             continue
 
         filtered_rows.append(

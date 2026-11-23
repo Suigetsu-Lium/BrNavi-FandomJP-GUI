@@ -2225,6 +2225,10 @@ def process_html_file(
             html_text
         )
     )
+    html_meta = extract_meta_info_from_html(html_text)
+    if str(html_meta.get("category") or "").strip().casefold() == "terms":
+        log("  → 用語記事のためLevel用Summary/TXT抽出をスキップ")
+        return None
 
     # --------------------------------------------------------
     # 明らかな非階層ページ
@@ -2265,7 +2269,6 @@ def process_html_file(
 
     # Translation pages have no Level code. Keep their complete body
     # instead of rejecting them in the Level-only title classifier.
-    html_meta = extract_meta_info_from_html(html_text)
     page_url = html_meta.get("url") or extract_url_from_html(html_text)
     page_path = unquote(urlsplit(page_url).path).casefold() if page_url else ""
     is_translation_article = (
@@ -2407,6 +2410,22 @@ def _publish_extraction_outputs(
 # ALL抽出
 # ============================================================
 
+def _load_terms_article_urls():
+    """Load canonical terms URLs so legacy HTML without CATEGORY metadata is still excluded."""
+    path = BASE_DIR / "parsed_index" / "pages_master.csv"
+    urls = set()
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as stream:
+            for row in csv.DictReader(stream):
+                if str(row.get("category") or "").strip().casefold() == "terms":
+                    url = str(row.get("url") or "").strip()
+                    if url:
+                        urls.add(url)
+    except (OSError, csv.Error, UnicodeError):
+        pass
+    return urls
+
+
 def extract_levels(
     html_dir=DOWNLOADED_HTML_DIR,
     output_dir=OUTPUT_DIR,
@@ -2491,6 +2510,33 @@ def extract_levels(
         key=lambda path: path.name.casefold()
     )
 
+    original_html_count = len(html_files)
+    term_article_urls = _load_terms_article_urls()
+    level_html_files = []
+    skipped_term_html = 0
+    for html_path in html_files:
+        try:
+            with html_path.open("r", encoding="utf-8-sig", errors="replace") as stream:
+                metadata_header = stream.read(8192)
+        except OSError:
+            level_html_files.append(html_path)
+            continue
+        metadata = extract_meta_info_from_html(metadata_header)
+        if (
+            str(metadata.get("category") or "").strip().casefold() == "terms"
+            or "terms" in str(metadata.get("indexes") or "").casefold().split("|")
+            or str(metadata.get("url") or "").strip() in term_article_urls
+        ):
+            skipped_term_html += 1
+            continue
+        level_html_files.append(html_path)
+    html_files = level_html_files
+    if skipped_term_html:
+        log(f"用語記事HTMLをLevel抽出対象から除外: {skipped_term_html} 件")
+    if original_html_count and not html_files:
+        log("処理対象は用語記事のみです。Level用Summary・TXTは変更しません。")
+        return []
+
     total = len(
         html_files
     )
@@ -2533,7 +2579,10 @@ def extract_levels(
                     encoding="utf-8-sig",
                     newline="",
                 ) as summary_file:
-                    existing_rows = list(csv.DictReader(summary_file))
+                    existing_rows = [
+                        row for row in csv.DictReader(summary_file)
+                        if str(row.get("カテゴリ") or row.get("category") or "").strip().casefold() != "terms"
+                    ]
 
         for index, html_path in enumerate(html_files, 1):
             if context:

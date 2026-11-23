@@ -28,7 +28,7 @@ CATEGORY_DEFINITIONS = {
     "index": {
         "label": "一覧インデックス・Master DB",
         "directories": ("index_html", "parsed_index", "level_lists"),
-        "files": ("wiki_list.txt",),
+        "files": ("wiki_list.txt", "parsed_index/terms_index.json"),
         "patterns": (),
     },
     "routes": {
@@ -159,10 +159,15 @@ def _scan_category(base, category_id):
         files.extend(found_files)
         directories.extend(found_directories)
 
+    known_file_paths = {item["path"] for item in files}
     for name in definition["files"]:
         path = base / name
+        relative = path.relative_to(base).as_posix()
+        if relative in known_file_paths:
+            continue
         if path.exists() or path.is_symlink():
             files.append(_file_record(base, path))
+            known_file_paths.add(relative)
 
     if category_id == "ai":
         database_dir = base / "database"

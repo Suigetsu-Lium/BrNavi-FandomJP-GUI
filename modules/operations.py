@@ -92,6 +92,43 @@ def _saved_html_url(path):
     return match.group(1).strip() if match else ""
 
 
+def _saved_html_metadata(path):
+    """Read category and canonical URL from the downloader metadata comment."""
+    try:
+        with Path(path).open("r", encoding="utf-8-sig", errors="replace") as stream:
+            header = stream.read(8192)
+    except OSError:
+        return {}
+    match = re.search(r"BRNAVI_META_INFO:\s*(.*?)-->", header, flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        return {}
+    metadata = {}
+    for part in match.group(1).split("|"):
+        if "=" in part:
+            key, value = part.split("=", 1)
+            metadata[key.strip().casefold()] = value.strip()
+    return metadata
+
+
+def _terms_article_urls(rows):
+    return {
+        str(row.get("url") or "").strip()
+        for row in rows
+        if str(row.get("category") or "").strip().casefold() == "terms"
+        and str(row.get("url") or "").strip()
+    }
+
+
+def _is_terms_html(path, term_urls=()):
+    metadata = _saved_html_metadata(path)
+    metadata_indexes = metadata.get("indexes", "").casefold().split("|")
+    return (
+        metadata.get("category", "").casefold() == "terms"
+        or "terms" in metadata_indexes
+        or metadata.get("url", "").strip() in term_urls
+    )
+
+
 def _load_master_catalog():
     """Read only canonical article records from the Master catalog."""
     master_path = MASTER_CATALOG_FILE
@@ -277,13 +314,23 @@ def run_maintenance_operation(task_name, options=None, context=None):
             path for path in DOWNLOADED_HTML_DIR.glob("*")
             if path.is_file() and path.suffix.casefold() in {".html", ".htm"}
         ) if DOWNLOADED_HTML_DIR.is_dir() else []
-        redirect_urls = _alias_redirect_urls(_load_master_catalog())
-        if html_files and redirect_urls:
+        catalog_rows = _load_master_catalog()
+        redirect_urls = _alias_redirect_urls(catalog_rows)
+        term_urls = _terms_article_urls(catalog_rows)
+        if html_files:
             canonical_html_files = [
                 path for path in html_files
                 if _saved_html_url(path) not in redirect_urls
+                and not _is_terms_html(path, term_urls)
             ]
-            skipped_redirects = len(html_files) - len(canonical_html_files)
+            skipped_redirects = sum(1 for path in html_files if _saved_html_url(path) in redirect_urls)
+            skipped_terms = len(html_files) - skipped_redirects - len(canonical_html_files)
+            if not canonical_html_files and skipped_terms:
+                return OperationResult(
+                    success=True,
+                    message="用語記事はLevel用Summary・TXT抽出の対象外として保持しました。",
+                    details={"extracted": 0, "skipped_terms": skipped_terms, "skipped_redirects": skipped_redirects},
+                )
             if not canonical_html_files:
                 return OperationResult(
                     success=False,
@@ -340,6 +387,16 @@ def run_maintenance_operation(task_name, options=None, context=None):
                 success=False,
                 message="\u5225\u540d\u30ea\u30c0\u30a4\u30ec\u30af\u30c8\u5c02\u7528\u30da\u30fc\u30b8\u306f\u672c\u6587\u62bd\u51fa\u5bfe\u8c61\u3067\u306f\u3042\u308a\u307e\u305b\u3093\u3002\u6b63\u898f\u8a18\u4e8b\u3092\u6307\u5b9a\u3057\u3066\u304f\u3060\u3055\u3044\u3002",
                 details={"redirect_url": saved_url},
+            )
+
+        catalog_rows = _load_master_catalog()
+        term_urls = _terms_article_urls(catalog_rows)
+        if _is_terms_html(html_path, term_urls):
+            context.log(f"用語記事として保存しました。Level用Summary・経路解析はスキップします: {html_path.name}")
+            return OperationResult(
+                success=True,
+                message="用語記事を保存しました。図鑑では用語専用レイアウトで表示します。",
+                details={"extraction_completed": False, "network_updated": False, "term_article": True},
             )
 
         context.log(f"保存した記事から本文・メタデータを抽出します: {html_path.name}")
@@ -481,19 +538,28 @@ def run_maintenance_operation(task_name, options=None, context=None):
                 details={"html": counts, "extracted": 0, "images": None},
             )
 
-        context.log(f"選択したHTML {len(html_paths)}件からLevel情報を抽出します。")
-        extracted_rows = extract_levels(
-            html_files=html_paths,
-            merge_existing=True,
-            interactive=False,
-            context=context,
-        )
-        if extracted_rows is None:
-            return OperationResult(
-                success=False,
-                message="HTMLは保存されましたが、Level情報をTXTへ抽出できませんでした。",
-                details={"html": counts, "extracted": 0, "images": None},
+        term_urls = _terms_article_urls(catalog_rows)
+        level_html_paths = [
+            path for path in html_paths
+            if not _is_terms_html(path, term_urls)
+        ]
+        if level_html_paths:
+            context.log(f"選択したHTML {len(level_html_paths)}件からLevel情報を抽出します。")
+            extracted_rows = extract_levels(
+                html_files=level_html_paths,
+                merge_existing=True,
+                interactive=False,
+                context=context,
             )
+            if extracted_rows is None:
+                return OperationResult(
+                    success=False,
+                    message="HTMLは保存されましたが、Level情報をTXTへ抽出できませんでした。",
+                    details={"html": counts, "extracted": 0, "images": None},
+                )
+        else:
+            extracted_rows = []
+            context.log("選択した記事は用語記事のみのため、Level用Summary・TXT抽出をスキップします。")
 
         context.check_cancelled()
         context.log("同じHTMLだけを対象に画像を抽出します。")

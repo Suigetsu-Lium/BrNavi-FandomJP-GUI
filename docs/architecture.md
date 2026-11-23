@@ -730,3 +730,67 @@ DB再構築後、以下を確認する。
 7. 旧バージョンで保存済みの別名HTML/TXTが残っていても、別名単独の図鑑候補として再出現しない。
 
 経路CSV生成（`network.py`）も保存済みHTMLのメタデータURLを照合し、旧版で保存された別名リダイレクトHTMLをノード・接続解析から除外する。これにより、DB再構築後に古いリダイレクトHTMLが残っていても、正規記事とは別の経路ノードとして再生成されない。
+
+
+---
+
+## 用語一覧・用語記事専用セクション（terms.html）
+
+### 設計方針
+
+用語記事（Master DB category = `terms`、保存HTMLメタデータ `CATEGORY=terms`）はLevel空間記事とは別のコンテンツ種別として扱う。用語記事にはLevel用Class・危険度・理解度・出入口のインフォボックスや経路ノードを適用しない。本文の正本は保存HTMLのDOMとし、TXT化で失われるテーブル・リスト・脚注構造を用語記事ビューで復元しようとしない。
+
+### 用語一覧の生成契約
+
+`modules/index_parser.py` は `terms.html` の本文DOMを解析し、一覧記事候補CSVとは別に `parsed_index/terms_index.json` を実行時生成する。JSONはUTF-8で保存し、同一ディレクトリ内の一時ファイルから置換する。
+
+- `index_id`: 固定値 `terms`
+- `title` / `source_url`: 一覧ページの表示名と正規URL
+- `intro_blocks`: 導入段落
+- `sections`: DOM順のセクション配列
+- 各セクションは `heading`、`section_path`、`order`、`blocks` を保持する。
+- ブロックは paragraph / ordered_list / unordered_list を区別する。
+- リスト項目は `order`、`title`、`url`、`description`、`reading`、`children_type`、`children` を保持する。説明・読み仮名がない場合は空値とし、DOMに存在しない情報を補作しない。
+
+現行のterms.htmlは見出しなしの導入段落1件と番号付きリスト5項目である。将来見出しや入れ子リストが追加された場合も、実際のDOM構造と順序を保存する。タイトル「階層」はterms一覧所属の場合に限って記事候補として許可する。専用一覧ページ除外判定では、記事名「階層」を専用一覧ページと誤認しない。
+
+### 候補カタログ
+
+`gui_app.py` の候補カタログはMaster DBの全記事を保持し、固定2,000件で切り捨てない。CATEGORY_PRIORITYにはalias / terms / contestを明示登録し、一覧補助カテゴリがソート時に不定値へ落ちないようにする。検索候補の表示順は優先順位で整列するが、優先順位は記事の存在・検索対象可否を決める除外条件ではない。
+
+### 図鑑の用語一覧ビュー
+
+図鑑の「用語の一覧」は `terms_index.json` を読み込む専用描画経路を使う。導入段落、見出し階層、番号付き／箇条書きリスト、掲載順、項目ごとの補足説明・読み仮名を描画する。目次は実際の見出しと掲載項目へのページ内リンクから構成し、項目リンクはMaster DBの正規URLに対応するローカル図鑑候補を開く。JSONが存在しない・不正な場合は更新を案内し、Level一覧の空データ表示へフォールバックしない。
+
+### 個別用語記事HTML
+
+`modules/term_articles.py` は保存HTMLの `.mw-parser-output` を取得し、許可要素・許可属性に基づいてサニタイズしたHTMLを生成する。見出しから自動目次を生成し、テーブルの行列・colspan / rowspan、番号付き／箇条書きリスト、脚注参照と脚注欄のID・fragmentリンクを保持する。内部Wikiリンクは `data-wiki-target` に正規化し、図鑑内の既存リンク操作へ接続する。script / style / iframe / form / 編集UI / ナビゲーション等は除去し、イベント属性・危険なURL・任意style属性は出力しない。
+
+`gui_app.py` はMaster DB categoryまたは保存HTMLのCATEGORYメタデータで用語記事を識別し、保存済み記事では `term_html` を本文として描画する。未保存記事でもカテゴリがtermsであればLevelインフォボックスを非表示にする。用語記事のClass・危険度・理解度・出入口欄は表示しない。印刷時も同じ非表示状態と用語HTML構造を維持する。
+
+### 抽出・経路データの分離
+
+- `extractor.py` はCATEGORY=termsのHTMLをLevel用TXT / Summary CSVへ追加しない。既存Summaryをマージする場合もcategory=termsの行を引き継がない。
+- `operations.py` の一括抽出・個別更新・一覧オフライン保存は、保存HTMLのCATEGORYとMaster DBのterms URLを確認し、Level記事だけをextract_levelsへ渡す。用語記事だけの選択では既存Level Summary / TXTを空データで上書きしない。画像保存は選択HTMLを対象に継続する。
+- 個別更新で用語記事を保存した場合は成功として扱い、Level抽出と経路再構築をスキップする。
+- `network.py` はCATEGORY=termsまたはMaster DBのterms URLに一致する保存HTMLを経路解析前に除外する。用語記事だけしかない場合は既存経路CSVを変更しない。
+- 一括HTML保存は用語記事を通常どおり保存できるが、Level Summaryや経路グラフへ登録しない。
+
+### クリーンアップ
+
+`modules/data_cleanup.py` のindexカテゴリは `parsed_index/` 全体を従来どおり削除対象とし、生成ファイル `parsed_index/terms_index.json` もファイル単位のホワイトリストへ明示登録する。親ディレクトリ走査と個別ファイル登録が重複しても、削除計画内の同一パスを二重登録しない。
+
+### 開発者の手動確認
+
+1. 一覧HTMLを更新し、Index Parser / Master DB再構築後に `parsed_index/terms_index.json` が生成され、現行5項目の掲載順・URL・番号付きリストが保持される。
+2. 図鑑の用語一覧で5項目が表示され、各リンクがローカル図鑑の対応記事を開く。データがない場合は更新案内を表示する。
+3. 「危険度」で定義テーブルの列・行・セル結合を確認する。
+4. 「理解度」で番号付きリストの番号と順序を確認する。
+5. 「アーモンドウォーター」で本文内の脚注番号から脚注欄へ移動でき、脚注欄の戻りリンクも動作する。
+6. 3記事すべてでLevelインフォボックスが表示されず、見出し・自動目次・テーブル・リスト・脚注が印刷プレビューにも反映される。
+7. 未保存の用語候補を開いた場合もLevelインフォボックスが表示されない。
+8. 用語記事の個別更新・一括保存・一括抽出後、Level Summary CSVに用語記事が混入せず、経路CSVに用語ノードが生成されない。既存のLevel記事のSummary・経路は維持される。
+9. 保存済みデータ管理の「一覧インデックス・Master DB」プレビューで `parsed_index/terms_index.json` が削除対象に含まれる。
+10. 候補検索で2,000件以降に並ぶ記事とalias / terms / contestカテゴリの記事が検索候補から欠落しない。
+
+AI側ではテスト・モック・fixture・ダミーデータを作成・実行しない。リポジトリ内に生成CSV / HTMLを配置しない。Index Parserによる実データ更新、HTML取得、抽出、経路CSV生成、図鑑・印刷・クリーンアップの実機確認は開発者が手動で実施する。

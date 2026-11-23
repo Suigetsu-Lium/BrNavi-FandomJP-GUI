@@ -427,6 +427,21 @@ def _load_master_alias_catalog():
     return alias_to_canonical, canonical_records, alias_redirect_urls - canonical_urls
 
 
+def _load_master_term_urls():
+    """Return canonical URLs classified as terms; never turn them into route nodes."""
+    urls = set()
+    try:
+        with open(MASTER_CATALOG_FILE, "r", encoding="utf-8-sig", newline="") as stream:
+            for row in csv.DictReader(stream):
+                if str(row.get("category") or "").strip().casefold() == "terms":
+                    url = str(row.get("url") or "").strip()
+                    if url:
+                        urls.add(url)
+    except (OSError, csv.Error, UnicodeError):
+        pass
+    return urls
+
+
 def _canonicalize_route_nodes(nodes_info, page_urls, unique_edges):
     """Canonicalize route node titles and remap every related edge reference."""
     alias_to_canonical, canonical_records, _redirect_urls = _load_master_alias_catalog()
@@ -564,6 +579,36 @@ def process_backrooms_data(context=None):
     if not html_files:
         log(f"【エラー】解析対象のHTMLがありません: {HTML_DIR}")
         log("「HTML取得・データ抽出」タブからLevel記事を保存してから再実行してください。")
+        return False
+
+    term_urls = _load_master_term_urls()
+    eligible_html_files = []
+    skipped_terms = 0
+    for html_path in html_files:
+        try:
+            with open(html_path, "r", encoding="utf-8-sig", errors="replace") as stream:
+                header = stream.read(8192)
+        except OSError:
+            eligible_html_files.append(html_path)
+            continue
+        metadata_match = re.search(r"BRNAVI_META_INFO:\s*(.*?)-->", header, flags=re.IGNORECASE | re.DOTALL)
+        metadata = {}
+        if metadata_match:
+            for part in metadata_match.group(1).split("|"):
+                if "=" in part:
+                    key, value = part.split("=", 1)
+                    metadata[key.strip().casefold()] = value.strip()
+        source_url = metadata.get("url") or extract_url_from_html(header)
+        metadata_indexes = metadata.get("indexes", "").casefold().split("|")
+        if metadata.get("category", "").casefold() == "terms" or "terms" in metadata_indexes or source_url in term_urls:
+            skipped_terms += 1
+            continue
+        eligible_html_files.append(html_path)
+    html_files = eligible_html_files
+    if skipped_terms:
+        log(f"用語記事HTMLを経路解析から除外: {skipped_terms}")
+    if not html_files:
+        log("経路ノードを生成できるLevel記事HTMLがありません。既存経路CSVは変更しません。")
         return False
 
     log(f"保存HTMLを直接解析します: {len(html_files)} 件")

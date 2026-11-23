@@ -15,8 +15,8 @@ Example for a normal update:
 ```bat
 python -m updater.build_patch ^
   --from-dir "releases\\v1.1.0\\BrNavi-GUI" ^
-  --to-dir "releases\\v1.0.1\\BrNavi-GUI" ^
-  --output "artifacts\\BrNavi-v1.0.1-to-v1.1.0.patch.zip" ^
+  --to-dir "releases\\v1.1.1\\BrNavi-GUI" ^
+  --output "artifacts\\BrNavi-v1.1.0-to-v1.1.1.patch.zip" ^
   --signing-key "E:\\SecureKeys\\BrNavi-update-private.pem"
 ```
 

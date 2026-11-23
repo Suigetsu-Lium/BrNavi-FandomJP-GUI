@@ -11,6 +11,7 @@
 | `gui_app.py` | GUIのHTML/CSS/JavaScript、pywebview APIブリッジ、Level検索、経路フロー、レベルリストHTML取得、保守タスクの起動 |
 | `modules/runtime_paths.py` | ソース実行時と凍結実行ファイル実行時のアプリケーションデータルート解決 |
 | `modules/version.py` | GUI/CLI/ビルド処理で共用する `VERSION` 定数 |
+| `scripts/build_release_zip.py` | 完成したPyInstaller配布フォルダーから、実行時データ・秘密情報を除外した本体Release ZIPを生成 |
 | `modules/online_wiki.py` | Fandom MediaWiki API検索、ページ本文取得、URL検証、画像付きHTML保存 |
 | `modules/ai/assistant.py` | AIチャットのオーケストレーション、検索資料の組み立て、回答検証、タイトル生成 |
 | `modules/ai/wiki_retriever.py` | ローカルWiki資料の索引・順位付け、日本語・英語Backrooms Wikiおよび一般Webのオンライン検索と本文取得 |
@@ -262,7 +263,7 @@ Wikiのオンライン閲覧・保存以外の機能は、対応するローカ�
 
 実データを用いたGUI・CLI・Wiki取得・CSV生成・削除機能の確認は開発者が実環境で手動実施します。AI作業では動的生成CSV / HTMLをリポジトリ内へ作成・配置しません。
 
-配布ビルドはWindows上で `build_release.bat` を実行します。`gui_app.py` のみをPyInstallerのonedir形式でビルドし、CLI版EXEは生成しません。生成物はGUIウィンドウの起動を確認します。GUIの実行には配布先のWebView2 Runtimeが必要です。
+配布ビルドはWindows上で `build_release.bat` を実行します。`gui_app.py` をPyInstallerのonedir形式でビルドし、独立した `Updater.exe` と必要なドキュメント・ライセンスを配布フォルダーへ配置します。CLI版EXEは生成しません。全コピー完了後、`scripts/build_release_zip.py` が `dist/BrNavi-GUI/BrNavi-GUI` を元に `artifacts/BrNavi-vX.Y.Z.zip` を生成します。ZIP内の最上位は `BrNavi-GUI/` です。生成処理は `zipfile.ZIP_DEFLATED` を使用し、ZIPパスを `/` に統一し、空の実行時データディレクトリを保持します。データベース、取得済みWiki HTML・画像、抽出データ、索引、一覧、設定、ログ、キャッシュ、CSV等の実行時データ、認証情報、秘密鍵、SQLite関連ファイル、`.pyc` / `.pyo` はZIPへ含めません。シンボリックリンク・ジャンクションを検出した場合や必須ファイル・VERSION.txtが不正な場合は生成を中止します。ZIPは一時ファイルへ作成してCRC確認後に置換し、失敗時は一時ZIPと出力先ZIPを残さず、バッチを非ゼロ終了させます。本体ZIP生成は `updater.build_patch` による署名付き差分パッチ生成とは独立しています。生成物のGUI起動・ZIP内容・配布先のWebView2 Runtimeは開発者がWindows実機で手動確認します。
 
 
 ---

@@ -175,14 +175,14 @@ Level検索・情報表示・ルート検索・ローカルデータ閲覧、HTM
 .\build_release.bat
 ```
 
-`.venv` がある場合はそのPythonを使い、なければ `python` を使います。GUIアプリ（`gui_app.py`）と独立した更新プログラム（`Updater.exe`）をビルドします。CLI版のEXEは生成しません。
+`.venv` がある場合はそのPythonを使い、なければ `python` を使います。GUIアプリ（`gui_app.py`）と独立した更新プログラム（`Updater.exe`）をビルドし、完成した配布フォルダーから `artifacts\BrNavi-vX.Y.Z.zip` を生成します。CLI版のEXEは生成しません。ZIP生成は専用の `scripts/build_release_zip.py` が担当し、差分パッチ生成（`updater.build_patch`）とは独立しています。
 
 | 種類 | 実行ファイル |
 | --- | --- |
 | GUI | `dist\BrNavi-GUI\BrNavi-GUI\BrNavi-GUI.exe` |
 | Updater | `dist\Updater\Updater.exe`（配布フォルダーにも同梱） |
 
-onedir形式ではexeだけでなく同じ出力フォルダー内のDLL・Python依存ファイルも必要です。配布時は `dist\BrNavi-GUI\BrNavi-GUI` フォルダー全体を渡してください。利用者が取得したWiki記事・画像・設定・データベースは配布物へコピーせず、実行時に必要な空の保存先だけを作成します。経路データは利用者の保存済みHTMLから実行時に生成するため、生成済みCSVは配布物へ同梱しません。README、アーキテクチャ資料、経路CSV仕様、MIT License、第三者ライセンス一覧、Updater.exe、バージョン情報も配布フォルダーに含まれます。出力先は書き込み可能な場所に置いてください。
+onedir形式ではexeだけでなく同じ出力フォルダー内のDLL・Python依存ファイルも必要です。完成した配布フォルダーは `dist\BrNavi-GUI\BrNavi-GUI` に配置され、同じ内容を最上位 `BrNavi-GUI/` の構成で `artifacts\BrNavi-vX.Y.Z.zip` に圧縮します。Release assetにはこのZIPを使用してください。利用者が取得したWiki記事・画像・設定・データベース、生成済み経路CSV、認証情報、秘密鍵、ログ、キャッシュ、`.pyc` はZIPへ含めず、実行時に必要な空の保存先ディレクトリだけを保持します。README、アーキテクチャ資料、経路CSV仕様、MIT License、第三者ライセンス一覧、Updater.exe、バージョン情報も配布フォルダーとZIPに含まれます。ZIP生成に失敗した場合、`build_release.bat` は非ゼロ終了します。出力先は書き込み可能な場所に置いてください。
 
 ### Updaterによる更新
 

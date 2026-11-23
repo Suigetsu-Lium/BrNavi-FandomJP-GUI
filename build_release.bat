@@ -9,7 +9,7 @@ rem Keep PYTHON unquoted here; quote it only when invoking it.
 set "PYTHON=python"
 if exist "%ROOT%\.venv\Scripts\python.exe" set "PYTHON=%ROOT%\.venv\Scripts\python.exe"
 
-echo [1/4] Checking the build environment...
+echo [1/6] Checking the build environment...
 "%PYTHON%" -c "import PyInstaller, webview, groq, curl_cffi, bleach, markdown, pygments, requests, bs4, tzdata, cryptography"
 if errorlevel 1 goto missing_dependencies
 
@@ -31,22 +31,22 @@ rem Remove previous GUI output and any obsolete CLI output.
 if exist "dist\BrNavi-GUI" rmdir /s /q "dist\BrNavi-GUI"
 if exist "dist\BrNavi-CLI" rmdir /s /q "dist\BrNavi-CLI"
 
-echo [2/4] Building gui_app.py...
+echo [2/6] Building gui_app.py...
 "%PYTHON%" -m PyInstaller --clean --noconfirm --onedir --contents-directory . --windowed --name BrNavi-GUI --distpath "dist\BrNavi-GUI" --workpath "build\pyinstaller-gui" --specpath "build\spec-gui" --paths "%ROOT%" --collect-submodules modules --collect-all webview --collect-all groq --collect-all curl_cffi --collect-all bleach --collect-all markdown --collect-all pygments --collect-all tzdata --collect-all requests --collect-all bs4 "gui_app.py"
 if errorlevel 1 goto build_failed
 
 echo.
-echo [3/5] Building standalone Updater.exe...
+echo [3/6] Building standalone Updater.exe...
 call "scripts\build_updater.bat"
 if errorlevel 1 goto updater_failed
 
 echo.
-echo [4/5] Preparing GUI data directories and route CSVs...
+echo [4/6] Preparing GUI data directories and route CSVs...
 call :stage_data "dist\BrNavi-GUI\BrNavi-GUI"
 if errorlevel 1 goto staging_failed
 
 echo.
-echo [5/5] Copying documentation, updater and license files...
+echo [5/6] Copying documentation, updater and license files...
 set "TARGET=dist\BrNavi-GUI\BrNavi-GUI"
 
 copy /y "README.md" "%TARGET%\README.md" > nul
@@ -65,13 +65,23 @@ copy /y "docs\route-data-v2-design.md" "%TARGET%\docs\route-data-v2-design.md" >
 if errorlevel 1 goto staging_failed
 
 echo.
+echo [6/6] Creating the full-release ZIP...
+if not exist "artifacts" mkdir "artifacts"
+if errorlevel 1 goto zip_failed
+if exist "artifacts\BrNavi-v%APP_VERSION%.zip" del /q "artifacts\BrNavi-v%APP_VERSION%.zip"
+if errorlevel 1 goto zip_failed
+"%PYTHON%" "scripts\build_release_zip.py" --source "%TARGET%" --output "artifacts\BrNavi-v%APP_VERSION%.zip" --version "%APP_VERSION%"
+if errorlevel 1 goto zip_failed
+
+echo.
 echo ================================================
 echo Build completed.
 echo.
 echo GUI: dist\BrNavi-GUI\BrNavi-GUI\BrNavi-GUI.exe
+echo Release ZIP: artifacts\BrNavi-v%APP_VERSION%.zip
 echo.
 echo The CLI is not built. It can still be run from Python.
-echo Distribute the entire BrNavi-GUI folder, not the EXE alone.
+echo Distribute the ZIP for new installations or manual recovery.
 echo ================================================
 popd
 exit /b 0
@@ -123,5 +133,12 @@ exit /b 1
 :staging_failed
 echo.
 echo Failed to prepare the distribution files. Check disk space and permissions.
+popd
+exit /b 1
+
+:zip_failed
+echo.
+echo Full-release ZIP generation failed. No completed release ZIP is available.
+echo Review the error messages above.
 popd
 exit /b 1

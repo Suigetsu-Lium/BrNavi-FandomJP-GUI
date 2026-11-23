@@ -2311,6 +2311,37 @@ HTML_TEMPLATE = r"""
         page-break-inside: avoid !important;
       }
 
+      /*
+       * 印刷では閲覧用の横スクロール領域を解除する。
+       * 全テーブルを印刷可能幅へ縮小し、長いセル内容も折り返して
+       * 用紙右端でのクリップとスクロールバー描画を防止する。
+       */
+      #wiki-page-container .term-table-wrap,
+      #wiki-page-container .term-table-normal-view {
+        display: block !important;
+        box-sizing: border-box !important;
+        width: 100% !important;
+        min-width: 0 !important;
+        max-width: 100% !important;
+        overflow: visible !important;
+        overflow-x: visible !important;
+        overflow-y: visible !important;
+      }
+      #wiki-page-container table {
+        display: table !important;
+        box-sizing: border-box !important;
+        width: 100% !important;
+        min-width: 0 !important;
+        max-width: 100% !important;
+        table-layout: fixed !important;
+      }
+      #wiki-page-container th,
+      #wiki-page-container td {
+        white-space: normal !important;
+        overflow-wrap: anywhere !important;
+        word-break: break-word !important;
+      }
+
       /* 縦長コンパクトテーブルは印刷時に必ず全幅2列へ統一する */
       .term-table-compact-controls {
         display: none !important;

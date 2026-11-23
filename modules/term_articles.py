@@ -31,6 +31,11 @@ _DROP_SELECTORS = (
     "script", "style", "noscript", "iframe",
 )
 _ID_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,100}$")
+_ALLOWED_DATA_ATTRIBUTES = {
+    "data-compact-table",
+    "data-lightbox-src",
+    "data-wiki-target",
+}
 _ALLOWED_CLASSES = {
     "reference", "references", "mw-references-wrap", "mw-cite-backlink",
     "reference-text", "mw-headline", "wikitable", "thumb", "thumbinner",
@@ -59,6 +64,13 @@ _ALLOWED_CLASSES = {
 def _safe_id(value):
     value = str(value or "").strip()
     return value if _ID_PATTERN.fullmatch(value) else ""
+
+
+def _append_allowed_data_attribute(attrs, name, value):
+    """Append a generated data-* attribute only when explicitly allowlisted."""
+    if name not in _ALLOWED_DATA_ATTRIBUTES:
+        return
+    attrs.append(f'{name}="{html.escape(str(value), quote=True)}"')
 
 
 def _is_article_credit_text(value):
@@ -488,7 +500,10 @@ def _is_compact_table_candidate(table):
     thead = table.find("thead", recursive=False)
     if thead is not None:
         header_rows = list(thead.find_all("tr", recursive=False))
-    elif rows[0].find(["th"], recursive=False) is not None:
+    # Fandom/MediaWiki tables commonly place their header cells in the first
+    # row without a thead element. Prefer that row when no explicit header
+    # section supplied rows.
+    if not header_rows and rows[0].find(["th"], recursive=False) is not None:
         header_rows = [rows[0]]
     if not header_rows:
         return False
@@ -499,7 +514,7 @@ def _is_compact_table_candidate(table):
 
     first_cells = header_rows[-1].find_all(["th", "td"], recursive=False)
     column_count = len(first_cells)
-    if not 2 <= column_count <= 5:
+    if not 2 <= column_count <= 8:
         return False
 
     for row in rows:
@@ -515,7 +530,7 @@ def _is_compact_table_candidate(table):
                     return False
             if cell.find(["p", "ul", "ol", "div", "table", "img", "figure"]) is not None:
                 return False
-            text = re.sub(r"\\s+", " ", cell.get_text(" ", strip=True)).strip()
+            text = re.sub(r"\s+", " ", cell.get_text(" ", strip=True)).strip()
             if len(text) > 42:
                 return False
         row_text = " ".join(cell.get_text(" ", strip=True) for cell in cells)
@@ -570,7 +585,7 @@ def _serialize(node, base_url, local_image_map=None, source_path=None):
     if name == "table":
         classes.append("term-table")
         if _is_compact_table_candidate(node):
-            attrs.append('data-compact-table="true"')
+            _append_allowed_data_attribute(attrs, "data-compact-table", "true")
     elif name in {"ol", "ul"}:
         classes.append("term-list")
     elif name in {"h1", "h2", "h3", "h4", "h5", "h6"}:
@@ -620,15 +635,13 @@ def _serialize(node, base_url, local_image_map=None, source_path=None):
         if contains_image and is_image_target:
             image_href, _image_wiki_target = _safe_url(raw_href, base_url)
             if image_href.startswith(("http://", "https://")):
-                attrs.append(f'data-lightbox-src="{html.escape(image_href, quote=True)}"')
+                _append_allowed_data_attribute(attrs, "data-lightbox-src", image_href)
         if not (is_file_page or is_image_target or contains_image):
             href, wiki_target = _safe_url(raw_href, base_url)
             if href:
                 attrs.append(f'href="{html.escape(href, quote=True)}"')
             if wiki_target:
-                attrs.append(
-                    f'data-wiki-target="{html.escape(wiki_target, quote=True)}"'
-                )
+                _append_allowed_data_attribute(attrs, "data-wiki-target", wiki_target)
         if node.get("title"):
             attrs.append(
                 f'title="{html.escape(str(node.get("title")), quote=True)}"'

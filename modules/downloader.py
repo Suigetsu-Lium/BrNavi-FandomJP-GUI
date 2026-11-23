@@ -83,6 +83,7 @@ from urllib.parse import unquote, urlparse
 
 from bs4 import BeautifulSoup
 from curl_cffi import requests
+from modules.database import normalize_page_url
 from modules.operation_context import OperationCancelled
 from modules.runtime_paths import get_application_dir
 
@@ -641,15 +642,8 @@ def make_filename(
 # =============================================================================
 
 def _normalized_page_url(value):
-    """Compare page URLs without fragments or trailing-slash differences."""
-    value = clean_value(value)
-    if not value:
-        return ""
-    parsed = urlparse(value)
-    scheme = (parsed.scheme or "https").lower()
-    host = (parsed.netloc or "").lower()
-    path = unquote(parsed.path or "/").rstrip("/") or "/"
-    return f"{scheme}://{host}{path}"
+    """Use the shared URL identity rule for downloaded and indexed articles."""
+    return normalize_page_url(value)
 
 
 def _html_canonical_url(html_text):

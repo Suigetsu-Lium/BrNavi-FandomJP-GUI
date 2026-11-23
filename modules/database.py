@@ -25,6 +25,7 @@ import json
 import re
 import webbrowser
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 from modules.runtime_paths import get_application_dir
 
@@ -575,6 +576,109 @@ def load_summary():
             }
 
     return summary
+
+
+# =============================================================================
+# Canonical URL -> local article data
+# =============================================================================
+
+def normalize_page_url(value):
+    """Normalize article URLs consistently for local HTML and Summary matching."""
+    value = clean_value(value)
+    if not value:
+        return ""
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return ""
+    if not parsed.netloc:
+        return ""
+    scheme = (parsed.scheme or "https").casefold()
+    host = parsed.netloc.casefold()
+    path = unquote(parsed.path or "/").rstrip("/") or "/"
+    return f"{scheme}://{host}{path}"
+
+
+def load_summary_by_url():
+    """Load unambiguous Summary rows indexed by their canonical article URL."""
+    rows_by_url = {}
+    ambiguous_urls = set()
+    if not SUMMARY_FILE.is_file():
+        return rows_by_url
+    try:
+        with SUMMARY_FILE.open("r", encoding="utf-8-sig", newline="") as stream:
+            for row in csv.DictReader(stream):
+                key = normalize_page_url(row.get("URL", ""))
+                code = str(row.get("階層コード") or "").strip()
+                if not key or not code:
+                    continue
+                previous = rows_by_url.get(key)
+                if previous and str(previous.get("階層コード") or "").strip() != code:
+                    ambiguous_urls.add(key)
+                else:
+                    rows_by_url.setdefault(key, row)
+    except (OSError, csv.Error, UnicodeError):
+        return {}
+    for key in ambiguous_urls:
+        rows_by_url.pop(key, None)
+    return rows_by_url
+
+
+def find_text_database_by_url(url, summary_by_url=None):
+    """Resolve the extracted TXT through Summary's URL -> canonical code mapping."""
+    key = normalize_page_url(url)
+    if not key:
+        return None
+    summary = summary_by_url if summary_by_url is not None else load_summary_by_url()
+    row = summary.get(key)
+    if not row:
+        return None
+    code = str(row.get("階層コード") or "").strip()
+    if not code:
+        return None
+    # Keep the filename contract identical to extractor.save_individual_txt().
+    from modules.extractor import safe_filename
+    path = TEXT_DB_DIR / f"{safe_filename(code)}.txt"
+    return path if path.is_file() else None
+
+
+def index_html_database_by_url():
+    """Build a read-only index of saved HTML files using BRNAVI_META_INFO URLs."""
+    result = {}
+    if not HTML_DB_DIR.is_dir():
+        return result
+    for path in HTML_DB_DIR.glob("*.html"):
+        try:
+            with path.open("r", encoding="utf-8-sig", errors="replace") as stream:
+                header = stream.read(8192)
+        except OSError:
+            continue
+        match = re.search(
+            r"<!--\s*BRNAVI_META_INFO:\s*(.*?)-->",
+            header,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not match:
+            continue
+        metadata = {}
+        for part in match.group(1).split("|"):
+            if "=" not in part:
+                continue
+            name, value = part.split("=", 1)
+            metadata[name.strip().casefold()] = value.strip()
+        key = normalize_page_url(metadata.get("url", ""))
+        if key:
+            result.setdefault(key, path)
+    return result
+
+
+def find_html_database_by_url(url, html_by_url=None):
+    """Find a saved HTML file by its canonical metadata URL."""
+    key = normalize_page_url(url)
+    if not key:
+        return None
+    index = html_by_url if html_by_url is not None else index_html_database_by_url()
+    return index.get(key)
 
 
 # =============================================================================

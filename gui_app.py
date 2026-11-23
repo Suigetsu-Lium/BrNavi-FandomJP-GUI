@@ -21,12 +21,23 @@ import webview
 
 # modules ディレクトリから既存ロジックを読み込み
 from modules.database import (
+    find_html_database_by_url,
+    find_text_database_by_url,
     get_html_filename_prefix,
+    index_html_database_by_url,
     load_master_database,
+    load_summary_by_url,
+    normalize_page_url,
     open_local_html,
     sanitize_filename,
 )
-from modules.extractor import extract_article_attribution, extract_danger, extract_understanding, extract_meta_info_from_html
+from modules.extractor import (
+    extract_article_attribution,
+    extract_article_text,
+    extract_danger,
+    extract_understanding,
+    extract_meta_info_from_html,
+)
 from modules.term_articles import render_term_article_file
 
 # 保守・更新サービス
@@ -760,75 +771,55 @@ class BackroomsAPI:
                         and alias_url.casefold() not in independently_listed_urls
                     ):
                         redirect_alias_urls.add(alias_url.casefold())
-        # Most saved HTML files already have a title-matching filename. Only
-        # inspect metadata headers for orphan filenames; reading every HTML
-        # file on each initial catalog build is especially slow on OneDrive.
+        # Count canonical titles so title-only compatibility matching remains unambiguous.
         page_identity_counts = {}
         for page in pages.values():
             title_key = normalized_identity(page.get("title"))
             if title_key:
                 page_identity_counts[title_key] = page_identity_counts.get(title_key, 0) + 1
-        page_identity_keys = set(page_identity_counts)
         duplicate_page_identity_keys = {
             key for key, count in page_identity_counts.items() if count > 1
         }
-        html_by_url = {}
-        if HTML_DIR.exists() and page_identity_keys:
-            for candidate_html in HTML_DIR.glob("*.html"):
-                candidate_key = normalized_identity(
-                    self._extract_level_id_from_filename(candidate_html) or candidate_html.stem
-                )
-                # A unique title can be matched without reading its HTML header.
-                # Duplicate titles must be resolved by canonical URL to avoid
-                # attaching one article's local file to every same-title page.
-                if candidate_key in page_identity_keys and candidate_key not in duplicate_page_identity_keys:
-                    continue
-                try:
-                    with candidate_html.open("r", encoding="utf-8-sig", errors="replace") as stream:
-                        header = stream.read(8192)
-                except OSError:
-                    continue
-                url_match = re.search(r"BRNAVI_META_INFO:.*?\bURL=([^|\s>]+)", header)
-                if url_match:
-                    canonical_url = url_match.group(1).strip()
-                    if canonical_url:
-                        html_by_url.setdefault(canonical_url, candidate_html)
+        # URL is the primary identity for both local formats. Index every
+        # saved HTML header, including files with title-matching filenames.
+        html_by_url = index_html_database_by_url()
+        summary_by_url = load_summary_by_url()
 
         matched_local_files = set()
-        saved_files_by_url = {}
+        saved_html_by_url = {}
+        saved_text_by_url = {}
         for page in pages.values():
             title = str(page.get("title", "") or "").strip()
             if not title:
                 continue
             title_key = normalized_identity(title)
-            matched_files = (
-                []
-                if title_key in duplicate_page_identity_keys
-                else list(local_files_by_key.get(title_key, ()))
-            )
-
-            # Prefer the canonical article URL when associating local HTML/TXT.
-            # Japanese titles can be mojibaked or sanitized differently in the
-            # exported filenames, so title-only matching can create a second,
-            # orphaned local article beside the actual catalog entry.
             page_url = str(page.get("url") or "").strip()
-            if page_url:
-                candidate_html = html_by_url.get(page_url)
+            url_key = normalize_page_url(page_url)
+            matched_files = []
+
+            if url_key:
+                candidate_html = html_by_url.get(url_key)
+                candidate_text = find_text_database_by_url(page_url, summary_by_url)
                 if candidate_html is not None:
                     matched_files.append(candidate_html)
-                    sibling_text = TEXT_DIR / f"{candidate_html.stem}.txt"
-                    if sibling_text.is_file():
-                        matched_files.append(sibling_text)
+                    saved_html_by_url[url_key] = candidate_html
+                if candidate_text is not None:
+                    matched_files.append(candidate_text)
+                    saved_text_by_url[url_key] = candidate_text
 
-            # Do not associate TXT files by Latin-token similarity. This
-            # loses meaningful signs (Level -20 vs Level 20) and can attach
-            # an unrelated article. Only exact filename or canonical HTML
-            # sibling associations above are accepted.
+            # Legacy title-only matching is a last resort and only safe when
+            # the title is unique in Master DB. Prefix/token matching is forbidden.
+            if not matched_files and title_key not in duplicate_page_identity_keys:
+                matched_files.extend(local_files_by_key.get(title_key, ()))
 
             matched_files = list(dict.fromkeys(matched_files))
             if matched_files:
-                if page_url:
-                    saved_files_by_url[page_url.casefold()] = matched_files[0]
+                if url_key:
+                    for matched_file in matched_files:
+                        if matched_file.suffix.casefold() in {".html", ".htm"}:
+                            saved_html_by_url.setdefault(url_key, matched_file)
+                        elif matched_file.suffix.casefold() == ".txt":
+                            saved_text_by_url.setdefault(url_key, matched_file)
                 else:
                     saved_titles[title.casefold()] = matched_files[0]
                 matched_local_files.update(matched_files)
@@ -890,10 +881,13 @@ class BackroomsAPI:
             category = str(page.get("category", metadata.get("カテゴリ", "")) or "")
             subtitle = str(page.get("subtitle", page.get("meta_title", metadata.get("メタタイトル", ""))) or "")
             page_url = str(page.get("url") or "").strip()
-            saved_file = (
-                saved_files_by_url.get(page_url.casefold())
-                if page_url else saved_titles.get(title.casefold())
-            )
+            url_key = normalize_page_url(page_url)
+            saved_file = saved_titles.get(title.casefold()) if not url_key else None
+            html_saved = bool(saved_html_by_url.get(url_key))
+            text_saved = bool(saved_text_by_url.get(url_key))
+            if saved_file:
+                html_saved = html_saved or saved_file.suffix.casefold() in {".html", ".htm"}
+                text_saved = text_saved or saved_file.suffix.casefold() == ".txt"
             # Do not infer a saved article from a filename that merely starts
             # with this title. Local presence is assigned only by exact identity.
             result_key = str(page.get("url") or title).casefold()
@@ -916,7 +910,9 @@ class BackroomsAPI:
                 "section_order": page.get("section_order", "0"),
                 "page_order": page.get("page_order", "0"),
                 "language": page.get("language", "JP"),
-                "saved": bool(saved_file),
+                "html_saved": html_saved,
+                "text_saved": text_saved,
+                "saved": html_saved or text_saved,
             }
 
         # Master Database未生成の環境でも保存済み記事を一覧できる。
@@ -966,7 +962,16 @@ class BackroomsAPI:
         """本文TXTからメタタイトル・危険度・理解度を直接パースし、画像を確実に連結"""
         master = load_master_database()
         requested_url = str(page_url or "").strip()
+        requested_url_key = normalize_page_url(requested_url)
         page_info = master.get(requested_url) if requested_url else None
+        if page_info is None and requested_url_key:
+            page_info = next(
+                (
+                    page for page in master.values()
+                    if normalize_page_url(page.get("url")) == requested_url_key
+                ),
+                None,
+            )
         if page_info is None and requested_url:
             for canonical_page in master.values():
                 try:
@@ -981,7 +986,7 @@ class BackroomsAPI:
                         for group in groups if isinstance(group, dict)
                         for alias in group.get("aliases", [])
                         if isinstance(alias, dict)
-                        and str(alias.get("url") or "").strip() == requested_url
+                        and normalize_page_url(alias.get("url")) == requested_url_key
                     ),
                     None,
                 )
@@ -999,25 +1004,27 @@ class BackroomsAPI:
                  if str(page.get("title", "")).strip().casefold() == str(level_id).strip().casefold()),
                 None,
             )
-        html_file = None
-        if page_info and page_info.get("url") and HTML_DIR.exists():
-            expected_url_marker = "URL=" + page_info["url"]
-            for candidate_html in HTML_DIR.glob("*.html"):
-                try:
-                    with candidate_html.open("r", encoding="utf-8", errors="ignore") as stream:
-                        header = stream.read(8192)
-                except OSError:
-                    continue
-                if expected_url_marker in header:
-                    html_file = candidate_html
-                    break
-        if html_file is None and not page_url and HTML_DIR.exists():
-            html_file = next(
-                (path for path in HTML_DIR.glob("*.html")
-                 if self._filename_matches_level_id(path, level_id)),
-                None,
-            )
-        if html_file is None:
+        if page_info:
+            page_url = str(page_info.get("url") or page_url or "").strip()
+
+        html_file = find_html_database_by_url(page_url) if page_url else None
+        canonical_title = str((page_info or {}).get("title") or level_id).strip()
+        canonical_title_key = unicodedata.normalize("NFKC", canonical_title).casefold()
+        same_title_pages = [
+            page for page in master.values()
+            if unicodedata.normalize(
+                "NFKC", str(page.get("title") or "").strip()
+            ).casefold() == canonical_title_key
+        ]
+        title_is_unique = len(same_title_pages) <= 1
+        if html_file is None and title_is_unique and HTML_DIR.exists():
+            title_matches = [
+                path for path in HTML_DIR.glob("*.html")
+                if self._filename_matches_level_id(path, canonical_title)
+            ]
+            if len(title_matches) == 1:
+                html_file = title_matches[0]
+        if html_file is None and not page_url:
             html_file = HTML_DIR / f"{get_html_filename_prefix(level_id)}.html"
 
         html_metadata = {}
@@ -1043,36 +1050,43 @@ class BackroomsAPI:
             else {"html": "", "toc": [], "title": ""}
         )
 
-        # 本文TXTファイルの探索：ファイル名先頭のLevel IDを完全一致で照合
-        text_file = None
-        if html_file and html_file.is_file() and TEXT_DIR.exists():
+        # Resolve TXT by canonical URL through Summary first. The filename is
+        # generated from Summary's 階層コード using extractor.safe_filename().
+        summary_by_url = load_summary_by_url()
+        text_file = find_text_database_by_url(page_url, summary_by_url) if page_url else None
+
+        # Compatibility for older records without URL metadata: exact sibling
+        # filename first, then an exact normalized title match only.
+        if text_file is None and html_file and html_file.is_file() and TEXT_DIR.exists():
             corresponding_text = TEXT_DIR / f"{html_file.stem}.txt"
             if corresponding_text.is_file():
                 text_file = corresponding_text
-        if TEXT_DIR.exists() and (not page_url or page_info):
-            requested_id = re.sub(r"\s+", " ", level_id.strip()).casefold()
-            for candidate_text in TEXT_DIR.glob("*.txt"):
-                file_level_id = self._extract_level_id_from_filename(candidate_text)
-                if (
-                    (file_level_id and file_level_id.casefold() == requested_id)
-                    or self._filename_matches_level_id(candidate_text, level_id)
-                ):
-                    text_file = candidate_text
-                    break
-
-        # Never fall back to a different article's TXT based on partial
-        # Latin tokens. Signs and punctuation are meaningful in Level IDs
-        # (e.g. Level -20 η is not Level 20 η).
+        if text_file is None and title_is_unique and TEXT_DIR.exists():
+            title_text_matches = [
+                candidate_text for candidate_text in TEXT_DIR.glob("*.txt")
+                if self._filename_matches_level_id(candidate_text, canonical_title)
+            ]
+            if len(title_text_matches) == 1:
+                text_file = title_text_matches[0]
 
         raw_text = ""
         if text_file and text_file.exists():
             try:
-                with open(text_file, "r", encoding="utf-8-sig", errors="ignore") as f:
+                with open(text_file, "r", encoding="utf-8-sig", errors="replace") as f:
                     raw_text = f.read()
-            except Exception:
-                pass
+            except OSError:
+                raw_text = ""
 
-        # 🌟 本文TXTの先頭から直接メタ情報を抽出
+        body_source = "txt" if raw_text.strip() else ""
+        if not raw_text.strip() and html_source_for_type and not is_term_article:
+            # Read-only in-memory fallback: never write TXT/CSV while viewing.
+            raw_text = extract_article_text(html_source_for_type)
+            if raw_text.strip():
+                body_source = "html_fallback"
+
+        summary_row = summary_by_url.get(normalize_page_url(page_url), {}) if page_url else {}
+
+        # 本文TXTの先頭から直接メタ情報を抽出
         meta_title = ""
         danger = "情報なし"
         comprehension = "情報なし"
@@ -1105,20 +1119,10 @@ class BackroomsAPI:
         if parsed_comprehension:
             comprehension = parsed_comprehension
         if not is_term_article and (danger == "情報なし" or comprehension == "情報なし"):
-            summary_file = BASE_DIR / "extracted_fandom_levels_summary.csv"
-            try:
-                with summary_file.open("r", encoding="utf-8-sig", newline="") as stream:
-                    for row in csv.DictReader(stream):
-                        code = re.sub(r"\s+", " ", str(row.get("階層コード", "")).strip()).casefold()
-                        if code != re.sub(r"\s+", " ", level_id.strip()).casefold():
-                            continue
-                        if danger == "情報なし" and row.get("危険度"):
-                            danger = row["危険度"].strip()
-                        if comprehension == "情報なし" and row.get("理解度"):
-                            comprehension = row["理解度"].strip()
-                        break
-            except (OSError, csv.Error, UnicodeError):
-                pass
+            if danger == "情報なし" and summary_row.get("危険度"):
+                danger = str(summary_row["危険度"]).strip()
+            if comprehension == "情報なし" and summary_row.get("理解度"):
+                comprehension = str(summary_row["理解度"]).strip()
 
         # 本文から先頭のメタ情報ブロック（タイトル・理解度・危険度・写真キャプション等）を除外
         cleaned_text = raw_text
@@ -1180,6 +1184,28 @@ class BackroomsAPI:
         translation_section = page_info.get("translation_section", "") if page_info else ""
         section_number = page_info.get("section_number", "") if page_info else ""
 
+        html_saved = bool(html_file and html_file.is_file())
+        text_saved = bool(text_file and text_file.is_file())
+        body_available = bool(cleaned_text.strip()) or bool(term_article.get("html"))
+        if body_source == "html_fallback" and body_available:
+            saved_state = "html_fallback"
+        elif html_saved and text_saved:
+            saved_state = "html_and_text" if body_available else "html_saved_no_body"
+        elif html_saved:
+            saved_state = "html_saved_no_body" if not body_available else "html_only"
+        elif text_saved:
+            saved_state = "text_only" if body_available else "text_saved_no_body"
+        else:
+            saved_state = "unsaved"
+
+        missing_body_message = (
+            "※ 保存済みHTMLから本文を抽出できませんでした。"
+            if html_saved
+            else "※ 保存済みTXTから本文を取得できませんでした。"
+            if text_saved
+            else "※ 本文データがありません。"
+        )
+
         return {
             "level_id": level_id,
             "title": meta_title or (page_info.get("title", "") if page_info else ""),
@@ -1196,7 +1222,12 @@ class BackroomsAPI:
             "danger": danger,
             "comprehension": comprehension,
             "attribution": article_attribution,
-            "text": cleaned_text or "※ 本文データがありません。",
+            "html_saved": html_saved,
+            "text_saved": text_saved,
+            "saved": html_saved or text_saved,
+            "saved_state": saved_state,
+            "body_source": body_source or ("term_html" if term_article.get("html") else ""),
+            "text": cleaned_text or missing_body_message,
             "term_html": term_article.get("html", ""),
             "term_toc": term_article.get("toc", []),
             "images": images_base64
@@ -2331,8 +2362,8 @@ HTML_TEMPLATE = r"""
           </div>
 
           <div id="explorer-unsaved-actions" class="hidden mb-5 rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
-            <p class="mb-2">この記事はまだローカルに保存されていません。内蔵ブラウザーで開き、表示中の記事を保存できます。</p>
-            <button type="button" onclick="openCurrentFandomInApp()" class="rounded bg-[#91520f] px-3 py-1.5 text-xs font-semibold text-white">内蔵ブラウザーで開いて保存</button>
+            <p id="explorer-article-status" class="mb-2">この記事はまだローカルに保存されていません。内蔵ブラウザーで開き、表示中の記事を保存できます。</p>
+            <button id="explorer-unsaved-open-button" type="button" onclick="openCurrentFandomInApp()" class="rounded bg-[#91520f] px-3 py-1.5 text-xs font-semibold text-white">内蔵ブラウザーで開いて保存</button>
           </div>
 
           <!-- 本文 ＆ Infobox -->
@@ -4121,6 +4152,9 @@ HTML_TEMPLATE = r"""
         url: item.url || '',
         html_path: item.html_path || '',
         remote_html: item.remote_html || '',
+        html_saved: Boolean(item.html_saved),
+        text_saved: Boolean(item.text_saved),
+        saved_state: item.saved_state || '',
         saved: Boolean(item.saved)
       };
       tab.history = tab.history.slice(0, tab.historyIndex + 1);
@@ -4207,8 +4241,21 @@ HTML_TEMPLATE = r"""
         await loadLevelDetail(page.title, page.url || "", token);
       }
       if (token !== explorerNavigationToken) return;
-      const articleMissing = (document.getElementById('view-article-content').textContent || '').includes('本文データがありません');
-      document.getElementById('explorer-unsaved-actions').classList.toggle('hidden', !articleMissing);
+      const savedState = page.saved_state || (page.saved ? 'saved' : 'unsaved');
+      const statusPanel = document.getElementById('explorer-unsaved-actions');
+      const statusMessage = document.getElementById('explorer-article-status');
+      const saveButton = document.getElementById('explorer-unsaved-open-button');
+      const isUnsaved = savedState === 'unsaved';
+      const savedButBodyMissing = savedState === 'html_saved_no_body' || savedState === 'text_saved_no_body';
+      statusPanel.classList.toggle('hidden', !isUnsaved && !savedButBodyMissing);
+      if (isUnsaved) {
+        statusMessage.textContent = 'この記事はまだローカルに保存されていません。内蔵ブラウザーで開き、表示中の記事を保存できます。';
+      } else if (savedButBodyMissing) {
+        statusMessage.textContent = savedState === 'html_saved_no_body'
+          ? 'HTMLはローカルに保存されていますが、本文を抽出できませんでした。HTML再確認・抽出から内容を確認してください。'
+          : '抽出TXTはローカルに保存されていますが、本文を読み取れませんでした。';
+      }
+      saveButton.classList.toggle('hidden', !isUnsaved);
       renderExplorerTabs();
     }
 
@@ -4334,8 +4381,8 @@ HTML_TEMPLATE = r"""
       try {
         const candidate = levelSearchResults.find(item => explorerTitleKey(item.title) === explorerTitleKey(levelId));
         await openExplorerCandidate(candidate || {title: levelId, saved: false});
-        const article = document.getElementById('view-article-content').textContent || '';
-        if (!article.includes('本文データがありません')) return;
+        const savedState = currentExplorerPage?.saved_state || (currentExplorerPage?.saved ? 'saved' : 'unsaved');
+        if (savedState !== 'unsaved' && savedState !== 'html_saved_no_body' && savedState !== 'text_saved_no_body') return;
       } catch (_) {}
       try {
         const result = await pywebview.api.search_online_wiki(levelId);
@@ -4560,7 +4607,13 @@ HTML_TEMPLATE = r"""
       // A slower response from the previous article must never overwrite the
       // currently selected tab/page's article, infobox, images or attribution.
       if (navigationToken !== explorerNavigationToken || currentExplorerPage !== requestedPage) return;
-      if (currentExplorerPage) currentExplorerPage.html_path = d.html_path || '';
+      if (currentExplorerPage) {
+        currentExplorerPage.html_path = d.html_path || '';
+        currentExplorerPage.html_saved = Boolean(d.html_saved);
+        currentExplorerPage.text_saved = Boolean(d.text_saved);
+        currentExplorerPage.saved = Boolean(d.saved);
+        currentExplorerPage.saved_state = d.saved_state || (d.saved ? 'saved' : 'unsaved');
+      }
       explorerImages = d.images || [];
 
       let articleStrikeSpans = [];

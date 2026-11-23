@@ -1024,22 +1024,36 @@ def prepare_content_element(
         "navbox",
         "reflink",
         "mw-editsection",
-        "reference",
-        "references",
         "boilerplate",
         "wds-tabs",
-        "thumbcaption",
-        "gallerybox",
         "printfooter",
         "mw-customtoggle-voting",
         "article-vote",
         "article-voting",
     ]
 
-    for element in content.find_all(
-        class_=unwanted_classes
-    ):
+    # Remove presentation/navigation chrome only. Tab panels and collapsible
+    # bodies remain in the DOM even when hidden in the rendered browser.
+    # References, gallery captions and thumbnail captions contain article data
+    # and must not be discarded with their surrounding presentation wrappers.
+    for element in list(content.find_all(class_=unwanted_classes)):
+        if element.parent is None:
+            continue
+        classes = set(element.get("class") or [])
+        if "wds-tabs" in classes and element.select_one(
+            ".wds-tab__content, .wds-tabber__content, .wds-tabs__content"
+        ):
+            # Some skins place panel content under the same wrapper as tabs.
+            # Remove only navigation labels in that case.
+            for tab_label in element.select(
+                ".wds-tabs__tab, .wds-tabs__tab-label, .wds-tabs__tab-label-wrapper"
+            ):
+                tab_label.decompose()
+            continue
         element.decompose()
+
+    # Fandom's tabber variants keep panel bodies in the parser output. Do not
+    # remove .tabber, .wds-tabber, .mw-collapsible or their content descendants.
 
     # Fandom vote widgets and mobile-app fallback instructions are UI, not article text.
     for paragraph in content.find_all(["p", "small", "div"]):

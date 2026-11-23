@@ -47,6 +47,7 @@ from modules.operations import (
     get_level_list_languages,
     is_supported_level_list_url,
     load_level_list_pages,
+    validate_level_list_pages,
     run_maintenance_operation,
 )
 from modules.online_wiki import fetch_page as fetch_online_wiki_page
@@ -1293,23 +1294,31 @@ class BackroomsAPI:
         except (OSError, json.JSONDecodeError) as error:
             return {"error": f"用語一覧データを読み込めません: {error}"}
 
-    def start_level_list_offline_save(self, pages, overwrite=False):
+    def start_level_list_offline_save(self, pages, overwrite=False, require_catalog=False, category_id=None):
         if not isinstance(pages, list) or not pages:
-            return {"status": "error", "message": "オフライン保存するレベルを選択してください。"}
-        validated_pages = []
-        for page in pages:
-            if (
-                not isinstance(page, dict)
-                or not page.get("title")
-                or not is_supported_level_list_url(page.get("url"))
-            ):
-                return {"status": "error", "message": "選択リストに不正なページが含まれています。"}
-            validated_pages.append(dict(page))
+            return {"status": "error", "message": "オフライン保存する記事を選択してください。"}
+        try:
+            if require_catalog:
+                validated_pages = validate_level_list_pages(pages, category_id)
+            else:
+                validated_pages = []
+                for page in pages:
+                    if (
+                        not isinstance(page, dict)
+                        or not page.get("title")
+                        or not is_supported_level_list_url(page.get("url"))
+                    ):
+                        return {"status": "error", "message": "選択リストに不正なページが含まれています。"}
+                    validated_pages.append(dict(page))
+        except ValueError as error:
+            return {"status": "error", "message": str(error)}
         return self.run_maintenance_task(
             "save_level_list_offline",
             options={
                 "pages": validated_pages,
                 "overwrite": bool(overwrite),
+                "require_catalog": bool(require_catalog),
+                "category_id": category_id,
             },
         )
 
@@ -2507,14 +2516,14 @@ HTML_TEMPLATE = r"""
       <div class="w-full max-w-6xl mx-auto flex-1 min-h-0 flex flex-col bg-white border border-[#e2d8b5] p-4 rounded shadow-sm gap-3">
         <div class="flex items-center justify-between gap-3">
           <div>
-            <h2 class="text-base font-bold text-gray-800">階層の一覧</h2>
-            <p class="text-[11px] text-gray-500">Wikiのカテゴリから一覧を選び、階層番号順に閲覧できます。</p>
+            <h2 class="text-base font-bold text-gray-800">HTML取得・データ抽出</h2>
+            <p class="text-[11px] text-gray-500">図鑑と同じ基本9一覧から記事を選び、正規記事をオフライン保存できます。</p>
           </div>
           <span id="level-list-status" class="text-[11px] text-gray-600" aria-live="polite">レベルリストを読み込み中...</span>
         </div>
         <div class="flex flex-wrap items-center gap-2">
-          <label for="level-list-language" class="text-xs font-semibold text-gray-700">リスト</label>
-          <select id="level-list-language" onchange="loadLevelListPages()"
+          <label for="level-list-category" class="text-xs font-semibold text-gray-700">リスト</label>
+          <select id="level-list-category" onchange="loadLevelListPages()"
             class="min-w-24 border border-[#d6c79a] rounded px-2 py-1.5 text-xs bg-white"></select>
           <input id="level-list-filter" type="search" oninput="filterLevelListTiles()"
             style="display: none;"
@@ -2543,7 +2552,7 @@ HTML_TEMPLATE = r"""
             </div>
             <div class="flex flex-wrap gap-2">
               <button id="level-list-download-button" onclick="runLevelListOfflineSave()" disabled
-                class="px-3 py-1.5 rounded bg-[#b45309] text-white text-xs font-semibold disabled:opacity-40">Level情報のオフライン保存</button>
+                class="px-3 py-1.5 rounded bg-[#b45309] text-white text-xs font-semibold disabled:opacity-40">選択記事をオフライン保存</button>
               <button id="level-list-clear-selection" onclick="clearLevelListSelection()" disabled
                 class="px-3 py-1.5 rounded border border-[#d6c79a] text-xs disabled:opacity-40">選択解除</button>
               <button id="level-list-cancel-button" onclick="cancelMaintenanceTask()" disabled
@@ -2559,7 +2568,7 @@ HTML_TEMPLATE = r"""
           </div>
         </div>
         <div class="border-t border-[#e2d8b5] pt-2 space-y-2">
-          <div id="level-list-task-status" class="text-xs text-gray-600" role="status" aria-live="polite">対象を選択して「Level情報のオフライン保存」を実行してください。</div>
+          <div id="level-list-task-status" class="text-xs text-gray-600" role="status" aria-live="polite">対象記事を選択して「選択記事をオフライン保存」を実行してください。</div>
           <div class="flex items-center gap-2">
             <progress id="level-list-progress" max="100" value="0" class="hidden flex-1 h-2"></progress>
             <span id="level-list-progress-label" class="text-[11px] text-gray-500">待機中</span>
@@ -2821,10 +2830,10 @@ HTML_TEMPLATE = r"""
         if (galleryView && !galleryView.classList.contains('hidden')) {
           await loadLocalImageGallery();
         }
-        levelListLanguagesLoaded = false;
+        levelListCatalogLoaded = false;
         if (!document.getElementById('view-data-tools').classList.contains('hidden')) {
-          button.textContent = 'Reloading: language lists...';
-          await loadLevelListLanguages();
+          button.textContent = 'Reloading: article lists...';
+          await loadLevelListCategories();
         }
         button.textContent = 'Reloaded';
       } catch (error) {
@@ -2845,8 +2854,8 @@ HTML_TEMPLATE = r"""
       if (tab === 'wiki' && !onlineWikiDefaultOpened) {
         openDirectWikiUrl();
       }
-      if (tab === 'data-tools' && !levelListLanguagesLoaded) {
-        loadLevelListLanguages();
+      if (tab === 'data-tools' && !levelListCatalogLoaded) {
+        loadLevelListCategories();
       }
     }
 
@@ -3076,9 +3085,9 @@ HTML_TEMPLATE = r"""
       const gallery = document.getElementById('explorer-gallery-view');
       if (gallery && !gallery.classList.contains('hidden')) await loadLocalImageGallery();
       if (selected.has('index')) {
-        levelListLanguagesLoaded = false;
+        levelListCatalogLoaded = false;
         if (!document.getElementById('view-data-tools').classList.contains('hidden')) {
-          await loadLevelListLanguages();
+          await loadLevelListCategories();
         }
       }
       routeLastResults = [];
@@ -3562,7 +3571,7 @@ HTML_TEMPLATE = r"""
       if (!host || !Array.isArray(levelListCategoryDefinitions)) return;
       host.replaceChildren();
       const sourcePages = explorerIndexPages.length ? explorerIndexPages : levelSearchResults;
-      // 図鑑トップは固定の基本9タイルのみ。支部別の入口はHTML取得タブ側に限定する。
+      // 図鑑・HTML取得のトップは固定9一覧のみ。国際支部は階層ハブ内部に表示する。
       const categories = levelListCategoryDefinitions.map(category => ({
         ...category,
         pages: category.id === "all"
@@ -4760,7 +4769,7 @@ HTML_TEMPLATE = r"""
       }
     }
 
-    let levelListLanguagesLoaded = false;
+    let levelListCatalogLoaded = false;
     let levelListPages = [];
     let visibleLevelListPages = [];
     let selectedLevelPages = new Map();
@@ -4768,60 +4777,51 @@ HTML_TEMPLATE = r"""
     let levelListTaskBusy = false;
     let currentLevelListCategory = null;
 
-    async function loadLevelListLanguages() {
+    async function loadLevelListCategories() {
       const status = document.getElementById('level-list-status');
-      status.textContent = "level_listsフォルダーを確認しています...";
+      status.textContent = "Master DBから一覧記事を読み込んでいます...";
+      const select = document.getElementById('level-list-category');
+      select.replaceChildren();
+      const placeholder = document.createElement('option');
+      placeholder.value = "";
+      placeholder.textContent = "一覧を選択";
+      placeholder.disabled = true;
+      select.appendChild(placeholder);
+      levelListCategoryDefinitions.forEach(category => {
+        const option = document.createElement('option');
+        option.value = category.id;
+        option.textContent = category.title;
+        select.appendChild(option);
+      });
+      select.selectedIndex = 0;
+      selectedLevelPages.clear();
+      levelListAnchorUrl = null;
+      visibleLevelListPages = [];
+      currentLevelListCategory = null;
+      document.getElementById('level-list-browser').style.display = "none";
+      document.getElementById('level-list-categories').style.display = "grid";
+      document.getElementById('level-list-filter').style.display = "none";
+      document.getElementById('level-list-filter').value = "";
+      document.getElementById('level-list-toc').classList.add("hidden");
+      updateLevelListSelectionControls();
       try {
-        const result = await pywebview.api.get_level_list_languages();
+        const result = await pywebview.api.get_level_list_pages("ALL");
         if (result.error) throw new Error(result.error);
-        const select = document.getElementById('level-list-language');
-        select.replaceChildren();
-        const allOption = document.createElement('option');
-        allOption.value = "ALL";
-        allOption.textContent = "ALL";
-        select.appendChild(allOption);
-        (result.languages || []).forEach(language => {
-          const option = document.createElement('option');
-          option.value = language;
-          option.textContent = language;
-          select.appendChild(option);
-        });
-        if (!result.languages || result.languages.length === 0) {
-          status.textContent = "言語別レベルリストがありません。環境設定でLevel一覧データを更新してください。";
-          return;
-        }
-        levelListLanguagesLoaded = true;
-        select.value = "ALL";
-        await loadLevelListPages();
+        levelListPages = Array.isArray(result.pages) ? result.pages : [];
+        levelListCatalogLoaded = true;
+        renderLevelListCategoryTiles();
+        status.textContent = `全一覧データから${levelListPages.length}件を読み込みました。`;
       } catch (error) {
-        status.textContent = "レベルリストを読み込めません: " + error;
+        levelListPages = [];
+        levelListCatalogLoaded = false;
+        renderLevelListCategoryTiles();
+        status.textContent = "一覧データを読み込めません: " + error;
       }
     }
 
-    async function loadLevelListPages() {
-      const language = document.getElementById('level-list-language').value;
-      if (!language) return;
-      const status = document.getElementById('level-list-status');
-      selectedLevelPages.clear();
-      levelListAnchorUrl = null;
-      currentLevelListCategory = null;
-      updateLevelListSelectionControls();
-      status.textContent = language === "ALL"
-        ? "全言語のレベルリストを読み込み中..."
-        : `${language}.txtを読み込み中...`;
-      try {
-        const result = await pywebview.api.get_level_list_pages(language);
-        if (result.error) throw new Error(result.error);
-        levelListPages = result.pages || [];
-        filterLevelListTiles();
-        status.textContent = language === "ALL"
-          ? `全言語から${levelListPages.length}件を読み込みました。`
-          : `${language}.txtから${levelListPages.length}件を読み込みました。`;
-      } catch (error) {
-        levelListPages = [];
-        filterLevelListTiles();
-        status.textContent = "レベルリストを読み込めません: " + error;
-      }
+    function loadLevelListPages() {
+      const categoryId = document.getElementById('level-list-category').value;
+      if (categoryId) openLevelListCategory(categoryId);
     }
 
     const levelListCategoryDefinitions = [
@@ -4852,24 +4852,6 @@ HTML_TEMPLATE = r"""
         imageUrl: "https://static.wikia.nocookie.net/backrooms/images/a/a4/Scattered_smoke02.jpg/revision/latest/scale-to-width-down/360?cb=20240210091314&path-prefix=ja",
         imagePageUrl: "https://backrooms.fandom.com/ja/wiki/ファイル:Scattered_smoke02.jpg"},
     ];
-
-    const levelListCategoryLabels = {
-      enigmatic_sublevel_eta: "番外亜階層 η",
-      alias: "別名",
-      terms: "用語",
-      contest: "コンテスト",
-      foreign: "国外階層",
-      dimension: "次元",
-      entity: "エンティティ",
-      item: "物品",
-      phenomenon: "現象",
-      canon: "カノン",
-      joke_level: "ジョーク階層",
-      joke_article: "ジョーク記事",
-      foreign_joke: "国外ジョーク記事",
-      person: "人物",
-      unknown: "その他",
-    };
 
     function uniqueLevelListPages(pages) {
       const byUrl = new Map();
@@ -4915,7 +4897,6 @@ HTML_TEMPLATE = r"""
     }
 
     function levelListPagesForCategory(categoryId, sourcePages = levelListPages) {
-      const branchMatch = String(categoryId || "").match(/^branch:([A-Z]+):([a-z_]+)$/);
       const pages = sourcePages.filter(page => {
         const category = normalizeExplorerCategory(page.category);
         const language = String(page.language || "unknown").toUpperCase();
@@ -4923,10 +4904,10 @@ HTML_TEMPLATE = r"""
         const sources = source.split("|").map(value => value.trim());
         const defaultLanguage = ["EN", "JP", "UNKNOWN"].includes(language);
         const internationalBranch = isInternationalBranchPage(page);
-        if (branchMatch) {
-          return language === branchMatch[1] && category === branchMatch[2];
+        if (categoryId === "all") {
+          return Boolean(getWikiMembership(page, "hierarchy")) ||
+            pageHasIndexMembership(page, "hierarchy");
         }
-        if (categoryId === "all") return true;
         if (categoryId === "normal") {
           // 無印通常階層はEN記事、または normal.html への明示的な掲載所属だけを採用する。
           // hierarchy.html 上の国際支部は、カテゴリが normal でも基本タイルへ混ぜない。
@@ -4970,58 +4951,11 @@ HTML_TEMPLATE = r"""
     }
 
     function getLevelListCategories(sourcePages = levelListPages) {
-      const categories = levelListCategoryDefinitions
-        .map(category => ({...category, pages: levelListPagesForCategory(category.id, sourcePages)}))
-      const knownIds = new Set(levelListCategoryDefinitions.map(category => category.id));
-      const additionalIds = Array.from(new Set(sourcePages.map(page =>
-        normalizeExplorerCategory(page.category)
-      )))
-        .filter(id => id && !knownIds.has(id) &&
-          !["normal_eta", "enigmatic_eta", "sublevel_eta"].includes(id) &&
-          !id.startsWith("normal") && !id.startsWith("enigmatic") && !id.startsWith("sublevel"))
-        .sort((left, right) => left.localeCompare(right));
-      additionalIds.forEach(id => {
-        const pages = levelListPagesForCategory(id, sourcePages);
-        if (!pages.length) return;
-        const label = pages[0].category_label || levelListCategoryLabels[id] || id;
-        categories.push({
-          id,
-          title: `${label}の一覧`,
-          visual: label.slice(0, 3),
-          wikiTitle: "",
-          pages,
-        });
-      });
-
-      // 国際支部はカテゴリと支部言語の組み合わせで個別の入口を生成する。
-      const branchLabels = {RU: "A", PL: "PL", IT: "IT", PT: "PT", UA: "UA", TR: "TR", ZH: "ZH"};
-      const categoryLabels = {
-        normal: "通常階層", normal_eta: "通常階層 η",
-        enigmatic: "番外階層", enigmatic_eta: "番外階層 η",
-        sublevel: "亜階層", sublevel_eta: "亜階層 η",
-        enigmatic_sublevel_eta: "番外亜階層 η",
-      };
-      const branchKeys = new Set();
-      sourcePages.forEach(page => {
-        const language = String(page.language || "").toUpperCase();
-        const category = normalizeExplorerCategory(page.category);
-        if (!branchLabels[language] || !categoryLabels[category]) return;
-        const key = `${language}:${category}`;
-        if (branchKeys.has(key)) return;
-        branchKeys.add(key);
-        const pages = levelListPagesForCategory(`branch:${language}:${category}`, sourcePages);
-        if (!pages.length) return;
-        const branchCode = branchLabels[language];
-        const label = categoryLabels[category];
-        categories.push({
-          id: `branch:${language}:${category}`,
-          title: `${label} ${branchCode}（${language}）の一覧`,
-          visual: branchCode,
-          wikiTitle: "",
-          pages,
-        });
-      });
-      return categories;
+      // 図鑑と同じ固定9一覧のみを表示する。旧カテゴリ・支部別入口は生成しない。
+      return levelListCategoryDefinitions.map(category => ({
+        ...category,
+        pages: levelListPagesForCategory(category.id, sourcePages),
+      }));
     }
 
     function renderLevelListCategoryTiles() {
@@ -5088,9 +5022,13 @@ HTML_TEMPLATE = r"""
     }
 
     function openLevelListCategory(categoryId) {
+      if (!levelListCategoryDefinitions.some(category => category.id === categoryId)) return;
       currentLevelListCategory = categoryId;
+      const categorySelect = document.getElementById('level-list-category');
+      if (categorySelect.value !== categoryId) categorySelect.value = categoryId;
       selectedLevelPages.clear();
       levelListAnchorUrl = null;
+      visibleLevelListPages = [];
       document.getElementById('level-list-categories').style.display = "none";
       document.getElementById('level-list-browser').style.display = "flex";
       document.getElementById('level-list-filter').style.display = "block";
@@ -5106,6 +5044,8 @@ HTML_TEMPLATE = r"""
       currentLevelListCategory = null;
       selectedLevelPages.clear();
       levelListAnchorUrl = null;
+      visibleLevelListPages = [];
+      document.getElementById('level-list-category').selectedIndex = 0;
       document.getElementById('level-list-browser').style.display = "none";
       document.getElementById('level-list-categories').style.display = "grid";
       document.getElementById('level-list-filter').style.display = "none";
@@ -5476,17 +5416,299 @@ HTML_TEMPLATE = r"""
       host.appendChild(row);
     }
 
+    function appendLevelListAliasGroups(items, host) {
+      const groups = [];
+      items.forEach(page => {
+        let parsed = [];
+        try { parsed = JSON.parse(page.alias_groups || "[]"); } catch (_) {}
+        if (!Array.isArray(parsed)) return;
+        parsed.forEach(group => {
+          if (group && typeof group === "object") groups.push({page, group});
+        });
+      });
+      groups.sort((left, right) =>
+        Number(left.group.section_order || 0) - Number(right.group.section_order || 0) ||
+        Number(left.group.group_order || 0) - Number(right.group.group_order || 0)
+      );
+      groups.forEach(({page, group}) => {
+        const canonical = group.canonical || {};
+        const canonicalPage = {
+          ...page,
+          title: canonical.title || page.title,
+          url: page.url || canonical.url,
+        };
+        const card = document.createElement("div");
+        card.className = "mb-3 rounded-lg border border-[#dfd3b5] bg-white px-3 py-2 shadow-sm";
+        const parent = document.createElement("div");
+        parent.className = "flex flex-wrap items-center gap-2 text-sm font-semibold";
+        appendLevelListPageRow(parent, canonicalPage);
+        const parentTag = document.createElement("span");
+        parentTag.className = "rounded bg-[#eee8d8] px-1.5 py-0.5 text-[10px] text-[#67583c]";
+        parentTag.textContent = "正規記事";
+        parent.appendChild(parentTag);
+        card.appendChild(parent);
+
+        (Array.isArray(group.aliases) ? group.aliases : []).forEach(alias => {
+          if (!alias || !alias.title) return;
+          const child = document.createElement("div");
+          child.className = "ml-4 mt-2 flex flex-wrap items-baseline gap-x-2 gap-y-1 border-l-2 border-[#e8dfca] pl-3 text-sm";
+          const link = document.createElement("a");
+          link.href = canonicalPage.url || "#";
+          link.className = "text-[#8a5a23] hover:underline";
+          link.textContent = alias.title;
+          link.onclick = event => {
+            event.preventDefault();
+            openLevelListPage(canonicalPage);
+          };
+          child.appendChild(link);
+          if (alias.annotation) {
+            const note = document.createElement("span");
+            note.className = "text-xs text-gray-500";
+            note.textContent = "(" + alias.annotation + ")";
+            child.appendChild(note);
+          }
+          const aliasBadge = document.createElement("span");
+          aliasBadge.className = "rounded bg-[#f2ead7] px-1.5 py-0.5 text-[10px] text-[#80643b]";
+          aliasBadge.textContent = "別名（リダイレクト）";
+          child.appendChild(aliasBadge);
+          card.appendChild(child);
+        });
+        host.appendChild(card);
+      });
+    }
+
+    let levelListTermsRenderToken = 0;
+
+    async function renderLevelListTermsIndex() {
+      const token = ++levelListTermsRenderToken;
+      const grid = document.getElementById('level-list-grid');
+      const toc = document.getElementById('level-list-toc');
+      grid.replaceChildren();
+      toc.replaceChildren();
+      visibleLevelListPages = [];
+      const status = document.createElement("p");
+      status.className = "px-4 py-3 text-xs text-gray-500";
+      status.textContent = "用語一覧を読み込んでいます...";
+      grid.appendChild(status);
+      try {
+        const result = await pywebview.api.get_terms_index();
+        if (token !== levelListTermsRenderToken || currentLevelListCategory !== "terms") return;
+        if (result.error) throw new Error(result.error);
+        const data = result.index || {};
+        const sections = Array.isArray(data.sections) ? data.sections : [];
+        const pages = levelListPagesForCategory("terms");
+        const normalizeTermsUrl = value => String(value || "").replace(/\/$/, "").toLocaleLowerCase();
+        const countItems = items => (items || []).reduce((total, item) =>
+          total + 1 + countItems(item.children), 0);
+        const total = sections.reduce((sum, section) =>
+          sum + (section.blocks || []).reduce((subtotal, block) =>
+            subtotal + (block.items ? countItems(block.items) : 0), 0), 0);
+        let itemCounter = 0;
+
+        const addTocLink = (label, target, level = 0) => {
+          const link = document.createElement("a");
+          link.href = "#" + target;
+          link.className = "mb-1 block rounded px-2 py-1 text-gray-700 hover:bg-[#fff7dd] " +
+            (level ? "ml-3 text-xs" : "text-sm");
+          link.textContent = label;
+          link.onclick = event => {
+            event.preventDefault();
+            document.getElementById(target)?.scrollIntoView({block: "start"});
+          };
+          toc.appendChild(link);
+        };
+
+        const renderItem = (item, list) => {
+          const title = String(item.title || "").trim();
+          const description = String(item.description || "");
+          const query = document.getElementById("level-list-filter").value.trim().toLocaleLowerCase();
+          if (query && ![title, description, item.reading].some(value =>
+            String(value || "").toLocaleLowerCase().includes(query))) return;
+          const li = document.createElement("li");
+          li.className = "mb-2";
+          const itemId = "level-list-terms-entry-" + (++itemCounter);
+          li.id = itemId;
+          const page = pages.find(candidate =>
+            normalizeTermsUrl(candidate.url) === normalizeTermsUrl(item.url)
+          );
+          if (page) {
+            if (!visibleLevelListPages.some(existing => existing.url === page.url)) {
+              visibleLevelListPages.push(page);
+            }
+            const row = document.createElement("div");
+            row.className = "mb-1";
+            appendLevelListPageRow(row, page);
+            li.appendChild(row);
+            addTocLink(title, itemId, 1);
+          } else if (title) {
+            const label = document.createElement("span");
+            label.className = "font-medium text-gray-800";
+            label.textContent = title;
+            li.appendChild(label);
+            if (item.url) {
+              const note = document.createElement("span");
+              note.className = "ml-2 text-xs text-amber-700";
+              note.textContent = "（Master DBに正規記事がありません）";
+              li.appendChild(note);
+            }
+            addTocLink(title, itemId, 1);
+          }
+          if (item.reading) {
+            const reading = document.createElement("span");
+            reading.className = "ml-2 text-xs text-gray-500";
+            reading.textContent = "（" + item.reading + "）";
+            li.appendChild(reading);
+          }
+          if (description) {
+            const note = document.createElement("p");
+            note.className = "ml-2 text-sm text-gray-600";
+            note.textContent = description;
+            li.appendChild(note);
+          }
+          if (Array.isArray(item.children) && item.children.length) {
+            const nested = document.createElement(item.children_type === "ordered_list" ? "ol" : "ul");
+            nested.className = item.children_type === "ordered_list"
+              ? "mt-1 list-decimal pl-5" : "mt-1 list-disc pl-5";
+            item.children.forEach(child => renderItem(child, nested));
+            li.appendChild(nested);
+          }
+          list.appendChild(li);
+        };
+
+        grid.replaceChildren();
+        sections.forEach((section, sectionIndex) => {
+          if (section.heading) {
+            const headingLevel = Math.max(3, Math.min(6, Number(section.heading_level || 2) + 1));
+            const heading = document.createElement("h" + headingLevel);
+            heading.id = "level-list-terms-section-" + sectionIndex;
+            heading.className = "mb-3 mt-5 border-b border-[#d8c99e] pb-2 text-lg font-semibold text-[#3f3828]";
+            heading.textContent = section.heading;
+            grid.appendChild(heading);
+            addTocLink(section.heading, heading.id, headingLevel - 3);
+          }
+          (section.blocks || []).forEach(block => {
+            if (block.type === "paragraph") {
+              const paragraph = document.createElement("p");
+              paragraph.className = "my-3 text-sm leading-relaxed text-gray-700";
+              paragraph.textContent = block.text || "";
+              grid.appendChild(paragraph);
+            } else if (block.type === "ordered_list" || block.type === "unordered_list") {
+              const list = document.createElement(block.type === "ordered_list" ? "ol" : "ul");
+              list.className = block.type === "ordered_list"
+                ? "my-3 list-decimal space-y-2 pl-6"
+                : "my-3 list-disc space-y-2 pl-6";
+              if (block.type === "ordered_list" && Number(block.start) > 1) {
+                list.start = Number(block.start);
+              }
+              (block.items || []).forEach(item => renderItem(item, list));
+              grid.appendChild(list);
+            }
+          });
+        });
+
+        if (token !== levelListTermsRenderToken || currentLevelListCategory !== "terms") return;
+        const visibleUrls = new Set(visibleLevelListPages.map(page => page.url));
+        for (const url of selectedLevelPages.keys()) {
+          if (!visibleUrls.has(url)) selectedLevelPages.delete(url);
+        }
+        if (levelListAnchorUrl && !visibleUrls.has(levelListAnchorUrl)) levelListAnchorUrl = null;
+        if (!total) {
+          const empty = document.createElement("p");
+          empty.className = "py-5 text-sm text-gray-600";
+          empty.textContent = "用語一覧の掲載項目がありません。一覧HTMLを更新してください。";
+          grid.appendChild(empty);
+        }
+        document.getElementById("level-list-total").textContent =
+          visibleLevelListPages.length + "件選択可能 / " + total + "項目";
+        toc.classList.toggle("hidden", !sections.length);
+        updateLevelListSelectionControls();
+      } catch (error) {
+        if (token !== levelListTermsRenderToken) return;
+        grid.replaceChildren();
+        const message = document.createElement("p");
+        message.className = "py-5 text-sm text-gray-600";
+        message.textContent = "用語一覧を読み込めません: " + error.message;
+        grid.appendChild(message);
+        visibleLevelListPages = [];
+        selectedLevelPages.clear();
+        levelListAnchorUrl = null;
+        document.getElementById("level-list-total").textContent = "0件";
+        toc.classList.add("hidden");
+        updateLevelListSelectionControls();
+      }
+    }
+
+    function getRenderedLevelListPageOrder(sections) {
+      const orderedPages = [];
+      sections.forEach(section => {
+        let pages = Array.isArray(section.pages) ? section.pages : [];
+        if (currentLevelListCategory === "alias") {
+          const groups = [];
+          pages.forEach(page => {
+            let parsed = [];
+            try { parsed = JSON.parse(page.alias_groups || "[]"); } catch (_) {}
+            if (Array.isArray(parsed)) {
+              parsed.forEach(group => {
+                if (group && typeof group === "object") groups.push({page, group});
+              });
+            }
+          });
+          groups.sort((left, right) =>
+            Number(left.group.section_order || 0) - Number(right.group.section_order || 0) ||
+            Number(left.group.group_order || 0) - Number(right.group.group_order || 0)
+          );
+          pages = groups.map(item => item.page);
+        } else if (section.key === "100-999" && currentLevelListCategory === "normal_eta") {
+          const buckets = new Map();
+          pages.forEach(page => {
+            const number = getIntegerLevelNumber(page);
+            const start = Math.floor(number / 100) * 100;
+            const key = String(start);
+            if (!buckets.has(key)) buckets.set(key, []);
+            buckets.get(key).push(page);
+          });
+          pages = Array.from(buckets.entries())
+            .sort((left, right) => Number(left[0]) - Number(right[0]))
+            .flatMap(([, bucketPages]) => bucketPages);
+        }
+        orderedPages.push(...pages);
+      });
+      return uniqueLevelListPages(orderedPages);
+    }
+
     function renderLevelListSections() {
       const grid = document.getElementById('level-list-grid');
       const toc = document.getElementById('level-list-toc');
       grid.replaceChildren();
       toc.replaceChildren();
       const query = document.getElementById('level-list-filter').value.trim().toLocaleLowerCase();
+      if (currentLevelListCategory === "terms") {
+        renderLevelListTermsIndex();
+        return;
+      }
       const categoryPages = levelListPagesForCategory(currentLevelListCategory);
-      visibleLevelListPages = categoryPages
-        .filter(page => !query || page.title.toLocaleLowerCase().includes(query))
-        .sort(compareWikiIndexOrder);
-      const sections = getLevelListSections(visibleLevelListPages);
+      const filteredPages = categoryPages.filter(page => {
+        if (!query) return true;
+        const searchable = [page.title, page.meta_title, page.meta_title_ja];
+        if (currentLevelListCategory === "alias") {
+          try {
+            (JSON.parse(page.alias_groups || "[]") || []).forEach(group =>
+              (group.aliases || []).forEach(alias => searchable.push(alias.title, alias.annotation))
+            );
+          } catch (_) {}
+        }
+        return searchable.some(value => String(value || "").toLocaleLowerCase().includes(query));
+      });
+      const sections = getLevelListSections(
+        filteredPages.sort(compareWikiIndexOrder),
+        currentLevelListCategory
+      );
+      visibleLevelListPages = getRenderedLevelListPageOrder(sections);
+      const visibleUrls = new Set(visibleLevelListPages.map(page => page.url));
+      for (const url of selectedLevelPages.keys()) {
+        if (!visibleUrls.has(url)) selectedLevelPages.delete(url);
+      }
+      if (levelListAnchorUrl && !visibleUrls.has(levelListAnchorUrl)) levelListAnchorUrl = null;
       if (!sections.length) {
         const message = document.createElement('p');
         message.className = "px-4 py-6 text-sm text-gray-600";
@@ -5522,6 +5744,16 @@ HTML_TEMPLATE = r"""
         heading.style.marginLeft = `${Math.max(0, headingLevel - 3) * 12}px`;
         heading.textContent = section.title;
         grid.appendChild(heading);
+        if (section.wikiCategory) {
+          const dedicatedLink = document.createElement("button");
+          dedicatedLink.type = "button";
+          dedicatedLink.className = section.level === 4
+            ? "mb-2 ml-4 rounded border border-[#d8c99e] bg-[#fff8dc] px-3 py-1.5 text-xs font-semibold text-[#91520f] hover:bg-[#f7edcf]"
+            : "mb-3 rounded border border-[#d8c99e] bg-[#fff8dc] px-3 py-1.5 text-xs font-semibold text-[#91520f] hover:bg-[#f7edcf]";
+          dedicatedLink.textContent = "専用一覧を開く";
+          dedicatedLink.onclick = () => openLevelListCategory(section.wikiCategory);
+          grid.appendChild(dedicatedLink);
+        }
         const tocLink = document.createElement('a');
         tocLink.href = `#${sectionId}`;
         tocLink.className = "block rounded px-2 py-1 text-gray-700 hover:bg-[#fff7dd] hover:text-[#9b3d06]";
@@ -5533,7 +5765,9 @@ HTML_TEMPLATE = r"""
         };
         toc.appendChild(tocLink);
 
-        if (section.key === "100-999" && currentLevelListCategory === "normal_eta") {
+        if (currentLevelListCategory === "alias") {
+          appendLevelListAliasGroups(section.pages, grid);
+        } else if (section.key === "100-999" && currentLevelListCategory === "normal_eta") {
           const hundredGroups = new Map();
           section.pages.forEach(page => {
             const number = getIntegerLevelNumber(page);
@@ -5659,7 +5893,7 @@ HTML_TEMPLATE = r"""
       document.getElementById('level-list-cancel-button').disabled = !busy;
       document.getElementById('level-list-download-button').disabled =
         busy || selectedLevelPages.size === 0;
-      document.getElementById('level-list-language').disabled = busy;
+      document.getElementById('level-list-category').disabled = busy;
       document.getElementById('level-list-filter').disabled = busy;
       document.getElementById('level-list-overwrite').disabled = busy;
       document.querySelectorAll('#view-data-tools button').forEach(button => {
@@ -5677,11 +5911,13 @@ HTML_TEMPLATE = r"""
       setLevelListTaskBusy(true);
       document.getElementById('level-list-log').textContent = "";
       document.getElementById('level-list-task-status').textContent =
-        `選択した${pages.length}件のLevel情報をオフライン保存しています...`;
+        `選択した${pages.length}件の記事をオフライン保存しています...`;
       try {
         const result = await pywebview.api.start_level_list_offline_save(
           pages,
-          document.getElementById('level-list-overwrite').checked
+          document.getElementById('level-list-overwrite').checked,
+          true,
+          currentLevelListCategory
         );
         if (result.status !== "started") {
           setLevelListTaskBusy(false);

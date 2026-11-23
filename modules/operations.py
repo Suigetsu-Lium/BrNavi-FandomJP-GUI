@@ -283,6 +283,158 @@ def load_level_list_pages(language):
     return [page for page in pages if is_supported_level_list_url(page["url"])]
 
 
+def _normalize_level_list_category(value):
+    """Mirror gui_app.py normalizeExplorerCategory() for backend validation."""
+    category = str(value or "").strip().casefold()
+    if re.search(r"番外.*亜階層|enigmatic_sublevel", category):
+        return "enigmatic_sublevel_eta"
+    if re.search(r"通常.*亜階層|sublevel", category):
+        return "sublevel_eta" if re.search(r"η|eta", category) else "sublevel"
+    if re.search(r"番外階層|enigmatic", category):
+        return "enigmatic_eta" if re.search(r"η|eta", category) else "enigmatic"
+    if re.search(r"通常階層|normal", category):
+        return "normal_eta" if re.search(r"η|eta", category) else "normal"
+    if re.search(r"別名|alias", category):
+        return "alias"
+    if re.search(r"翻訳|translation", category):
+        return "translation"
+    if re.search(r"コンテスト|contest", category):
+        return "contest"
+    return category
+
+
+def _row_belongs_to_level_list_category(row, category_id):
+    """Check the selected canonical row against one of the fixed nine indexes."""
+    category = _normalize_level_list_category(row.get("category"))
+    language = str(row.get("language") or "unknown").strip().upper()
+    source_type = str(row.get("source_type") or "").strip().casefold()
+    source_types = {
+        value.strip().casefold()
+        for value in source_type.split("|")
+        if value.strip()
+    }
+    indexes = {
+        value.strip().casefold()
+        for value in str(row.get("indexes") or "").split("|")
+        if value.strip()
+    }
+    try:
+        memberships = json.loads(row.get("index_memberships") or "[]")
+    except (TypeError, ValueError):
+        memberships = []
+    membership_names = {
+        str(item.get("index_name") or "").strip().casefold()
+        for item in memberships
+        if isinstance(item, dict)
+    } if isinstance(memberships, list) else set()
+    has_translation = "translation" in source_types
+    is_branch = language in {"RU", "PL", "IT", "PT", "UA", "TR", "ZH"}
+    if not is_branch and isinstance(memberships, list):
+        for membership in memberships:
+            if not isinstance(membership, dict) or membership.get("index_name") != "hierarchy":
+                continue
+            for section in membership.get("section_path") or []:
+                if not isinstance(section, dict):
+                    continue
+                heading = re.sub(r"\s*\[[ xX✓✔]?\]\s*$", "", str(section.get("heading") or "")).strip().upper()
+                if heading in {"A", "PL", "IT", "PT", "UA", "TR", "ZH"}:
+                    is_branch = True
+                    break
+    if not is_branch:
+        title = str(row.get("title") or "").strip()
+        is_branch = bool(
+            re.match(r"^Level\s+(?:A|PL|UA|ZH)\s*-?\s*\(?-?\d", title, re.IGNORECASE)
+            or re.match(r"^Level\s+-?\d+(?:\.\d+)*(?:\s*-\s*|\s+)(?:IT|PT|TR)\b", title, re.IGNORECASE)
+        )
+    default_language = language in {"EN", "JP", "UNKNOWN"}
+    if category_id == "all":
+        return "hierarchy" in membership_names or "hierarchy" in indexes
+    if category_id == "normal":
+        return (
+            category == "normal" and not is_branch and not has_translation
+            and (language == "EN" or "normal" in membership_names or "normal" in indexes)
+        )
+    if category_id == "normal_eta":
+        return category == "normal_eta" and default_language and not is_branch and not has_translation
+    if category_id == "enigmatic":
+        return category in {"enigmatic", "enigmatic_eta"} and default_language and not is_branch and not has_translation
+    if category_id == "sublevel":
+        return category in {"sublevel", "sublevel_eta", "enigmatic_sublevel_eta"} and default_language and not is_branch and not has_translation
+    if category_id == "alias":
+        try:
+            groups = json.loads(row.get("alias_groups") or "[]")
+        except (TypeError, ValueError):
+            groups = []
+        return isinstance(groups, list) and bool(groups)
+    if category_id == "terms":
+        return category == "terms" or source_type == "terms" or "terms" in indexes
+    if category_id == "translation":
+        return has_translation or category == "translation"
+    if category_id == "contest":
+        return category in {"contest", "contest_level"} or "contest" in indexes
+    return False
+
+
+def validate_level_list_pages(pages, category_id=None):
+    """Resolve selected GUI pages to canonical Master DB records in one fixed list.
+
+    Alias-only redirect URLs are rejected. If the Master catalog is available,
+    each selected URL must be a canonical record belonging to the active list.
+    Older installations without a Master catalog retain the validated TXT
+    compatibility path.
+    """
+    if not isinstance(pages, list) or not pages:
+        raise ValueError("オフライン保存する記事を選択してください。")
+    if category_id not in {
+        "all", "normal", "normal_eta", "enigmatic", "sublevel",
+        "alias", "terms", "translation", "contest",
+    }:
+        raise ValueError("保存対象の一覧カテゴリが不正です。")
+
+    catalog_rows = _load_master_catalog()
+    catalog_by_url = {
+        str(row.get("url") or "").strip(): row
+        for row in catalog_rows
+        if str(row.get("url") or "").strip()
+    }
+    redirect_urls = _alias_redirect_urls(catalog_rows)
+    validated = []
+    seen_urls = set()
+
+    for page in pages:
+        if (
+            not isinstance(page, dict)
+            or not str(page.get("title") or "").strip()
+            or not is_supported_level_list_url(page.get("url"))
+        ):
+            raise ValueError("選択リストに不正なページが含まれています。")
+
+        url = str(page.get("url") or "").strip()
+        if url in redirect_urls:
+            raise ValueError("別名リダイレクトURLは保存対象にできません。")
+        if url in seen_urls:
+            continue
+
+        if catalog_rows:
+            canonical = catalog_by_url.get(url)
+            if canonical is None:
+                raise ValueError("選択した記事は現在のMaster DBに存在しない正規記事です。")
+            if not _row_belongs_to_level_list_category(canonical, category_id):
+                raise ValueError("選択した記事は現在の一覧カテゴリに所属していません。")
+            resolved = dict(canonical)
+        else:
+            resolved = dict(page)
+
+        resolved["title"] = str(resolved.get("title") or page.get("title") or "").strip()
+        resolved["url"] = url
+        validated.append(resolved)
+        seen_urls.add(url)
+
+    if not validated:
+        raise ValueError("保存可能な正規記事がありません。")
+    return validated
+
+
 def is_supported_level_list_url(url):
     parsed = urlparse(str(url or ""))
     path_segments = parsed.path.strip("/").split("/")
@@ -480,11 +632,14 @@ def run_maintenance_operation(task_name, options=None, context=None):
         pages = options.get("pages", [])
         catalog_rows = _load_master_catalog()
         redirect_urls = _alias_redirect_urls(catalog_rows)
-        pages = [
-            page for page in pages
-            if isinstance(page, dict)
-            and str(page.get("url") or "").strip() not in redirect_urls
-        ]
+        if options.get("require_catalog"):
+            pages = validate_level_list_pages(pages, options.get("category_id"))
+        else:
+            pages = [
+                page for page in pages
+                if isinstance(page, dict)
+                and str(page.get("url") or "").strip() not in redirect_urls
+            ]
         overwrite = bool(options.get("overwrite", False))
         counts = {"downloaded": 0, "skipped": 0, "failed": 0}
         total = len(pages)

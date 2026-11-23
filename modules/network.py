@@ -49,6 +49,7 @@ from modules.extractor import (
 BASE_DIR = str(get_application_dir())
 
 HTML_DIR = os.path.join(BASE_DIR, "downloaded_fandom_html")
+MASTER_CATALOG_FILE = os.path.join(BASE_DIR, "parsed_index", "pages_master.csv")
 
 EDGES_OUTPUT_FILE = os.path.join(BASE_DIR, EDGE_FILENAME)
 NODES_OUTPUT_FILE = os.path.join(BASE_DIR, NODE_FILENAME)
@@ -334,6 +335,153 @@ def _load_extracted_metadata():
     return metadata
 
 
+def _route_title_key(value):
+    return re.sub(
+        r"\s+", " ",
+        unicodedata.normalize("NFKC", str(value or "")).strip()
+    ).casefold()
+
+
+def _load_master_alias_catalog():
+    """Load canonical article URLs and alias-to-canonical title mappings from Master DB."""
+    alias_to_canonical = {}
+    ambiguous_aliases = set()
+    canonical_records = {}
+    alias_redirect_urls = set()
+    canonical_urls = set()
+    try:
+        with open(MASTER_CATALOG_FILE, "r", encoding="utf-8-sig", newline="") as stream:
+            for row in csv.DictReader(stream):
+                row_title = str(row.get("title") or "").strip()
+                if not row_title:
+                    continue
+                row_url = str(row.get("url") or "").strip()
+                try:
+                    row_memberships = json.loads(row.get("index_memberships") or "[]")
+                except (TypeError, ValueError):
+                    row_memberships = []
+                if isinstance(row_memberships, list) and any(
+                    isinstance(item, dict)
+                    and str(item.get("index_name") or "").strip().casefold() != "alias"
+                    for item in row_memberships
+                ):
+                    canonical_urls.add(row_url)
+                elif not row_memberships and any(
+                    value.strip().casefold() != "alias"
+                    for value in str(row.get("indexes") or "").split("|")
+                    if value.strip()
+                ):
+                    canonical_urls.add(row_url)
+                row_key = _route_title_key(row_title)
+                canonical_records.setdefault(row_key, {
+                    "title": row_title,
+                    "url": row_url,
+                    "aliases": [],
+                })
+                try:
+                    groups = json.loads(row.get("alias_groups") or "[]")
+                except (TypeError, ValueError):
+                    groups = []
+                if not isinstance(groups, list):
+                    continue
+                for group in groups:
+                    if not isinstance(group, dict):
+                        continue
+                    canonical = group.get("canonical") or {}
+                    canonical_title = str(canonical.get("title") or row_title).strip()
+                    canonical_url = str(canonical.get("url") or row_url).strip()
+                    if not canonical_title:
+                        continue
+                    canonical_key = _route_title_key(canonical_title)
+                    record = canonical_records.setdefault(canonical_key, {
+                        "title": canonical_title,
+                        "url": canonical_url,
+                        "aliases": [],
+                    })
+                    if canonical_url:
+                        record["url"] = canonical_url
+                        canonical_urls.add(canonical_url)
+                    if row_key != canonical_key:
+                        alias_to_canonical[row_key] = canonical_title
+                    for alias in group.get("aliases", []):
+                        if not isinstance(alias, dict):
+                            continue
+                        alias_title = str(alias.get("title") or "").strip()
+                        if not alias_title:
+                            continue
+                        if alias_title not in record["aliases"]:
+                            record["aliases"].append(alias_title)
+                        alias_url = str(alias.get("url") or "").strip()
+                        if alias_url:
+                            alias_redirect_urls.add(alias_url)
+                        alias_key = _route_title_key(alias_title)
+                        previous = alias_to_canonical.get(alias_key)
+                        if previous and _route_title_key(previous) != canonical_key:
+                            ambiguous_aliases.add(alias_key)
+                        else:
+                            alias_to_canonical[alias_key] = canonical_title
+    except (OSError, csv.Error, UnicodeError):
+        pass
+    for key in ambiguous_aliases:
+        alias_to_canonical.pop(key, None)
+    return alias_to_canonical, canonical_records, alias_redirect_urls - canonical_urls
+
+
+def _canonicalize_route_nodes(nodes_info, page_urls, unique_edges):
+    """Canonicalize route node titles and remap every related edge reference."""
+    alias_to_canonical, canonical_records, _redirect_urls = _load_master_alias_catalog()
+    if not alias_to_canonical and not canonical_records:
+        return {}, {}
+
+    title_map = {}
+    merged_nodes = {}
+    merged_urls = {}
+    for original_title, item in nodes_info.items():
+        key = _route_title_key(original_title)
+        canonical_title = alias_to_canonical.get(key, original_title)
+        master_record = canonical_records.get(_route_title_key(canonical_title))
+        if master_record:
+            canonical_title = master_record["title"]
+        title_map[original_title] = canonical_title
+        target = merged_nodes.setdefault(canonical_title, {
+            "Id": canonical_title,
+            "Label": canonical_title,
+            "Comprehension": "",
+            "Danger": "",
+        })
+        for field in ("Comprehension", "Danger"):
+            if not target.get(field) and item.get(field):
+                target[field] = item[field]
+        source_url = page_urls.get(original_title, "")
+        if master_record and master_record.get("url"):
+            source_url = master_record["url"]
+        if source_url and not merged_urls.get(canonical_title):
+            merged_urls[canonical_title] = source_url
+
+    remapped_edges = {}
+    for evidence in unique_edges.values():
+        remapped = dict(evidence)
+        for field in ("Source", "Target", "Article"):
+            remapped[field] = title_map.get(
+                remapped.get(field), alias_to_canonical.get(
+                    _route_title_key(remapped.get(field)), remapped.get(field)
+                )
+            )
+        identity = (
+            remapped["Source"], remapped["Target"], remapped["Article"],
+            remapped["Relation_Type"], remapped["Certainty"], remapped["Raw_Text"],
+        )
+        remapped_edges[identity] = remapped
+
+    nodes_info.clear()
+    nodes_info.update(merged_nodes)
+    page_urls.clear()
+    page_urls.update(merged_urls)
+    unique_edges.clear()
+    unique_edges.update(remapped_edges)
+    return alias_to_canonical, canonical_records
+
+
 def process_backrooms_data(context=None):
     """
     保存済みHTMLからNodes / Edges / Evidenceの3ファイルを生成する。
@@ -392,6 +540,27 @@ def process_backrooms_data(context=None):
             ),
             key=lambda path: os.path.basename(path).casefold(),
         )
+    _, _, redirect_urls = _load_master_alias_catalog()
+    if redirect_urls and html_files:
+        filtered_html_files = []
+        skipped_redirects = 0
+        for html_path in html_files:
+            try:
+                with open(html_path, "r", encoding="utf-8-sig", errors="replace") as stream:
+                    header = stream.read(8192)
+            except OSError:
+                filtered_html_files.append(html_path)
+                continue
+            url_match = re.search(r"BRNAVI_META_INFO:.*?\bURL=([^|\s>]+)", header)
+            source_url = url_match.group(1).strip() if url_match else ""
+            if source_url and source_url in redirect_urls:
+                skipped_redirects += 1
+                continue
+            filtered_html_files.append(html_path)
+        html_files = filtered_html_files
+        if skipped_redirects:
+            log(f"Excluded alias redirect HTML from route parsing: {skipped_redirects}")
+
     if not html_files:
         log(f"【エラー】解析対象のHTMLがありません: {HTML_DIR}")
         log("「HTML取得・データ抽出」タブからLevel記事を保存してから再実行してください。")
@@ -660,6 +829,10 @@ def process_backrooms_data(context=None):
         log("既存の接続CSVは変更していません。HTML取得元と記事本文を確認してください。")
         return False
 
+    alias_to_canonical, canonical_records = _canonicalize_route_nodes(
+        nodes_info, page_urls, unique_edges
+    )
+
     for node_id, item in nodes_info.items():
         for alias in (node_id, item.get("Label")):
             metadata = extracted_metadata.get(_metadata_key(alias), {})
@@ -672,17 +845,21 @@ def process_backrooms_data(context=None):
     node_id_by_title = {}
     nodes_rows = []
     for title, item in nodes_info.items():
-        canonical_url = page_urls.get(title, "")
-        node_id = _node_identity(title, canonical_url)
+        master_record = canonical_records.get(_route_title_key(title), {})
+        canonical_title = master_record.get("title") or item.get("Label") or title
+        canonical_url = master_record.get("url") or page_urls.get(title, "")
+        node_id = _node_identity(canonical_title, canonical_url)
         node_id_by_title[title] = node_id
+        node_aliases = list(master_record.get("aliases") or [])
+        if title and title != canonical_title and title not in node_aliases:
+            node_aliases.append(title)
+        if item.get("Label") and item.get("Label") != canonical_title and item.get("Label") not in node_aliases:
+            node_aliases.append(item.get("Label"))
         nodes_rows.append({
             "Node_ID": node_id,
-            "Canonical_Title": item.get("Label") or title,
+            "Canonical_Title": canonical_title,
             "Canonical_URL": canonical_url,
-            "Aliases": json.dumps(
-                [title] if title and title != (item.get("Label") or title) else [],
-                ensure_ascii=False,
-            ),
+            "Aliases": json.dumps(node_aliases, ensure_ascii=False),
             "Comprehension": item.get("Comprehension", ""),
             "Danger": item.get("Danger", ""),
             "Node_Type": classify_route_node(title),

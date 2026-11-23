@@ -1,6 +1,7 @@
 """Non-interactive application operations shared by the GUI and CLI."""
 
 import csv
+import json
 import re
 from pathlib import Path
 from urllib.parse import urlparse
@@ -18,6 +19,7 @@ from modules.update_database import execute_update
 
 LEVEL_LIST_DIR = get_application_dir() / "level_lists"
 MASTER_CATALOG_FILE = get_application_dir() / "parsed_index" / "pages_master.csv"
+DOWNLOADED_HTML_DIR = get_application_dir() / "downloaded_fandom_html"
 LEVEL_LIST_CATEGORY = re.compile(r"^\[(.*?)\]\s+\((.*?)\)\s*$")
 LEVEL_LIST_TITLE = re.compile(r"^\[\d+\]\s+(.+?)\s*$")
 FANDOM_WIKI_HOST = "backrooms.fandom.com"
@@ -30,16 +32,84 @@ class OperationResult:
     details: object = None
 
 
+def _alias_redirect_urls(rows):
+    """Return alias redirect targets, excluding URLs that are canonical articles."""
+    alias_urls = set()
+    canonical_urls = set()
+    for row in rows:
+        try:
+            groups = json.loads(row.get("alias_groups") or "[]")
+        except (TypeError, ValueError):
+            groups = []
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            canonical = group.get("canonical") or {}
+            canonical_url = str(canonical.get("url") or "").strip()
+            if canonical_url:
+                canonical_urls.add(canonical_url)
+            for alias in group.get("aliases", []):
+                if isinstance(alias, dict):
+                    alias_url = str(alias.get("url") or "").strip()
+                    if alias_url:
+                        alias_urls.add(alias_url)
+    for row in rows:
+        row_url = str(row.get("url") or "").strip()
+        if row_url and _has_non_alias_membership(row):
+            canonical_urls.add(row_url)
+    return alias_urls - canonical_urls
+
+
+def _has_non_alias_membership(row):
+    try:
+        memberships = json.loads(row.get("index_memberships") or "[]")
+    except (TypeError, ValueError):
+        memberships = []
+    if isinstance(memberships, list) and memberships:
+        return any(
+            isinstance(item, dict)
+            and str(item.get("index_name") or "").strip().casefold() != "alias"
+            for item in memberships
+        )
+    indexes = [
+        value.strip().casefold()
+        for value in str(row.get("indexes") or "").split("|")
+        if value.strip()
+    ]
+    return any(value != "alias" for value in indexes)
+
+
+def _saved_html_url(path):
+    """Read the original Wiki URL from a saved HTML metadata header."""
+    try:
+        with Path(path).open("r", encoding="utf-8-sig", errors="replace") as stream:
+            header = stream.read(8192)
+    except OSError:
+        return ""
+    match = re.search(r"BRNAVI_META_INFO:.*?\bURL=([^|\s>]+)", header)
+    return match.group(1).strip() if match else ""
+
+
 def _load_master_catalog():
-    """Read the canonical catalog generated from the downloaded index HTML."""
+    """Read only canonical article records from the Master catalog."""
     master_path = MASTER_CATALOG_FILE
     if not master_path.is_file():
         return []
     try:
         with master_path.open("r", encoding="utf-8-sig", newline="") as stream:
-            return [dict(row) for row in csv.DictReader(stream) if row.get("url")]
+            rows = [dict(row) for row in csv.DictReader(stream) if row.get("url")]
     except (OSError, csv.Error, UnicodeError):
         return []
+    redirect_urls = _alias_redirect_urls(rows)
+    return [
+        row for row in rows
+        if not (
+            str(row.get("url") or "").strip() in redirect_urls
+            and not _has_non_alias_membership(row)
+        )
+    ]
 
 
 def get_level_list_languages():
@@ -108,6 +178,7 @@ def load_level_list_pages(language):
                 "source_type": str(row.get("source_type") or "").strip(),
                 "indexes": str(row.get("indexes") or "").strip(),
                 "index_memberships": str(row.get("index_memberships") or "[]"),
+                "alias_groups": str(row.get("alias_groups") or "[]"),
                 "section_path": str(row.get("section_path") or "[]"),
                 "section_order": str(row.get("section_order") or "0"),
                 "page_order": str(row.get("page_order") or "0"),
@@ -145,7 +216,7 @@ def load_level_list_pages(language):
                     "category": category_code or category_label,
                     "category_label": category_label, "language": language,
                     "source_type": "", "indexes": "", "translation_section": "",
-                    "index_memberships": "[]", "section_path": "[]",
+                    "index_memberships": "[]", "alias_groups": "[]", "section_path": "[]",
                     "section_order": "0", "page_order": "0",
                 }
                 continue
@@ -162,6 +233,8 @@ def load_level_list_pages(language):
                 current_page["translation_section"] = stripped[len("TRANSLATION_SECTION:"):].strip()
             elif stripped.startswith("INDEX_MEMBERSHIPS:"):
                 current_page["index_memberships"] = stripped[len("INDEX_MEMBERSHIPS:"):].strip()
+            elif stripped.startswith("ALIAS_GROUPS:"):
+                current_page["alias_groups"] = stripped[len("ALIAS_GROUPS:"):].strip()
             elif stripped.startswith("SECTION_PATH:"):
                 current_page["section_path"] = stripped[len("SECTION_PATH:"):].strip()
             elif stripped.startswith("SECTION_ORDER:"):
@@ -200,7 +273,31 @@ def run_maintenance_operation(task_name, options=None, context=None):
         )
 
     if task_name == "extract_info":
-        rows = extract_levels(interactive=False, context=context)
+        html_files = sorted(
+            path for path in DOWNLOADED_HTML_DIR.glob("*")
+            if path.is_file() and path.suffix.casefold() in {".html", ".htm"}
+        ) if DOWNLOADED_HTML_DIR.is_dir() else []
+        redirect_urls = _alias_redirect_urls(_load_master_catalog())
+        if html_files and redirect_urls:
+            canonical_html_files = [
+                path for path in html_files
+                if _saved_html_url(path) not in redirect_urls
+            ]
+            skipped_redirects = len(html_files) - len(canonical_html_files)
+            if not canonical_html_files:
+                return OperationResult(
+                    success=False,
+                    message="\u4fdd\u5b58HTML\u304c\u3059\u3079\u3066\u5225\u540d\u30ea\u30c0\u30a4\u30ec\u30af\u30c8\u30da\u30fc\u30b8\u306e\u305f\u3081\u3001\u62bd\u51fa\u3092\u4e2d\u6b62\u3057\u307e\u3057\u305f\u3002",
+                    details={"skipped_redirects": skipped_redirects},
+                )
+            rows = extract_levels(
+                html_files=canonical_html_files,
+                interactive=False,
+                context=context,
+            )
+            context.log(f"\u5225\u540d\u30ea\u30c0\u30a4\u30ec\u30af\u30c8HTML\u3092\u62bd\u51fa\u5bfe\u8c61\u304b\u3089\u9664\u5916: {skipped_redirects}")
+        else:
+            rows = extract_levels(interactive=False, context=context)
         success = rows is not None
         return OperationResult(
             success=success,
@@ -237,6 +334,14 @@ def run_maintenance_operation(task_name, options=None, context=None):
         if not html_path.is_file():
             raise FileNotFoundError("抽出対象の保存済みWiki HTMLがありません。")
 
+        saved_url = _saved_html_url(html_path)
+        if saved_url and saved_url in _alias_redirect_urls(_load_master_catalog()):
+            return OperationResult(
+                success=False,
+                message="\u5225\u540d\u30ea\u30c0\u30a4\u30ec\u30af\u30c8\u5c02\u7528\u30da\u30fc\u30b8\u306f\u672c\u6587\u62bd\u51fa\u5bfe\u8c61\u3067\u306f\u3042\u308a\u307e\u305b\u3093\u3002\u6b63\u898f\u8a18\u4e8b\u3092\u6307\u5b9a\u3057\u3066\u304f\u3060\u3055\u3044\u3002",
+                details={"redirect_url": saved_url},
+            )
+
         context.log(f"保存した記事から本文・メタデータを抽出します: {html_path.name}")
         extracted_rows = extract_levels(
             html_files=[html_path],
@@ -266,6 +371,13 @@ def run_maintenance_operation(task_name, options=None, context=None):
 
     if task_name == "download_level_list_html":
         pages = options.get("pages", [])
+        catalog_rows = _load_master_catalog()
+        redirect_urls = _alias_redirect_urls(catalog_rows)
+        pages = [
+            page for page in pages
+            if isinstance(page, dict)
+            and str(page.get("url") or "").strip() not in redirect_urls
+        ]
         overwrite = bool(options.get("overwrite", False))
         counts = {"downloaded": 0, "skipped": 0, "failed": 0}
         total = len(pages)
@@ -309,6 +421,13 @@ def run_maintenance_operation(task_name, options=None, context=None):
 
     if task_name == "save_level_list_offline":
         pages = options.get("pages", [])
+        catalog_rows = _load_master_catalog()
+        redirect_urls = _alias_redirect_urls(catalog_rows)
+        pages = [
+            page for page in pages
+            if isinstance(page, dict)
+            and str(page.get("url") or "").strip() not in redirect_urls
+        ]
         overwrite = bool(options.get("overwrite", False))
         counts = {"downloaded": 0, "skipped": 0, "failed": 0}
         total = len(pages)

@@ -21,6 +21,7 @@ Master Databaseを優先して検索し、
 """
 
 import csv
+import json
 import re
 import webbrowser
 from pathlib import Path
@@ -216,6 +217,7 @@ def load_master_database():
                     ),
 
                     "index_memberships": clean_value(row.get("index_memberships", "[]")),
+                    "alias_groups": clean_value(row.get("alias_groups", "[]")) or "[]",
                     "section_path": clean_value(row.get("section_path", "[]")),
                     "section_order": clean_value(row.get("section_order", "0")),
                     "page_order": clean_value(row.get("page_order", "0")),
@@ -248,8 +250,55 @@ def load_master_database():
     ):
         return database
 
-    return database
+    alias_urls = set()
+    canonical_urls = set()
+    for page in database.values():
+        try:
+            groups = json.loads(page.get("alias_groups") or "[]")
+        except (TypeError, ValueError):
+            groups = []
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            canonical = group.get("canonical") or {}
+            canonical_url = clean_value(canonical.get("url"))
+            if canonical_url:
+                canonical_urls.add(canonical_url)
+            for alias in group.get("aliases", []):
+                if isinstance(alias, dict):
+                    alias_url = clean_value(alias.get("url"))
+                    if alias_url:
+                        alias_urls.add(alias_url)
 
+    redirect_only_urls = alias_urls - canonical_urls
+    for url in redirect_only_urls:
+        page = database.get(url)
+        if not page:
+            continue
+        try:
+            memberships = json.loads(page.get("index_memberships") or "[]")
+        except (TypeError, ValueError):
+            memberships = []
+        if isinstance(memberships, list) and memberships:
+            has_other_index = any(
+                isinstance(item, dict)
+                and clean_value(item.get("index_name")).casefold() != "alias"
+                for item in memberships
+            )
+        else:
+            indexes = [
+                value.strip().casefold()
+                for value in str(page.get("indexes") or "").split("|")
+                if value.strip()
+            ]
+            has_other_index = any(value != "alias" for value in indexes)
+        if not has_other_index:
+            database.pop(url, None)
+
+
+    return database
 
 # =============================================================================
 # Master Database検索
@@ -365,6 +414,26 @@ def find_master_candidates(
                 page
             )
 
+            continue
+
+        # ---------------------------------------------------------------------
+        # Alias titles and annotations also resolve to their canonical master record.
+        # ---------------------------------------------------------------------
+
+        try:
+            alias_groups = json.loads(page.get("alias_groups") or "[]")
+        except (TypeError, ValueError):
+            alias_groups = []
+        alias_values = []
+        if isinstance(alias_groups, list):
+            for group in alias_groups:
+                if not isinstance(group, dict):
+                    continue
+                for alias in group.get("aliases", []):
+                    if isinstance(alias, dict):
+                        alias_values.extend((alias.get("title", ""), alias.get("annotation", "")))
+        if any(query_lower in str(value).casefold() for value in alias_values if value):
+            results.append(page)
             continue
 
         # ---------------------------------------------------------------------

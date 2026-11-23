@@ -142,9 +142,9 @@ def resolve_node_candidates(query, nodes):
 
 def _node(node_id, nodes):
     item = nodes.get(node_id, {})
-    aliases = item.get("aliases", [])
-    display_id = (aliases[0] if aliases else item.get("title") or node_id)
-    return {"id": display_id, "node_id": node_id, **item}
+    # Aliases are lookup keys only. All route labels and IDs use Canonical_Title.
+    canonical_title = _clean(item.get("title")) or node_id
+    return {"id": canonical_title, "node_id": node_id, **item}
 
 
 def _edge_allowed(info, *, include_uncertain=True, include_unknown=True,

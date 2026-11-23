@@ -385,6 +385,7 @@ def build_language_database(
                         )
                     ),
                     "index_memberships": clean(row.get("index_memberships")),
+                    "alias_groups": clean(row.get("alias_groups")) or "[]",
                     "section_path": section_path,
                     "section_order": section_order,
                     "page_order": page_order,
@@ -570,6 +571,8 @@ def save_language_txt(
 
                 if page.get("index_memberships"):
                     f.write(f"      INDEX_MEMBERSHIPS: {page['index_memberships']}\n")
+                if page.get("alias_groups"):
+                    f.write(f"      ALIAS_GROUPS: {page['alias_groups']}\n")
                 if page.get("section_path"):
                     f.write(f"      SECTION_PATH: {page['section_path']}\n")
                 f.write(f"      SECTION_ORDER: {page.get('section_order', '0')}\n")

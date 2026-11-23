@@ -866,6 +866,163 @@ def get_strikethrough_spans(anchor, meta_title="", meta_title_ja=""):
 # リンク抽出
 # =============================================================================
 
+def _extract_alias_annotation(list_item):
+    """Extract note text from one nested alias list item."""
+    copied_soup = BeautifulSoup(str(list_item), "html.parser")
+    copied_item = copied_soup.find("li")
+    if copied_item is None:
+        return "", ""
+    for nested in copied_item.find_all(["ul", "ol"]):
+        nested.decompose()
+    for anchor in copied_item.find_all("a"):
+        anchor.decompose()
+    raw = clean_text(copied_item.get_text(" ", strip=True))
+    punctuation = ":" + chr(0xFF1A) + "," + chr(0x3001) + "-" + chr(0x2013) + chr(0x2014)
+    annotation = raw
+    while annotation and (annotation[0].isspace() or annotation[0] in punctuation):
+        annotation = annotation[1:]
+    annotation = annotation.strip()
+    if len(annotation) >= 2 and (
+        (annotation[0], annotation[-1]) in {("(", ")"), (chr(0xFF08), chr(0xFF09))}
+    ):
+        annotation = annotation[1:-1].strip()
+    return annotation, raw
+
+
+def extract_alias_links_from_html(html):
+    """
+    Parse each outer list item as one canonical article and its nested list items as aliases.
+    Keep visible link names independent from their target URLs.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    roots = find_content_roots(soup)
+    root = roots[0] if roots else soup
+    results = []
+    seen_memberships = set()
+    heading_stack = []
+    section_order = 0
+    group_order = 0
+    heading_names = {"h1", "h2", "h3", "h4", "h5", "h6"}
+
+    def make_page_row(anchor, section_path, section_order_value, page_order_value, alias_groups):
+        url = normalize_url(anchor.get("href"))
+        title = extract_page_title_from_anchor(anchor)
+        if not url or not is_wiki_page(url) or is_excluded_url(url) or not title:
+            return None
+        membership_key = (url, json.dumps(section_path, ensure_ascii=False, sort_keys=True))
+        if membership_key in seen_memberships:
+            if alias_groups:
+                section_json = json.dumps(section_path, ensure_ascii=False)
+                for existing in results:
+                    if existing.get("url") != url or existing.get("section_path") != section_json:
+                        continue
+                    try:
+                        existing_groups = json.loads(existing.get("alias_groups") or "[]")
+                    except (TypeError, ValueError):
+                        existing_groups = []
+                    if not isinstance(existing_groups, list):
+                        existing_groups = []
+                    for group in alias_groups:
+                        if isinstance(group, dict) and group not in existing_groups:
+                            existing_groups.append(group)
+                    existing["alias_groups"] = json.dumps(existing_groups, ensure_ascii=False)
+                    break
+            return None
+        if is_excluded_title(title):
+            return None
+        spans = get_strikethrough_spans(anchor)
+        membership = {
+            "index_name": "alias",
+            "section_path": section_path,
+            "section_order": section_order_value,
+            "page_order": page_order_value,
+        }
+        seen_memberships.add(membership_key)
+        return {
+            "title": title,
+            "meta_title": "",
+            "meta_title_ja": "",
+            "has_strikethrough": bool(spans),
+            "strikethrough_spans": json.dumps(spans, ensure_ascii=False),
+            "url": url,
+            "index_name": "alias",
+            "section_path": json.dumps(section_path, ensure_ascii=False),
+            "section_order": section_order_value,
+            "page_order": page_order_value,
+            "index_memberships": json.dumps([membership], ensure_ascii=False),
+            "alias_groups": json.dumps(alias_groups, ensure_ascii=False),
+        }
+
+    for element in root.find_all(list(heading_names) + ["li"]):
+        if element.name in heading_names:
+            level = int(element.name[1])
+            heading = clean_text(element.get_text(" ", strip=True))
+            heading_stack = [item for item in heading_stack if item["level"] < level]
+            if heading:
+                heading_stack.append({"level": level, "heading": heading})
+                section_order += 1
+                group_order = 0
+            continue
+
+        if element.find_parent("li") is not None:
+            continue
+
+        canonical_anchor = next(
+            (
+                anchor for anchor in element.find_all("a", recursive=False)
+                if normalize_url(anchor.get("href"))
+                and is_wiki_page(normalize_url(anchor.get("href")))
+            ),
+            None,
+        )
+        if canonical_anchor is None:
+            continue
+
+        canonical_url = normalize_url(canonical_anchor.get("href"))
+        canonical_title = extract_page_title_from_anchor(canonical_anchor)
+        if not canonical_url or not canonical_title:
+            continue
+
+        group_order += 1
+        section_path = [dict(item) for item in heading_stack]
+        aliases = []
+        for child_item in element.find_all("li"):
+            direct_anchors = child_item.find_all("a", recursive=False)
+            if not direct_anchors:
+                direct_anchors = child_item.find_all("a")
+            for alias_anchor in direct_anchors:
+                alias_url = normalize_url(alias_anchor.get("href"))
+                alias_title = extract_page_title_from_anchor(alias_anchor)
+                if not alias_url or not is_wiki_page(alias_url) or not alias_title:
+                    continue
+                annotation, annotation_raw = _extract_alias_annotation(child_item)
+                aliases.append({
+                    "title": alias_title,
+                    "url": alias_url,
+                    "order": len(aliases) + 1,
+                    "annotation": annotation,
+                    "annotation_raw": annotation_raw,
+                })
+
+        group = {
+            "section_path": section_path,
+            "section_order": section_order,
+            "group_order": group_order,
+            "canonical": {"title": canonical_title, "url": canonical_url},
+            "aliases": aliases,
+        }
+        canonical_row = make_page_row(
+            canonical_anchor, section_path, section_order, group_order, [group]
+        )
+        if canonical_row:
+            results.append(canonical_row)
+
+        # Child links are redirect labels, not independently downloadable article records.
+        # Their titles, redirect URLs, annotations and order remain in alias_groups.
+
+    return results
+
+
 def extract_links_from_html(
     html,
     index_name
@@ -873,6 +1030,9 @@ def extract_links_from_html(
     """
     一覧HTMLからWiki記事リンクを抽出し、DOM上の見出し経路と掲載順を保持する。
     """
+
+    if index_name == "alias":
+        return extract_alias_links_from_html(html)
 
     soup = BeautifulSoup(html, "html.parser")
     roots = find_content_roots(soup)
@@ -947,6 +1107,7 @@ def extract_links_from_html(
             "section_order": section_order,
             "page_order": page_order,
             "index_memberships": json.dumps([membership], ensure_ascii=False),
+            "alias_groups": "[]",
         })
 
     return results
@@ -1196,6 +1357,7 @@ def merge_link_rows(all_rows):
                 "url": url,
                 "indexes": [],
                 "memberships": [],
+                "alias_groups": [],
             }
 
         item = merged[url]
@@ -1218,6 +1380,15 @@ def merge_link_rows(all_rows):
                     item["strikethrough_spans"].append(span)
         if index_name and index_name not in item["indexes"]:
             item["indexes"].append(index_name)
+
+        try:
+            incoming_alias_groups = json.loads(row.get("alias_groups") or "[]")
+        except (TypeError, ValueError):
+            incoming_alias_groups = []
+        if isinstance(incoming_alias_groups, list):
+            for group in incoming_alias_groups:
+                if isinstance(group, dict) and group not in item["alias_groups"]:
+                    item["alias_groups"].append(group)
 
         for membership in memberships:
             if not isinstance(membership, dict):
@@ -1245,6 +1416,7 @@ def merge_link_rows(all_rows):
             "url": item["url"],
             "indexes": "|".join(item["indexes"]),
             "index_memberships": json.dumps(memberships, ensure_ascii=False),
+            "alias_groups": json.dumps(item["alias_groups"], ensure_ascii=False),
             "section_path": json.dumps(section_path, ensure_ascii=False),
             "section_order": primary.get("section_order", 0),
             "page_order": primary.get("page_order", 0),
@@ -1573,6 +1745,7 @@ def main():
             "url",
             "indexes",
             "index_memberships",
+            "alias_groups",
             "section_path",
             "section_order",
             "page_order",
@@ -1611,6 +1784,7 @@ def main():
             "url",
             "indexes",
             "index_memberships",
+            "alias_groups",
             "section_path",
             "section_order",
             "page_order",

@@ -91,6 +91,7 @@ FIELDNAMES = [
     "source_type",
     "indexes",
     "index_memberships",
+    "alias_groups",
     "section_path",
     "section_order",
     "page_order",
@@ -168,6 +169,7 @@ def make_record(
     source_type="",
     indexes="",
     index_memberships="[]",
+    alias_groups="[]",
     section_path="[]",
     section_order="0",
     page_order="0",
@@ -191,6 +193,7 @@ def make_record(
         "source_type": clean(source_type),
         "indexes": clean(indexes),
         "index_memberships": clean(index_memberships) or "[]",
+        "alias_groups": clean(alias_groups) or "[]",
         "section_path": clean(section_path) or "[]",
         "section_order": clean(section_order) or "0",
         "page_order": clean(page_order) or "0",
@@ -260,6 +263,22 @@ def merge_membership_json(old_value, new_value):
         for item in items:
             if isinstance(item, dict) and item not in merged:
                 merged.append(item)
+    return json.dumps(merged, ensure_ascii=False)
+
+
+def merge_alias_groups_json(old_value, new_value):
+    """Merge alias-group JSON arrays while preserving group order."""
+    merged = []
+    for raw_value in (old_value, new_value):
+        try:
+            groups = json.loads(raw_value or "[]")
+        except (TypeError, ValueError):
+            groups = []
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if isinstance(group, dict) and group not in merged:
+                merged.append(group)
     return json.dumps(merged, ensure_ascii=False)
 
 
@@ -361,6 +380,10 @@ def merge_two_records(
         result.get("index_memberships", "[]"),
         incoming.get("index_memberships", "[]"),
     )
+    result["alias_groups"] = merge_alias_groups_json(
+        result.get("alias_groups", "[]"),
+        incoming.get("alias_groups", "[]"),
+    )
     if result.get("section_order", "0") in {"", "0"} and incoming.get("section_order"):
         result["section_path"] = incoming.get("section_path", "[]")
         result["section_order"] = incoming.get("section_order", "0")
@@ -400,6 +423,52 @@ def merge_two_records(
 # classified DB → master DB
 # =============================================================================
 
+def collect_alias_redirect_urls(rows):
+    """Collect redirect-only URLs represented by canonical records' alias_groups."""
+    alias_urls = set()
+    canonical_urls = set()
+    for row in rows:
+        try:
+            groups = json.loads(row.get("alias_groups") or "[]")
+        except (TypeError, ValueError):
+            groups = []
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            canonical = group.get("canonical") or {}
+            canonical_url = str(canonical.get("url") or "").strip()
+            if canonical_url:
+                canonical_urls.add(canonical_url)
+            for alias in group.get("aliases", []):
+                if isinstance(alias, dict):
+                    alias_url = str(alias.get("url") or "").strip()
+                    if alias_url:
+                        alias_urls.add(alias_url)
+    return alias_urls - canonical_urls
+
+
+def has_non_alias_membership(row):
+    """Preserve a URL when another real index independently lists it."""
+    try:
+        memberships = json.loads(row.get("index_memberships") or "[]")
+    except (TypeError, ValueError):
+        memberships = []
+    if isinstance(memberships, list) and memberships:
+        return any(
+            isinstance(item, dict)
+            and str(item.get("index_name") or "").strip().casefold() != "alias"
+            for item in memberships
+        )
+    indexes = [
+        value.strip().casefold()
+        for value in str(row.get("indexes") or "").split("|")
+        if value.strip()
+    ]
+    return any(value != "alias" for value in indexes)
+
+
 def add_classified_records(
     master,
     rows
@@ -410,6 +479,7 @@ def add_classified_records(
 
     added = 0
     merged = 0
+    redirect_urls = collect_alias_redirect_urls(rows)
 
     for row in rows:
 
@@ -418,6 +488,8 @@ def add_classified_records(
         )
 
         if not url:
+            continue
+        if url in redirect_urls and not has_non_alias_membership(row):
             continue
 
         record = make_record(
@@ -432,6 +504,7 @@ def add_classified_records(
             source_type=row.get("source_type"),
             indexes=row.get("indexes"),
             index_memberships=row.get("index_memberships", "[]"),
+            alias_groups=row.get("alias_groups", "[]"),
             section_path=row.get("section_path", "[]"),
             section_order=row.get("section_order", "0"),
             page_order=row.get("page_order", "0"),

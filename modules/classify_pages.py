@@ -410,6 +410,7 @@ def classify_row(row):
         "url": row.get("url", ""),
         "indexes": indexes,
         "index_memberships": index_memberships,
+        "alias_groups": row.get("alias_groups", "[]") or "[]",
         "section_path": section_path,
         "section_order": section_order,
         "page_order": page_order,
@@ -474,6 +475,7 @@ def save_csv(
         "url",
         "indexes",
         "index_memberships",
+        "alias_groups",
         "section_path",
         "section_order",
         "page_order",
@@ -682,6 +684,53 @@ def save_unknowns(rows):
 # メイン
 # =============================================================================
 
+def collect_alias_redirect_urls(rows):
+    """Return redirect-only alias URLs that must not become article records."""
+    alias_urls = set()
+    canonical_urls = set()
+    for row in rows:
+        try:
+            groups = json.loads(row.get("alias_groups") or "[]")
+        except (TypeError, ValueError):
+            groups = []
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            canonical = group.get("canonical") or {}
+            canonical_url = str(canonical.get("url") or "").strip()
+            if canonical_url:
+                canonical_urls.add(canonical_url)
+            for alias in group.get("aliases", []):
+                if not isinstance(alias, dict):
+                    continue
+                alias_url = str(alias.get("url") or "").strip()
+                if alias_url:
+                    alias_urls.add(alias_url)
+    return alias_urls - canonical_urls
+
+
+def has_non_alias_membership(row):
+    """Keep a redirect URL if it is also independently listed in another index."""
+    try:
+        memberships = json.loads(row.get("index_memberships") or "[]")
+    except (TypeError, ValueError):
+        memberships = []
+    if isinstance(memberships, list) and memberships:
+        return any(
+            isinstance(item, dict)
+            and str(item.get("index_name") or "").strip().casefold() != "alias"
+            for item in memberships
+        )
+    indexes = [
+        value.strip().casefold()
+        for value in str(row.get("indexes") or row.get("index_name") or "").split("|")
+        if value.strip()
+    ]
+    return any(value != "alias" for value in indexes)
+
+
 def main():
 
     print()
@@ -707,6 +756,19 @@ def main():
     rows = load_csv(
         INPUT_CSV
     )
+
+    redirect_urls = collect_alias_redirect_urls(rows)
+    original_count = len(rows)
+    rows = [
+        row for row in rows
+        if not (
+            str(row.get("url") or "").strip() in redirect_urls
+            and not has_non_alias_membership(row)
+        )
+    ]
+    removed_redirects = original_count - len(rows)
+    if removed_redirects:
+        print(f"Excluded alias redirect-only records: {removed_redirects}")
 
     if not rows:
 

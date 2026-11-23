@@ -708,6 +708,54 @@ class BackroomsAPI:
                 local_files_by_key.setdefault(key, []).append(path)
 
         pages = load_master_database() or {}
+        redirect_alias_titles = set()
+        redirect_alias_urls = set()
+        independently_listed_titles = set()
+        independently_listed_urls = set()
+        for page in pages.values():
+            try:
+                memberships = json.loads(page.get("index_memberships") or "[]")
+            except (TypeError, ValueError):
+                memberships = []
+            has_independent_membership = (
+                any(
+                    isinstance(item, dict)
+                    and str(item.get("index_name") or "").strip().casefold() != "alias"
+                    for item in memberships
+                )
+                if isinstance(memberships, list) and memberships
+                else any(
+                    value.strip().casefold() != "alias"
+                    for value in str(page.get("indexes") or "").split("|")
+                    if value.strip()
+                )
+            )
+            if has_independent_membership:
+                independently_listed_titles.add(normalized_identity(page.get("title")))
+                independently_listed_urls.add(str(page.get("url") or "").strip().casefold())
+            try:
+                groups = json.loads(page.get("alias_groups") or "[]")
+            except (TypeError, ValueError):
+                groups = []
+            if not isinstance(groups, list):
+                continue
+            for group in groups:
+                if not isinstance(group, dict):
+                    continue
+                canonical_url = str((group.get("canonical") or {}).get("url") or page.get("url") or "").strip()
+                for alias in group.get("aliases", []):
+                    if not isinstance(alias, dict):
+                        continue
+                    alias_title = str(alias.get("title") or "").strip()
+                    alias_url = str(alias.get("url") or "").strip()
+                    if alias_title and normalized_identity(alias_title) not in independently_listed_titles:
+                        redirect_alias_titles.add(normalized_identity(alias_title))
+                    if (
+                        alias_url
+                        and alias_url != canonical_url
+                        and alias_url.casefold() not in independently_listed_urls
+                    ):
+                        redirect_alias_urls.add(alias_url.casefold())
         # Most saved HTML files already have a title-matching filename. Only
         # inspect metadata headers for orphan filenames; reading every HTML
         # file on each initial catalog build is especially slow on OneDrive.
@@ -785,8 +833,18 @@ class BackroomsAPI:
             if local_file in matched_local_files:
                 continue
             level_id = self._extract_level_id_from_filename(local_file)
-            if level_id:
-                saved_titles.setdefault(level_id.casefold(), local_file)
+            if not level_id or normalized_identity(level_id) in redirect_alias_titles:
+                continue
+            if local_file.suffix.casefold() in {".html", ".htm"} and redirect_alias_urls:
+                try:
+                    with local_file.open("r", encoding="utf-8-sig", errors="replace") as stream:
+                        header = stream.read(8192)
+                except OSError:
+                    header = ""
+                url_match = re.search(r"BRNAVI_META_INFO:.*?\bURL=([^|\s>]+)", header)
+                if url_match and url_match.group(1).strip().casefold() in redirect_alias_urls:
+                    continue
+            saved_titles.setdefault(level_id.casefold(), local_file)
         metadata_by_title = {}
         summary_path = BASE_DIR / "extracted_fandom_levels_summary.csv"
         if summary_path.exists():
@@ -804,10 +862,27 @@ class BackroomsAPI:
             if not title:
                 continue
             metadata = metadata_by_title.get(title.casefold(), {})
-            aliases = page.get("aliases", metadata.get("別名", metadata.get("aliases", []))) or []
+            alias_groups_value = page.get("alias_groups", "[]") or "[]"
+            try:
+                alias_groups = json.loads(alias_groups_value) if isinstance(alias_groups_value, str) else alias_groups_value
+            except (TypeError, ValueError):
+                alias_groups = []
+            if not isinstance(alias_groups, list):
+                alias_groups = []
+            aliases = page.get("aliases", metadata.get("\u5225\u540d", metadata.get("aliases", []))) or []
             if isinstance(aliases, str):
-                aliases = re.split(r"[|,、]", aliases)
+                aliases = re.split(r"[|,\u3001]", aliases)
             aliases = [str(value).strip() for value in aliases if str(value).strip()]
+            for group in alias_groups:
+                if not isinstance(group, dict):
+                    continue
+                for alias in group.get("aliases", []):
+                    if not isinstance(alias, dict):
+                        continue
+                    for value in (alias.get("title"), alias.get("annotation")):
+                        value = str(value or "").strip()
+                        if value and value not in aliases:
+                            aliases.append(value)
             category = str(page.get("category", metadata.get("カテゴリ", "")) or "")
             subtitle = str(page.get("subtitle", page.get("meta_title", metadata.get("メタタイトル", ""))) or "")
             page_url = str(page.get("url") or "").strip()
@@ -826,6 +901,7 @@ class BackroomsAPI:
                 "has_strikethrough": bool(page.get("has_strikethrough", False)),
                 "strikethrough_spans": page.get("strikethrough_spans", "[]"),
                 "aliases": aliases,
+                "alias_groups": json.dumps(alias_groups, ensure_ascii=False),
                 "category": category,
                 "category_label": page.get("category_label", metadata.get("カテゴリ名", "")),
                 "source_type": page.get("source_type", ""),
@@ -846,7 +922,7 @@ class BackroomsAPI:
             title = self._extract_level_id_from_filename(path)
             if title:
                 unique_results["local:" + title_key] = {
-                    "title": title, "subtitle": "", "aliases": [],
+                    "title": title, "subtitle": "", "aliases": [], "alias_groups": "[]",
                     "category": "", "category_label": "", "source_type": "",
                     "url": "", "indexes": "", "language": "JP", "saved": True,
                 }
@@ -885,7 +961,34 @@ class BackroomsAPI:
     def get_level_detail(self, level_id, page_url=None):
         """本文TXTからメタタイトル・危険度・理解度を直接パースし、画像を確実に連結"""
         master = load_master_database()
-        page_info = master.get(str(page_url or "").strip()) if page_url else None
+        requested_url = str(page_url or "").strip()
+        page_info = master.get(requested_url) if requested_url else None
+        if page_info is None and requested_url:
+            for canonical_page in master.values():
+                try:
+                    groups = json.loads(canonical_page.get("alias_groups") or "[]")
+                except (TypeError, ValueError):
+                    groups = []
+                if not isinstance(groups, list):
+                    continue
+                redirect_match = next(
+                    (
+                        (group, alias)
+                        for group in groups if isinstance(group, dict)
+                        for alias in group.get("aliases", [])
+                        if isinstance(alias, dict)
+                        and str(alias.get("url") or "").strip() == requested_url
+                    ),
+                    None,
+                )
+                if redirect_match:
+                    group, _alias = redirect_match
+                    canonical = group.get("canonical") or {}
+                    canonical_url = str(canonical.get("url") or canonical_page.get("url") or "").strip()
+                    page_info = master.get(canonical_url) or canonical_page
+                    page_url = canonical_url
+                    level_id = str(canonical.get("title") or page_info.get("title") or level_id)
+                    break
         if page_info is None and not page_url:
             page_info = next(
                 (page for page in master.values()
@@ -2084,6 +2187,7 @@ HTML_TEMPLATE = r"""
             <div class="min-w-0 flex-1">
               <div class="text-xs text-[#8c6b12]">Backrooms Wiki — 階層の一覧</div>
               <h2 id="explorer-index-category-title" class="text-2xl font-semibold text-[#3f3828]"></h2>
+              <p id="explorer-index-category-note" class="hidden mt-1 text-xs text-gray-500">別名を選択すると対応する正規記事を開きます。</p>
             </div>
             <span id="explorer-index-total" class="text-xs text-gray-500"></span>
           </div>
@@ -3211,12 +3315,59 @@ HTML_TEMPLATE = r"""
         return;
       }
       list.slice(0, 80).forEach(item => {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'mb-1 block w-full rounded border border-transparent px-2 py-1.5 text-left hover:border-[#dfd3a8] hover:bg-white';
-        button.innerHTML = `<span class="mr-1">${item.saved ? '📖' : '↗'}</span><span class="font-semibold text-[#1558a6]">${escapeHTML(item.title)}</span>${item.subtitle ? `<span class="block pl-5 text-[10px] text-gray-500">${escapeHTML(item.subtitle)}</span>` : ''}`;
+        const result = document.createElement("div");
+        result.className = "mb-2 rounded border border-transparent px-2 py-1.5 hover:border-[#dfd3a8] hover:bg-white";
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "block w-full text-left";
+        const titleLine = document.createElement("span");
+        titleLine.className = "font-semibold text-[#1558a6]";
+        titleLine.textContent = (item.saved ? "[saved] " : "[open] ") + (item.title || "");
+        button.appendChild(titleLine);
+        if (item.subtitle) {
+          const subtitle = document.createElement("span");
+          subtitle.className = "block pl-5 text-[10px] text-gray-500";
+          subtitle.textContent = item.subtitle;
+          button.appendChild(subtitle);
+        }
         button.onclick = () => selectLevelCandidate(item);
-        host.appendChild(button);
+        result.appendChild(button);
+
+        let aliasGroups = [];
+        try {
+          aliasGroups = JSON.parse(item.alias_groups || "[]");
+        } catch (_) {}
+        if (Array.isArray(aliasGroups)) {
+          aliasGroups.forEach(group => {
+            if (!group || !Array.isArray(group.aliases) || !group.aliases.length) return;
+            const path = Array.isArray(group.section_path) ? group.section_path : [];
+            const heading = path.length ? String(path[path.length - 1].heading || "") : "";
+            if (heading) {
+              const groupLabel = document.createElement("div");
+              groupLabel.className = "ml-5 mt-2 text-[10px] font-semibold text-gray-500";
+              groupLabel.textContent = heading;
+              result.appendChild(groupLabel);
+            }
+            group.aliases.forEach(alias => {
+              if (!alias || !alias.title) return;
+              const child = document.createElement("button");
+              child.type = "button";
+              child.className = "ml-5 mt-1 block max-w-[calc(100%-1.25rem)] rounded px-2 py-1 text-left text-xs text-[#8a5a23] hover:bg-[#fff7dd] hover:underline";
+              child.textContent = "\u5225\u540d: " + alias.title + (alias.annotation ? " (" + alias.annotation + ")" : "");
+              child.onclick = () => {
+                const canonical = group.canonical || {};
+                selectLevelCandidate({
+                  ...item,
+                  title: canonical.title || item.title,
+                  url: canonical.url || item.url,
+                  saved: Boolean(item.saved),
+                });
+              };
+              result.appendChild(child);
+            });
+          });
+        }
+        host.appendChild(result);
       });
     }
 
@@ -3431,6 +3582,7 @@ HTML_TEMPLATE = r"""
         : getLevelListCategories(explorerIndexPages.length ? explorerIndexPages : levelSearchResults)
             .find(item => item.id === categoryId);
       document.getElementById('explorer-index-category-title').textContent = category?.title || '階層の一覧';
+      document.getElementById('explorer-index-category-note')?.classList.toggle('hidden', categoryId !== 'alias');
       renderExplorerCategorySections(categoryId);
     }
 
@@ -3516,6 +3668,76 @@ HTML_TEMPLATE = r"""
         row.appendChild(badge);
         host.appendChild(row);
       });
+      const appendAliasGroups = items => {
+        const groups = [];
+        items.forEach(page => {
+          let parsed = [];
+          try {
+            parsed = JSON.parse(page.alias_groups || "[]");
+          } catch (_) {}
+          if (!Array.isArray(parsed)) return;
+          parsed.forEach(group => {
+            if (group && typeof group === "object") groups.push({page, group});
+          });
+        });
+        groups.sort((left, right) =>
+          Number(left.group.section_order || 0) - Number(right.group.section_order || 0) ||
+          Number(left.group.group_order || 0) - Number(right.group.group_order || 0)
+        );
+        groups.forEach(({page, group}) => {
+          const canonical = group.canonical || {};
+          const card = document.createElement("div");
+          card.className = "mb-3 rounded-lg border border-[#dfd3b5] bg-white px-3 py-2 shadow-sm";
+          const parent = document.createElement("div");
+          parent.className = "flex flex-wrap items-center gap-2 text-sm font-semibold";
+          const parentLink = document.createElement("a");
+          parentLink.href = canonical.url || page.url || "#";
+          parentLink.className = "text-[#9b3d06] hover:underline";
+          parentLink.textContent = canonical.title || page.title || "\u6b63\u898f\u8a18\u4e8b";
+          parentLink.onclick = event => {
+            event.preventDefault();
+            openExplorerCandidate({...page, title: canonical.title || page.title, url: canonical.url || page.url});
+          };
+          const parentTag = document.createElement("span");
+          parentTag.className = "rounded bg-[#eee8d8] px-1.5 py-0.5 text-[10px] text-[#67583c]";
+          parentTag.textContent = "\u6b63\u898f\u8a18\u4e8b";
+          parent.append(parentLink, parentTag);
+          card.appendChild(parent);
+          const children = Array.isArray(group.aliases) ? group.aliases : [];
+          children.forEach(alias => {
+            if (!alias || !alias.title) return;
+            const child = document.createElement("div");
+            child.className = "ml-4 mt-2 flex flex-wrap items-baseline gap-x-2 gap-y-1 border-l-2 border-[#e8dfca] pl-3 text-sm";
+            const link = document.createElement("a");
+            link.href = canonical.url || page.url || "#";
+            link.className = "text-[#8a5a23] hover:underline";
+            link.textContent = alias.title;
+            link.onclick = event => {
+              event.preventDefault();
+              openExplorerCandidate({
+                ...page,
+                title: canonical.title || page.title,
+                url: canonical.url || page.url,
+                saved: Boolean(page.saved),
+              });
+            };
+            child.appendChild(link);
+            if (alias.annotation) {
+              const note = document.createElement("span");
+              note.className = "text-xs text-gray-500";
+              note.textContent = "(" + alias.annotation + ")";
+              child.appendChild(note);
+            }
+            const aliasBadge = document.createElement("span");
+            aliasBadge.className = "rounded bg-[#f2ead7] px-1.5 py-0.5 text-[10px] text-[#80643b]";
+            aliasBadge.textContent = "\u5225\u540d";
+            child.appendChild(aliasBadge);
+            card.appendChild(child);
+          });
+          host.appendChild(card);
+        });
+      };
+
       sections.forEach(section => {
         appendHeading(section.title, section.key, section.level === 4 ? 4 : 3);
         if (section.wikiCategory) {
@@ -3544,6 +3766,8 @@ HTML_TEMPLATE = r"""
               appendHeading(label, `eta-${range}`, 4);
               appendPages(items, true);
             });
+        } else if (categoryId === "alias") {
+          appendAliasGroups(section.pages);
         } else {
           appendPages(section.pages, section.level === 4);
         }
@@ -3965,6 +4189,33 @@ HTML_TEMPLATE = r"""
         });
       });
     }
+
+    // 図鑑内のローカルWikiリンクは、修飾クリックでもOSブラウザーへ渡さず内蔵タブで開く。
+    function openExplorerLinkInNewTabFromEvent(event) {
+      const isMiddleClick = event.type === 'auxclick' && event.button === 1;
+      const isModifiedClick = event.type === 'click' && event.button === 0 &&
+        (event.ctrlKey || event.metaKey || event.shiftKey);
+      if (!isMiddleClick && !isModifiedClick) return;
+      const link = event.target instanceof Element
+        ? event.target.closest('#explorer-article-view a[href]')
+        : null;
+      if (!link) return;
+      let targetUrl;
+      try {
+        targetUrl = new URL(link.href, window.location.href);
+      } catch (_) {
+        return;
+      }
+      if (targetUrl.hostname !== 'backrooms.fandom.com' ||
+          !targetUrl.pathname.startsWith('/ja/wiki/')) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      openExplorerWikiTarget(targetUrl.href, true);
+    }
+
+    document.addEventListener('click', openExplorerLinkInNewTabFromEvent, true);
+    document.addEventListener('auxclick', openExplorerLinkInNewTabFromEvent, true);
 
     function formatWikiContent(text) {
       if (!text) return "";
@@ -4406,7 +4657,12 @@ HTML_TEMPLATE = r"""
           return sources.includes("translation") || category === "translation";
         }
         if (categoryId === "alias") {
-          return category === "alias" || source === "alias" || pageHasIndexMembership(page, "alias");
+          try {
+            const groups = JSON.parse(page.alias_groups || "[]");
+            return Array.isArray(groups) && groups.length > 0;
+          } catch (_) {
+            return false;
+          }
         }
         if (categoryId === "terms") {
           return category === "terms" || source === "terms" || pageHasIndexMembership(page, "terms");

@@ -2341,7 +2341,7 @@ HTML_TEMPLATE = r"""
         word-break: break-word !important;
       }
 
-      /* 縦長コンパクトテーブルは画面と同じ単一DOMの2列構造で印刷する */
+      /* 印刷専用のページ単位2列チャンクを1ページ内に保持する */
       /* 表の直前で不自然な改ページを避け、直前見出しと表の開始をまとめる */
       #wiki-page-container .term-article h2,
       #wiki-page-container .term-article h3,
@@ -2363,13 +2363,28 @@ HTML_TEMPLATE = r"""
         break-inside: auto !important;
         page-break-inside: auto !important;
       }
-      .term-table-wrap[data-compact-table-wrap="true"] .term-table-compact-grid {
+      .term-table-wrap[data-compact-table-wrap="true"] .term-table-print-pages {
+        display: block !important;
+        width: 100% !important;
+        max-width: 100% !important;
+      }
+      .term-table-wrap[data-compact-table-wrap="true"] .term-table-print-page-chunk {
+        display: block !important;
+        width: 100% !important;
+        break-inside: avoid-page !important;
+        page-break-inside: avoid !important;
+      }
+      .term-table-wrap[data-compact-table-wrap="true"] .term-table-print-page-chunk.term-table-print-page-break {
+        break-before: page !important;
+        page-break-before: always !important;
+      }
+      .term-table-wrap[data-compact-table-wrap="true"] .term-table-print-page-chunk .term-table-compact-grid {
         display: grid !important;
         grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
         gap: 3mm !important;
         width: 100% !important;
       }
-      .term-table-wrap[data-compact-table-wrap="true"] .term-table-compact-grid table {
+      .term-table-wrap[data-compact-table-wrap="true"] .term-table-print-page-chunk table {
         display: table !important;
         width: 100% !important;
         min-width: 0 !important;
@@ -5416,6 +5431,184 @@ HTML_TEMPLATE = r"""
         wrapper.replaceChildren(compactGrid);
       });
     }
+
+    // 印刷時だけ、元の行順をページ単位の逆Nの字2列へ再組版する。
+    let compactPrintSnapshots = [];
+    let compactPrintHeadingSnapshots = [];
+
+    function clonePrintTablePart(node) {
+      if (!node) return null;
+      const clone = node.cloneNode(true);
+      if (clone.nodeType === Node.ELEMENT_NODE) {
+        clone.removeAttribute('id');
+        clone.querySelectorAll('[id]').forEach(element => element.removeAttribute('id'));
+      }
+      return clone;
+    }
+
+    function restoreCompactArticleTablesAfterPrint() {
+      compactPrintSnapshots.forEach(snapshot => {
+        if (snapshot.wrapper && snapshot.printContainer && snapshot.originalGrid) {
+          snapshot.wrapper.replaceChild(snapshot.originalGrid, snapshot.printContainer);
+        }
+        if (snapshot.wrapper) {
+          if (snapshot.wrapperBreakBefore) snapshot.wrapper.style.setProperty('break-before', snapshot.wrapperBreakBefore, snapshot.wrapperBreakBeforePriority);
+          else snapshot.wrapper.style.removeProperty('break-before');
+          if (snapshot.wrapperPageBreakBefore) snapshot.wrapper.style.setProperty('page-break-before', snapshot.wrapperPageBreakBefore, snapshot.wrapperPageBreakBeforePriority);
+          else snapshot.wrapper.style.removeProperty('page-break-before');
+        }
+      });
+      compactPrintSnapshots = [];
+      compactPrintHeadingSnapshots.forEach(snapshot => {
+        if (!snapshot.element) return;
+        if (snapshot.breakBefore) snapshot.element.style.setProperty('break-before', snapshot.breakBefore, snapshot.breakBeforePriority);
+        else snapshot.element.style.removeProperty('break-before');
+        if (snapshot.pageBreakBefore) snapshot.element.style.setProperty('page-break-before', snapshot.pageBreakBefore, snapshot.pageBreakBeforePriority);
+        else snapshot.element.style.removeProperty('page-break-before');
+      });
+      compactPrintHeadingSnapshots = [];
+    }
+
+    function prepareCompactArticleTablesForPrint() {
+      restoreCompactArticleTablesAfterPrint();
+      const article = document.getElementById('wiki-page-container');
+      if (!article) return;
+
+      const pageProbe = document.createElement('div');
+      pageProbe.style.cssText = 'position:absolute;visibility:hidden;pointer-events:none;width:1px;height:273mm;left:-10000px;top:0;';
+      article.appendChild(pageProbe);
+      const pageHeight = pageProbe.getBoundingClientRect().height || 1032;
+      pageProbe.remove();
+      const pageSafety = document.body.dataset.printStaple === 'true' && document.body.dataset.stapleEdge === 'top' ? 30 : 16;
+      const usablePageHeight = Math.max(300, pageHeight - pageSafety);
+
+      const wrappers = Array.from(article.querySelectorAll('.term-table-wrap[data-compact-table-wrap="true"]'));
+      wrappers.forEach(wrapper => {
+        const originalGrid = wrapper.querySelector(':scope > .term-table-compact-grid');
+        if (!originalGrid) return;
+        const sourceTables = Array.from(originalGrid.querySelectorAll(':scope > table.term-table-compact-half'));
+        if (sourceTables.length < 2) return;
+        const leftTable = sourceTables[0];
+        const rightTable = sourceTables[1];
+        const leftRows = Array.from(leftTable.tBodies[0]?.rows || []);
+        const rightRows = Array.from(rightTable.tBodies[0]?.rows || []);
+        const orderedRows = leftRows.concat(rightRows);
+        if (!orderedRows.length) return;
+
+        const firstHeader = leftTable.tHead;
+        const headerHeight = firstHeader?.getBoundingClientRect().height || 22;
+        const captionHeight = leftTable.caption?.getBoundingClientRect().height || 0;
+        const rowHeights = orderedRows.map(row => Math.max(8, row.getBoundingClientRect().height || 16));
+
+        // 見出し直後の残り領域に最低9行分が入らない場合は見出しごと送る。
+        let precedingHeading = null;
+        const walker = document.createTreeWalker(article, NodeFilter.SHOW_ELEMENT);
+        let currentNode;
+        while ((currentNode = walker.nextNode())) {
+          if (currentNode === wrapper) break;
+          if (/^H[2-6]$/.test(currentNode.tagName) || currentNode.classList.contains('wiki-heading')) {
+            precedingHeading = currentNode;
+          }
+        }
+        const wrapperRect = wrapper.getBoundingClientRect();
+        const averageRowHeight = rowHeights.reduce((sum, value) => sum + value, 0) / rowHeights.length;
+        if (precedingHeading) {
+          const headingRect = precedingHeading.getBoundingClientRect();
+          const headingOffset = ((headingRect.top % pageHeight) + pageHeight) % pageHeight;
+          const requiredForHeading = headingRect.height + captionHeight + headerHeight + averageRowHeight * 9 + 18;
+          if (usablePageHeight - headingOffset < requiredForHeading) {
+            compactPrintHeadingSnapshots.push({
+              element: precedingHeading,
+              breakBefore: precedingHeading.style.getPropertyValue('break-before'),
+              breakBeforePriority: precedingHeading.style.getPropertyPriority('break-before'),
+              pageBreakBefore: precedingHeading.style.getPropertyValue('page-break-before'),
+              pageBreakBeforePriority: precedingHeading.style.getPropertyPriority('page-break-before')
+            });
+            precedingHeading.style.setProperty('break-before', 'page', 'important');
+            precedingHeading.style.setProperty('page-break-before', 'always', 'important');
+          }
+        }
+
+        // 見出し移動後の実レイアウトから、初回ページに残る高さを再計測する。
+        const refreshedTop = wrapper.getBoundingClientRect().top;
+        let firstPageOffset = ((refreshedTop % pageHeight) + pageHeight) % pageHeight;
+        let firstCapacity = usablePageHeight - firstPageOffset;
+        let wrapperBreakBefore = wrapper.style.getPropertyValue('break-before');
+        let wrapperBreakBeforePriority = wrapper.style.getPropertyPriority('break-before');
+        let wrapperPageBreakBefore = wrapper.style.getPropertyValue('page-break-before');
+        let wrapperPageBreakBeforePriority = wrapper.style.getPropertyPriority('page-break-before');
+        if (firstCapacity < headerHeight + averageRowHeight * 9 + captionHeight) {
+          if (!precedingHeading || !compactPrintHeadingSnapshots.some(snapshot => snapshot.element === precedingHeading)) {
+            wrapper.style.setProperty('break-before', 'page', 'important');
+            wrapper.style.setProperty('page-break-before', 'always', 'important');
+          }
+          firstCapacity = usablePageHeight;
+        }
+
+        const printContainer = document.createElement('div');
+        printContainer.className = 'term-table-print-pages';
+        const makeHalf = (rows, includeCaption) => {
+          const table = leftTable.cloneNode(false);
+          table.removeAttribute('id');
+          table.classList.add('term-table-compact-half');
+          if (includeCaption && leftTable.caption) table.appendChild(clonePrintTablePart(leftTable.caption));
+          const colgroup = leftTable.querySelector(':scope > colgroup');
+          if (colgroup) table.appendChild(clonePrintTablePart(colgroup));
+          if (firstHeader) table.appendChild(clonePrintTablePart(firstHeader));
+          const body = document.createElement('tbody');
+          rows.forEach(row => body.appendChild(clonePrintTablePart(row)));
+          table.appendChild(body);
+          return table;
+        };
+
+        let rowStart = 0;
+        let pageIndex = 0;
+        while (rowStart < orderedRows.length) {
+          const capacity = Math.max(180, (pageIndex === 0 ? firstCapacity : usablePageHeight) - headerHeight - (pageIndex === 0 ? captionHeight : 0) - 12);
+          let bestEnd = rowStart;
+          const maxEnd = Math.min(orderedRows.length, rowStart + 84);
+          for (let candidateEnd = rowStart + 1; candidateEnd <= maxEnd; candidateEnd += 1) {
+            const count = candidateEnd - rowStart;
+            const splitAt = Math.ceil(count / 2);
+            const leftHeight = rowHeights.slice(rowStart, rowStart + splitAt).reduce((sum, value) => sum + value, 0);
+            const rightHeight = rowHeights.slice(rowStart + splitAt, candidateEnd).reduce((sum, value) => sum + value, 0);
+            if (leftHeight <= capacity && rightHeight <= capacity) bestEnd = candidateEnd;
+            else break;
+          }
+          if (bestEnd <= rowStart) bestEnd = Math.min(orderedRows.length, rowStart + 2);
+          const chunkRows = orderedRows.slice(rowStart, bestEnd);
+          const splitAt = Math.ceil(chunkRows.length / 2);
+          const pageChunk = document.createElement('section');
+          pageChunk.className = 'term-table-print-page-chunk';
+          if (pageIndex > 0) pageChunk.classList.add('term-table-print-page-break');
+          const pageGrid = document.createElement('div');
+          pageGrid.className = 'term-table-compact-grid';
+          pageGrid.setAttribute('aria-label', '印刷ページ内の左右2列テーブル');
+          pageGrid.append(
+            makeHalf(chunkRows.slice(0, splitAt), pageIndex === 0),
+            makeHalf(chunkRows.slice(splitAt), false)
+          );
+          pageChunk.appendChild(pageGrid);
+          printContainer.appendChild(pageChunk);
+          rowStart = bestEnd;
+          pageIndex += 1;
+        }
+
+        compactPrintSnapshots.push({
+          wrapper,
+          originalGrid,
+          printContainer,
+          wrapperBreakBefore,
+          wrapperBreakBeforePriority,
+          wrapperPageBreakBefore,
+          wrapperPageBreakBeforePriority
+        });
+        wrapper.replaceChild(printContainer, originalGrid);
+      });
+    }
+
+    window.addEventListener('beforeprint', prepareCompactArticleTablesForPrint);
+    window.addEventListener('afterprint', restoreCompactArticleTablesAfterPrint);
 
     // レベル詳細の印刷
     function printLevelArticle() {

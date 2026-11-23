@@ -3841,16 +3841,19 @@ HTML_TEMPLATE = r"""
         return;
       }
       const appendHeading = (title, key, level = 3) => {
-        const heading = document.createElement(level === 3 ? 'h3' : 'h4');
+        const headingLevel = Math.min(6, Math.max(2, Number(level) || 3));
+        const heading = document.createElement(`h${headingLevel}`);
         heading.id = `explorer-section-${key}`;
-        heading.className = level === 3
+        heading.className = headingLevel <= 3
           ? 'sticky top-0 z-10 -mx-5 mb-2 border-b border-[#d8c99e] bg-[#fff8dc] px-4 py-2 text-xl font-semibold text-[#3f3828]'
           : 'mb-1 mt-3 border-b border-[#eee5ce] px-2 py-1 text-sm font-semibold text-gray-700';
+        heading.style.marginLeft = `${Math.max(0, headingLevel - 3) * 12}px`;
         heading.textContent = title;
         host.appendChild(heading);
         const link = document.createElement('a');
         link.href = `#${heading.id}`;
-        link.className = level === 3 ? 'mb-1 block rounded px-2 py-1 text-gray-700 hover:bg-[#fff7dd] hover:text-[#9b3d06]' : 'mb-1 ml-3 block rounded px-2 py-1 text-gray-600 hover:bg-[#fff7dd]';
+        link.className = headingLevel <= 3 ? 'mb-1 block rounded px-2 py-1 text-gray-700 hover:bg-[#fff7dd] hover:text-[#9b3d06]' : 'mb-1 block rounded px-2 py-1 text-gray-600 hover:bg-[#fff7dd]';
+        link.style.paddingLeft = `${Math.max(0, headingLevel - 3) * 12 + 8}px`;
         link.textContent = title;
         link.onclick = event => { event.preventDefault(); heading.scrollIntoView({block: 'start'}); };
         toc.appendChild(link);
@@ -3962,7 +3965,8 @@ HTML_TEMPLATE = r"""
       };
 
       sections.forEach(section => {
-        appendHeading(section.title, section.key, section.level === 4 ? 4 : 3);
+        const sectionLevel = Number(section.level) || 3;
+        appendHeading(section.title, section.key, sectionLevel);
         if (section.wikiCategory) {
           const dedicatedLink = document.createElement("button");
           dedicatedLink.type = "button";
@@ -3992,7 +3996,7 @@ HTML_TEMPLATE = r"""
         } else if (categoryId === "alias") {
           appendAliasGroups(section.pages);
         } else {
-          appendPages(section.pages, section.level === 4);
+          appendPages(section.pages, sectionLevel > 3);
         }
       });
     }
@@ -5147,6 +5151,56 @@ HTML_TEMPLATE = r"""
     }
 
     function getLevelListSections(pages, categoryId = currentLevelListCategory) {
+      if (categoryId === "translation") {
+        const sections = new Map();
+        const orderedPages = pages.slice().sort((left, right) =>
+          compareWikiMembershipOrder(left, right, "translation")
+        );
+        orderedPages.forEach(page => {
+          const membership = getWikiMembership(page, "translation");
+          if (!membership || !Array.isArray(membership.section_path)) return;
+          const path = membership.section_path
+            .filter(item => item && item.heading && String(item.heading).trim() !== "目次")
+            .map(item => ({
+              level: Math.min(6, Math.max(2, Number(item.level) || 2)),
+              heading: String(item.heading)
+                .replace(/\s*\[[ xX\u2713\u2714]?\]\s*$/, "").trim(),
+            }))
+            .filter(item => item.heading);
+          path.forEach((item, index) => {
+            const prefix = path.slice(0, index + 1);
+            const key = "translation:" + JSON.stringify(prefix);
+            const sectionOrder = Number(membership.section_order || 0);
+            if (!sections.has(key)) {
+              sections.set(key, {
+                key,
+                title: item.heading,
+                level: item.level,
+                depth: index,
+                order: sectionOrder,
+                sequence: sections.size,
+                pages: [],
+              });
+            }
+            const section = sections.get(key);
+            section.order = Math.min(section.order, sectionOrder);
+            if (index === path.length - 1) section.pages.push(page);
+          });
+        });
+        return Array.from(sections.values())
+          .map(section => ({
+            ...section,
+            pages: section.pages.sort((left, right) =>
+              compareWikiMembershipOrder(left, right, "translation")
+            ),
+          }))
+          .sort((left, right) =>
+            left.order - right.order ||
+            left.depth - right.depth ||
+            left.sequence - right.sequence
+          );
+      }
+
       if (["enigmatic", "sublevel", "alias", "terms", "contest"].includes(categoryId)) {
         const groups = new Map();
         const sectionIndex = {alias: "alias", terms: "terms", contest: "contest"}[categoryId] || "";
@@ -5406,14 +5460,19 @@ HTML_TEMPLATE = r"""
       }
       sections.forEach(section => {
         const sectionId = `level-range-${section.key}`;
-        const heading = document.createElement('h4');
+        const headingLevel = Math.min(6, Math.max(2, Number(section.level) || 4));
+        const heading = document.createElement(`h${headingLevel}`);
         heading.id = sectionId;
-        heading.className = "sticky top-0 z-10 border-b border-[#d8c99e] bg-[#fff8dc] px-3 py-2 text-base font-semibold text-gray-800";
+        heading.className = headingLevel <= 3
+          ? "sticky top-0 z-10 border-b border-[#d8c99e] bg-[#fff8dc] px-3 py-2 text-base font-semibold text-gray-800"
+          : "border-b border-[#eee5ce] bg-white px-3 py-1.5 text-sm font-semibold text-gray-700";
+        heading.style.marginLeft = `${Math.max(0, headingLevel - 3) * 12}px`;
         heading.textContent = section.title;
         grid.appendChild(heading);
         const tocLink = document.createElement('a');
         tocLink.href = `#${sectionId}`;
         tocLink.className = "block rounded px-2 py-1 text-gray-700 hover:bg-[#fff7dd] hover:text-[#9b3d06]";
+        tocLink.style.paddingLeft = `${Math.max(0, headingLevel - 2) * 12 + 8}px`;
         tocLink.textContent = section.title;
         tocLink.onclick = event => {
           event.preventDefault();
